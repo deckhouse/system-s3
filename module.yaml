@@ -1,0 +1,23 @@
+name: "sds-object-system"
+stage: "Experimental"
+subsystems:
+  - storage
+descriptions:
+  en: "Provides the platform's system S3 object storage."
+  ru: "Предоставляет системное объектное хранилище S3 для платформы."
+requirements:
+  deckhouse: ">= 1.72"
+namespace: d8-sds-object-system
+disable:
+  confirmation: true
+  message: |
+    Attention!
+
+    Disabling this module stops the controller that runs the system object storage and removes its data plane. Platform components that keep their data in system buckets (S3 credentials Secrets issued for SystemBucket resources) lose access to it, and the stored objects are lost.
+
+    Before disabling the module, be sure to do the following:
+
+    - Make sure no Deckhouse component still consumes a system bucket, then delete the SystemBucket resources and wait until the controller has removed the buckets and revoked their access keys.
+    - Check for remaining resources with: `kubectl get systembuckets.storage.deckhouse.io -A` (short name: `sb`). If any objects are listed, remove them before deactivating the module.
+
+    Failure to do so may result in data loss for the platform components that use the system object storage.

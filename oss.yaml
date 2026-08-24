@@ -1,0 +1,7 @@
+- name: Garage
+  link: https://git.deuxfleurs.fr/Deuxfleurs/garage
+  description: Garage is an S3-compatible, distributed, lightweight object storage service designed for self-hosting. It backs the system object storage this module provides to the platform's own components.
+  logo: https://avatars.githubusercontent.com/u/82232597?s=200&v=4
+  license: GNU Affero General Public License v3.0
+  id: garage
+  version: "2.3.0"

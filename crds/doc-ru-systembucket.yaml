@@ -1,0 +1,102 @@
+spec:
+  versions:
+    - name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: |
+            Запрашивает бакет в системном объектном хранилище платформы.
+            Контроллер создаёт бакет в системном бэкенде, выпускает для него
+            отдельную пару access key / secret key и кладёт в тот же namespace
+            Secret (см. `status.secretRef`) со стандартными переменными
+            подключения к S3.
+
+            Ресурс предназначен только для компонентов Deckhouse. Он
+            принимается исключительно в namespace с лейблом
+            `heritage: deckhouse`, пользовательских прав на него не выдаётся.
+
+            Учётные данные выдаются вместе с бакетом — отдельного ресурса
+            доступа нет, — и политики хранения данных тоже нет: **удаление
+            SystemBucket удаляет бакет и все объекты в нём.**
+
+            Ротация ключей: установите или измените аннотацию
+            `storage.deckhouse.io/rotate`, чтобы выпустить новую пару ключей
+            (Secret обновляется, предыдущий ключ отзывается).
+          properties:
+            spec:
+              description: |
+                Желаемое состояние бакета.
+              properties:
+                bucketName:
+                  description: |
+                    Имя бакета в S3. По умолчанию
+                    `<metadata.namespace>-<metadata.name>`: пространство имён
+                    бакетов в бэкенде плоское, а SystemBucket — namespaced,
+                    поэтому такое значение по умолчанию не даёт двум компонентам
+                    занять одно и то же имя. Неизменяемо после создания.
+                credentialsSecretName:
+                  description: |
+                    Переопределяет имя Secret с учётными данными в namespace
+                    бакета. По умолчанию `<metadata.name>-s3-credentials`.
+            status:
+              description: |
+                Наблюдаемое состояние бакета.
+              properties:
+                observedGeneration:
+                  description: |
+                    Последнее значение `metadata.generation`, обработанное контроллером.
+                phase:
+                  description: |
+                    Агрегатная фаза: `Pending`, `InProgress`, `Ready`, `Error`.
+                endpoint:
+                  description: |
+                    Внутрикластерный URL S3-эндпойнта системного хранилища.
+                bucketName:
+                  description: |
+                    Фактическое имя бакета, созданного в бэкенде.
+                accessKeyID:
+                  description: |
+                    Публичный идентификатор ключа доступа, выпущенного для этого
+                    бакета (secret key пишется только в Secret).
+                secretRef:
+                  description: |
+                    Ссылка на Secret (в namespace бакета) с переменными
+                    подключения и учётными данными: `S3_ENDPOINT`, `S3_REGION`,
+                    `S3_BUCKET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.
+                  properties:
+                    name:
+                      description: |
+                        Имя Secret.
+                observedRotation:
+                  description: |
+                    Последнее обработанное контроллером значение аннотации
+                    `storage.deckhouse.io/rotate`.
+                lastRotationTime:
+                  description: |
+                    Время последнего выпуска пары ключей.
+                conditions:
+                  description: |
+                    Состояния по стадиям: `StorageReady`, `BucketReady`,
+                    `CredentialsReady` и агрегатное `Ready`.
+                  items:
+                    properties:
+                      type:
+                        description: |
+                          Тип состояния, например `Ready`, `StorageReady`,
+                          `BucketReady` или `CredentialsReady`.
+                      status:
+                        description: |
+                          Текущий статус состояния.
+                      observedGeneration:
+                        description: |
+                          Значение `metadata.generation`, для которого состояние
+                          было выставлено в последний раз.
+                      lastTransitionTime:
+                        description: |
+                          Время последнего изменения статуса состояния.
+                      reason:
+                        description: |
+                          Машиночитаемая причина текущего статуса, пригодная для
+                          фильтрации в логах.
+                      message:
+                        description: |
+                          Человекочитаемое пояснение текущего статуса.

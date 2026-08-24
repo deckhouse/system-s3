@@ -1,0 +1,116 @@
+/*
+Copyright 2026 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/deckhouse/sds-object-system/images/controller/internal/backend"
+	"github.com/deckhouse/sds-object-system/images/controller/internal/backend/garage"
+	"github.com/deckhouse/sds-object-system/images/controller/pkg/logger"
+)
+
+// StoreManager owns the module's single system data plane.
+//
+// The data plane has no custom resource, so there is no object to reconcile it
+// from and no status to publish it on: the desired state comes from the module
+// settings (a backend.Store built once at startup) and the observed state is
+// cached here for the SystemBucket reconciler to gate on as StorageReady.
+//
+// It converges the data plane from two directions. Every SystemBucket reconcile
+// calls Ensure first, so a consumer arriving before the store is up drives it;
+// and Start ticks in the background, so the store is built and kept converged
+// even when the cluster holds no SystemBucket at all — which is the normal state
+// of a fresh installation, and the one where waiting for a consumer to show up
+// would mean the first consumer waits for a whole Garage bootstrap.
+//
+// Ensure is serialized: the ticker and the reconciler both call it, and the
+// driver's reconcile is not safe to run twice concurrently (it pins the
+// replication factor, recycles PVCs and rewrites the Garage layout).
+type StoreManager struct {
+	driver   *garage.Driver
+	store    *backend.Store
+	log      *logger.Logger
+	interval time.Duration
+
+	mu    sync.Mutex
+	state backend.StoreState
+}
+
+// NewStoreManager builds the manager for the given store description.
+func NewStoreManager(driver *garage.Driver, store *backend.Store, log *logger.Logger, interval time.Duration) *StoreManager {
+	return &StoreManager{
+		driver:   driver,
+		store:    store,
+		log:      log,
+		interval: interval,
+		state:    backend.StoreState{Message: "the system object storage has not been reconciled yet"},
+	}
+}
+
+// Store is the desired-state description the driver calls take.
+func (m *StoreManager) Store() *backend.Store { return m.store }
+
+// Ensure reconciles the data plane and returns its observed state.
+func (m *StoreManager) Ensure(ctx context.Context) (backend.StoreState, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	state, err := m.driver.EnsureStore(ctx, m.store)
+	if err != nil {
+		// Keep the last good state: the caller reports the error, and a failed
+		// probe is not evidence that the store went away.
+		return m.state, err
+	}
+	if state.Ready != m.state.Ready {
+		m.log.Info(fmt.Sprintf("[StoreManager] system object storage ready=%t: %s", state.Ready, state.Message))
+	}
+	m.state = state
+	return state, nil
+}
+
+// State returns the last observed state without touching the backend.
+func (m *StoreManager) State() backend.StoreState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.state
+}
+
+// Start runs the background convergence loop. It satisfies manager.Runnable, so
+// the controller-runtime manager starts it after the caches sync and stops it on
+// shutdown; leader election keeps it to one replica.
+func (m *StoreManager) Start(ctx context.Context) error {
+	ticker := time.NewTicker(m.interval)
+	defer ticker.Stop()
+
+	for {
+		if _, err := m.Ensure(ctx); err != nil {
+			// Log and keep ticking: the data plane is reconciled again on the next
+			// tick, and returning an error here would take the whole manager down
+			// over a transient backend failure.
+			m.log.Error(err, "[StoreManager] reconciling the system object storage")
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+}

@@ -1,0 +1,7 @@
+Изменения:
+  - Первоначальный релиз модуля в стадии Experimental. Модуль запускает собственное S3-хранилище платформы на Garage и выдаёт его через один namespaced-ресурс SystemBucket
+  - У data plane нет своего custom resource: модуль владеет ровно одним store, сводит его из настроек модуля и размещает три реплики на control-plane узлах поверх node-sticky локальных PersistentVolume, которые создаёт сам
+  - SystemBucket принимается только в namespace, принадлежащем модулю Deckhouse (метка heritage=deckhouse); у него нет политики высвобождения и отдельного ресурса доступа, а Secret с учётными данными пишется рядом со стандартными переменными подключения S3
+  - Ключ доступа ротируется аннотацией storage.deckhouse.io/rotate
+  - storage.singleReplica сокращает store до одной реплики Garage; переключение пересобирает data plane и уничтожает всё, что в нём хранилось, в обе стороны
+  - Ресурсы модуля публикуют status.conditions и status.observedGeneration

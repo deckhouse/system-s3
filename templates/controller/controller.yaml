@@ -1,0 +1,67 @@
+{{- /* Webhook TLS Certs Secret */ -}}
+{{- $secretConfig := dict
+  "valuesKey" "sdsObjectSystem"
+  "webhookCertPath" "internal.customWebhookCert"
+}}
+{{ include "helm_lib_module_webhook_certs_secret" (list . $secretConfig) }}
+
+{{- /* Controller Deployment + VPA + PDB */ -}}
+{{- /*
+  helm_lib_module_controller_manifests already injects LOG_LEVEL (from
+  .Values.sdsObjectSystem.logLevel via helm_lib_module_controller_log_level) and
+  CONTROLLER_NAMESPACE (valueFrom fieldRef metadata.namespace).
+
+  The data plane has no custom resource, so its settings reach the controller as
+  environment: SINGLE_REPLICA, SIZE_PER_NODE and STORAGE_CLASS are what the
+  ObjectStore CR used to carry in the user-facing module.
+*/ -}}
+{{- $config := dict
+  "valuesKey" "sdsObjectSystem"
+  "onMasterNode" true
+  "podSecurityContext" "deckhouse"
+  "webhookEnabled" true
+  "webhookCertPath" "internal.customWebhookCert"
+  "additionalControllerEnvs" (list
+    (dict "name" "GARAGE_IMAGE" "value" (include "helm_lib_module_image" (list . "garage")))
+    (dict "name" "CLUSTER_DOMAIN" "value" .Values.global.discovery.clusterDomain)
+    (dict "name" "SINGLE_REPLICA" "value" (.Values.sdsObjectSystem.storage.singleReplica | toString))
+    (dict "name" "SIZE_PER_NODE" "value" .Values.sdsObjectSystem.storage.sizePerNode)
+    (dict "name" "STORAGE_CLASS" "value" "sds-object-system-local")
+  )
+}}
+{{ include "helm_lib_module_controller_manifests" (list . $config) }}
+
+{{- /* Webhook Service */ -}}
+{{ include "helm_lib_module_webhook_service" (list . dict) }}
+
+{{- /*
+  ValidatingWebhookConfiguration for SystemBucket (namespaced).
+
+  The scope must match the CRD: a rule scoped to Cluster never matches a
+  namespaced resource, so the API server would silently stop calling the webhook
+  and every SystemBucket — one in a tenant namespace included — would be
+  admitted.
+
+  failurePolicy is Fail on purpose. This webhook is the gate that keeps the
+  platform's system storage out of tenant namespaces, and admitting writes while
+  it is down would hand out system credentials on nobody's check. The controller
+  re-checks the same label before issuing credentials, so the two together fail
+  closed.
+*/ -}}
+{{- $systemBucketWebhookConfig := dict
+  "name" "systembucket-validation"
+  "webhookName" "systembucket-validation"
+  "valuesKey" "sdsObjectSystem"
+  "path" "/systembucket-validate"
+  "failurePolicy" "Fail"
+  "rules" (list
+    (dict
+      "apiGroups" (list "storage.deckhouse.io")
+      "apiVersions" (list "v1alpha1")
+      "operations" (list "CREATE" "UPDATE")
+      "resources" (list "systembuckets")
+      "scope" "Namespaced"
+    )
+  )
+}}
+{{ include "helm_lib_module_validating_webhook_configuration" (list . $systemBucketWebhookConfig) }}

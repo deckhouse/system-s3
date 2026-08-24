@@ -1,0 +1,99 @@
+---
+image: docs-generator
+from: {{ index $.Images "builder/golang-alt" }}
+final: false
+
+git:
+  - add: /
+    to: /
+    includePaths:
+      - CHANGELOG
+      - hack
+    stageDependencies:
+      setup:
+        - "**/*"
+
+# The generator is COMPILED here rather than committed. The sibling modules track
+# the built binary next to its source, which is both a 2.4 MB blob in git and a
+# hard dependency for this image: with the binary absent, `git.add` matched
+# nothing and werf failed the whole build with "matches no files" — which is
+# exactly what happened here.
+#
+# The base image is the Go builder, so building it is a two-line step and the
+# repository keeps only the source. The module proxy comes from the same secret
+# the other Go images use: this builder has no direct route to the public proxy.
+mount:
+{{ include "mount points for golang builds" . }}
+
+secrets:
+- id: GOPROXY
+  value: {{ .GOPROXY }}
+
+shell:
+  setup:
+    - cd /hack
+    - GOPROXY=$(cat /run/secrets/GOPROXY) go mod download
+    - go build -o /generate_release_notes .
+    - cd /
+    - mkdir -p /docs
+    - /generate_release_notes
+    - rm -rf CHANGELOG hack /generate_release_notes
+    - cat /docs/RELEASE_NOTES.md
+    - cat /docs/RELEASE_NOTES.ru.md
+
+# Bundle image, stored in your.registry.io/modules/<module-name>:<semver>
+---
+image: bundle
+from: {{ index $.Images "builder/scratch" }}
+# The go-hooks binary is produced in a stage that sets up the private-module netrc;
+# see .werf/defines/golang.tmpl. Its mode changes with that fix while its bytes do not,
+# and an import is keyed on content, so the cache needs busting once.
+fromCacheVersion: "1"
+
+import:
+  # Rendering .werf/images-digests.yaml is required!
+  - image: images-digests
+    add: /images_digests.json
+    to: /images_digests.json
+    after: setup
+  # Rendering .werf/go-hooks.yaml is required!
+  - image: go-hooks-artifact
+    add: /go-hooks
+    to: /hooks/go-hooks
+    after: setup
+  # Rendering .werf/choose-edition.yaml is required!
+  - image: choose-edition
+    add: /openapi
+    to: /openapi
+    after: setup
+  - image: docs-generator
+    add: /docs/RELEASE_NOTES.md
+    to: /docs/RELEASE_NOTES.md
+    after: setup
+  - image: docs-generator
+    add: /docs/RELEASE_NOTES.ru.md
+    to: /docs/RELEASE_NOTES.ru.md
+    after: setup
+git:
+  - add: /
+    to: /
+    excludePaths:
+      - hooks/go
+      - docs/internal
+    includePaths:
+      - .helmignore
+      - charts
+      - crds
+      - docs
+      - hooks
+      - monitoring
+      - templates
+      - Chart.yaml
+      - module.yaml
+      - CHANGELOG
+
+# Attach an OpenVEX attestation to the bundle image so trivy suppresses the
+# unfixable golang.org/x/crypto/openpgp advisory (GO-2026-5932) that would
+# otherwise be reported against the go-hooks binary embedded at /hooks/go-hooks.
+# Predicate: /known_vulnerabilities.vex (repo root, per the "vex mitigation" template).
+{{- include "vex mitigation" (list $ "bundle") }}

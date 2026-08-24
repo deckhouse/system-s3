@@ -1,0 +1,253 @@
+type: object
+properties:
+  storage:
+    type: object
+    default: {}
+    description: |
+      Settings of the system object storage data plane: a Garage cluster on the
+      control-plane nodes, backed by node-sticky local volumes.
+
+      It runs three replicas with a replication factor of 3, independent of the
+      control-plane node count, unless `singleReplica` reduces it to one. There is
+      no custom resource for it — the module runs exactly one data plane, and
+      these are all its knobs.
+    properties:
+      singleReplica:
+        type: boolean
+        default: false
+        description: |
+          Run the system object storage as a single Garage replica
+          (`replication_factor: 1`) instead of the default three.
+
+          The replica is placed on one control-plane node and **never migrates
+          between masters**: its data lives on that node's local volume and there
+          is no second copy to re-replicate from. If that node is removed or
+          stays down, the system storage is unavailable until it returns (the data
+          on its disk is not touched), and the controller will not move the
+          replica for you.
+
+          Use it to cut the footprint of the system storage on small or
+          non-production installations. Do not use it where the platform data in
+          the system buckets must survive the loss of a control-plane node.
+
+          > **Toggling this setting recreates the data plane and DESTROYS
+          > everything stored in it.** Garage cannot change its replication factor
+          > on a live cluster, so the controller tears the data plane down
+          > (StatefulSet, volumes, node identities) and rebuilds it empty on fresh
+          > directories, in both directions (on and off). Buckets are recreated and
+          > access keys are re-issued automatically, but the objects are gone —
+          > back up anything you need first. The previous data directories are left
+          > on the control-plane nodes under
+          > `/var/lib/deckhouse/sds-object-system/garage/system` and can be removed
+          > manually once you no longer need them.
+      sizePerNode:
+        type: string
+        default: 10Gi
+        pattern: '^[0-9]+(\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki)?$'
+        description: |
+          Capacity of the node-sticky local volume provisioned per replica, as a
+          Kubernetes quantity.
+
+          The volume is a `hostPath` directory on the control-plane node, so the
+          value is nominal: Kubernetes does not enforce it, and the replica can
+          use as much as the node's filesystem has. Raising it after the fact does
+          not move data — it only changes the size the new PersistentVolumes of the
+          pool are created with.
+  logLevel:
+    type: string
+    enum:
+      - ERROR
+      - WARN
+      - INFO
+      - DEBUG
+      - TRACE
+    description: Module log verbosity level.
+    default: INFO
+  nodeSelector:
+    type: object
+    additionalProperties:
+      type: string
+    description: |
+      The same as in the Pods' `spec.nodeSelector` parameter in Kubernetes.
+      Applies to the module service Pods (controller, webhooks). If the
+      parameter is omitted or `false`, `nodeSelector` will be determined
+      [automatically](https://deckhouse.io/documentation/v1/#advanced-scheduling).
+
+      Note: this does not control placement of the storage data plane — its pods
+      always run on the control-plane nodes.
+  tolerations:
+    type: array
+    description: |
+      The same as in the Pods' `spec.tolerations` parameter in Kubernetes.
+      Applies to the module service Pods (controller, webhooks). If the
+      parameter is omitted or `false`, `tolerations` will be determined
+      [automatically](https://deckhouse.io/documentation/v1/#advanced-scheduling).
+    items:
+      type: object
+      properties:
+        effect:
+          type: string
+          description: |
+            Taint effect the toleration matches. An empty value matches any effect.
+          enum:
+            - ""
+            - NoSchedule
+            - PreferNoSchedule
+            - NoExecute
+        key:
+          type: string
+          description: |
+            Taint key the toleration applies to. An empty key with `operator: Exists` matches any taint.
+        operator:
+          type: string
+          description: |
+            Operator that defines how `key` and `value` are matched.
+          enum:
+            - Exists
+            - Equal
+        tolerationSeconds:
+          type: integer
+          format: int64
+          description: |
+            Duration in seconds the toleration tolerates the taint after it is added.
+
+            Applies only when `effect` is `NoExecute`. Unset means tolerate forever.
+        value:
+          type: string
+          description: |
+            Taint value the toleration matches. Required when `operator` is `Equal`.
+  controller:
+    type: object
+    default: {}
+    description: |
+      Settings of the sds-object-system-controller (the reconciler for
+      SystemBucket resources and for the storage data plane).
+    properties:
+      resourcesManagement:
+        description: |
+          sds-object-system-controller resources management options.
+        default: {}
+        x-examples:
+          - mode: VPA
+            vpa:
+              mode: Auto
+              cpu: { min: 50m, max: 200m, limitRatio: 1.5 }
+              memory: { min: 64Mi, max: 256Mi, limitRatio: 1.5 }
+        properties:
+          mode:
+            type: string
+            description: |
+              The mode for managing resource requests. Classical `Static` requests/limits or `VPA`.
+            enum: [VPA, Static]
+            default: VPA
+          vpa:
+            type: object
+            default: {}
+            description: |
+              Parameters of the VPA mode.
+            properties:
+              mode:
+                type: string
+                description: |
+                  The VPA usage mode.
+                enum: [Initial, Auto]
+                default: Auto
+              cpu:
+                type: object
+                default: {}
+                description: |
+                  CPU-related parameters.
+                properties:
+                  max:
+                    description: |
+                      Maximum allowed CPU requests.
+                    default: 200m
+                    oneOf:
+                      - type: string
+                        pattern: '^[0-9]+m?$'
+                      - type: number
+                  min:
+                    description: |
+                      Minimum allowed CPU requests.
+                    default: 50m
+                    oneOf:
+                      - type: string
+                        pattern: '^[0-9]+m?$'
+                      - type: number
+                  limitRatio:
+                    type: number
+                    description: |
+                      Coefficient used to calculate the initial CPU limit from the request.
+
+                      VPA preserves the resulting limits/requests ratio during further resource tuning.
+              memory:
+                type: object
+                default: {}
+                description: |
+                  Memory-related parameters.
+                properties:
+                  max:
+                    description: |
+                      Maximum allowed memory requests.
+                    default: 256Mi
+                    oneOf:
+                      - type: string
+                        pattern: '^[0-9]+(\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki)?$'
+                      - type: number
+                  min:
+                    description: |
+                      Minimum allowed memory requests.
+                    default: 64Mi
+                    oneOf:
+                      - type: string
+                        pattern: '^[0-9]+(\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki)?$'
+                      - type: number
+                  limitRatio:
+                    type: number
+                    description: |
+                      Coefficient used to calculate the initial memory limit from the request.
+
+                      VPA preserves the resulting limits/requests ratio during further resource tuning.
+          static:
+            type: object
+            description: |
+              Static resource management settings.
+            properties:
+              requests:
+                type: object
+                description: |
+                  Resource requests for the controller pod.
+                properties:
+                  cpu:
+                    description: |
+                      CPU request.
+                    oneOf:
+                      - type: string
+                        pattern: '^[0-9]+m?$'
+                      - type: number
+                  memory:
+                    description: |
+                      Memory request.
+                    oneOf:
+                      - type: string
+                        pattern: '^[0-9]+(\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki)?$'
+                      - type: number
+              limits:
+                type: object
+                description: |
+                  Resource limits for the controller pod.
+                properties:
+                  cpu:
+                    description: |
+                      CPU limit.
+                    oneOf:
+                      - type: string
+                        pattern: '^[0-9]+m?$'
+                      - type: number
+                  memory:
+                    description: |
+                      Memory limit.
+                    oneOf:
+                      - type: string
+                        pattern: '^[0-9]+(\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki)?$'
+                      - type: number

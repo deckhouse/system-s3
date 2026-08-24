@@ -1,0 +1,9 @@
+# Extend the centralized Deckhouse gitleaks config + module allowlist
+[extend]
+useDefault = false
+path = "gitleaks.base.toml"
+
+[allowlist]
+paths = [
+  '''(?:^|/)images/.*\.patch$''',
+]

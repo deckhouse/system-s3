@@ -1,0 +1,7 @@
+Changes:
+  - Initial release of the module in the Experimental stage. The module runs the platform's own S3 object storage on Garage and hands it out through a single namespaced SystemBucket resource
+  - The data plane has no custom resource of its own: the module owns exactly one store, converges it from module settings and places three replicas on control-plane nodes over node-sticky local PersistentVolumes it provisions itself
+  - SystemBucket is admitted only in a namespace a Deckhouse module owns (label heritage=deckhouse); it has no reclaim policy and no separate access resource, and its credentials Secret is written next to it with the standard S3 connection variables
+  - The access key is rotated with the storage.deckhouse.io/rotate annotation
+  - storage.singleReplica cuts the store to a single Garage replica; toggling it rebuilds the data plane and destroys everything stored in it, in both directions
+  - Module resources publish status.conditions and status.observedGeneration

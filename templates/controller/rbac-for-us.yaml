@@ -1,0 +1,48 @@
+{{- /*
+  RBAC for the sds-object-system-controller.
+
+  The controller-runtime cache is cluster-scoped by default, so any namespaced
+  resource the manager reads (Secret, ConfigMap, Service, ServiceAccount,
+  StatefulSet) requires cluster-wide get/list/watch on the ServiceAccount.
+  Mutation of the data-plane objects the Garage driver creates (ConfigMap,
+  Service, ServiceAccount, StatefulSet) stays in the namespaced Role — they only
+  ever live in d8-sds-object-system. Secrets are the exception: the SystemBucket
+  reconciler writes the S3 credentials Secret into the consuming component's
+  namespace, so secret write verbs are granted cluster-wide.
+
+  The data plane additionally reads control-plane Nodes and manages a pool of
+  cluster-scoped, node-pinned PersistentVolumes (its node-sticky local storage),
+  so node read and persistentvolume verbs are granted cluster-wide too.
+
+  Namespaces are read because the label heritage: deckhouse is what admits a
+  SystemBucket: both the webhook and the reconciler check it, and neither can be
+  told the answer by the object itself.
+
+  The webhooks share the same ServiceAccount but exercise only the read verbs.
+
+  Note for future editors: do not place Helm/Go-template comments inside the
+  argument expression of the function call below (the rule lists), the template
+  parser fails with 'unexpected "{" in operand'. Keep rule-level commentary in
+  this header block.
+*/ -}}
+{{- $rbacConfig := dict
+  "roleRules" (list
+    (dict "apiGroups" (list "") "resources" (list "events") "verbs" (list "create" "list" "patch"))
+    (dict "apiGroups" (list "") "resources" (list "pods") "verbs" (list "get" "list" "delete"))
+    (dict "apiGroups" (list "") "resources" (list "pods/exec") "verbs" (list "create"))
+    (dict "apiGroups" (list "") "resources" (list "persistentvolumeclaims") "verbs" (list "get" "list" "delete"))
+    (dict "apiGroups" (list "") "resources" (list "secrets" "configmaps" "services" "serviceaccounts") "verbs" (list "create" "update" "patch" "delete"))
+    (dict "apiGroups" (list "apps") "resources" (list "statefulsets") "verbs" (list "create" "update" "patch" "delete"))
+    (dict "apiGroups" (list "coordination.k8s.io") "resources" (list "leases") "verbs" (list "get" "list" "watch" "create" "update" "patch" "delete"))
+  )
+  "clusterRoleRules" (list
+    (dict "apiGroups" (list "storage.deckhouse.io") "resources" (list "systembuckets" "systembuckets/status" "systembuckets/finalizers") "verbs" (list "get" "list" "watch" "create" "update" "patch" "delete"))
+    (dict "apiGroups" (list "") "resources" (list "secrets") "verbs" (list "get" "list" "watch" "create" "update" "patch" "delete"))
+    (dict "apiGroups" (list "") "resources" (list "configmaps" "services" "serviceaccounts") "verbs" (list "get" "list" "watch"))
+    (dict "apiGroups" (list "") "resources" (list "namespaces") "verbs" (list "get" "list" "watch"))
+    (dict "apiGroups" (list "") "resources" (list "nodes") "verbs" (list "get" "list" "watch"))
+    (dict "apiGroups" (list "") "resources" (list "persistentvolumes") "verbs" (list "get" "list" "watch" "create" "delete"))
+    (dict "apiGroups" (list "apps") "resources" (list "statefulsets") "verbs" (list "get" "list" "watch"))
+  )
+}}
+{{ include "helm_lib_module_controller_rbac" (list . $rbacConfig) }}

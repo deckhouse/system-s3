@@ -1,0 +1,45 @@
+# Release image, stored in your.registry.io/modules/<module-name>/release:<semver>
+---
+image: release-channel-version-artifact
+from: {{ index $.Images "builder/alpine" }}
+final: false
+git:
+- add: /
+  to: /
+  includePaths:
+  - CHANGELOG
+  - module.yaml
+  stageDependencies:
+    setup:
+    - '**/*'
+import:
+  - from: {{ index $.Images "yq" }}
+    add: /usr/bin/yq
+    to: /usr/bin/yq
+    before: install
+shell:
+  install:
+    - |
+      yq -n '.version = "{{ env "MODULES_MODULE_TAG" }}"' -o=json > version.json
+    - cp -f CHANGELOG/{{ env "MODULES_MODULE_TAG" "local" }}.yml /changelog.yaml || touch /changelog.yaml
+---
+image: release-channel-version
+from: {{ index $.Images "builder/scratch" }}
+git:
+  - add: /
+    to: /
+    includePaths:
+      - crds
+      - docs
+      - openapi
+    excludePaths:
+      - docs/internal
+import:
+  - image: release-channel-version-artifact
+    add: /
+    to: /
+    after: install
+    includePaths:
+      - version.json
+      - changelog.yaml
+      - module.yaml

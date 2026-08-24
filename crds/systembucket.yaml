@@ -1,0 +1,198 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: systembuckets.storage.deckhouse.io
+  labels:
+    heritage: deckhouse
+    module: sds-object-system
+    backup.deckhouse.io/cluster-config: "true"
+spec:
+  group: storage.deckhouse.io
+  scope: Namespaced
+  names:
+    plural: systembuckets
+    singular: systembucket
+    kind: SystemBucket
+    shortNames:
+      - sb
+  preserveUnknownFields: false
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: |
+            SystemBucket asks for a bucket in the platform's system object
+            storage. The controller creates the bucket in the system backend,
+            issues a dedicated access key / secret key for it, and writes a
+            Secret in the same namespace (see `status.secretRef`) with the
+            standard S3 connection variables.
+
+            The resource is for Deckhouse components only. It is admitted
+            exclusively in namespaces labelled `heritage: deckhouse`, and no
+            user-facing RBAC is granted for it.
+
+            Credentials come with the bucket — there is no separate access
+            resource — and there is no reclaim policy: **deleting a SystemBucket
+            deletes the bucket and every object in it.**
+
+            Key rotation: set or change the annotation
+            `storage.deckhouse.io/rotate` to trigger issuance of a fresh key
+            pair (the Secret is updated and the previous key is revoked).
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              description: |
+                Desired state of the bucket.
+              x-kubernetes-validations:
+                - rule: "oldSelf == null || !has(self.bucketName) && !has(oldSelf.bucketName) || has(self.bucketName) && has(oldSelf.bucketName) && self.bucketName == oldSelf.bucketName"
+                  message: "spec.bucketName is immutable after creation."
+              properties:
+                bucketName:
+                  type: string
+                  description: |
+                    Name of the bucket in S3. Defaults to
+                    `<metadata.namespace>-<metadata.name>` when omitted: the
+                    backend bucket namespace is flat, while SystemBuckets are
+                    namespaced, so the default keeps two components from
+                    colliding on a bucket name. Immutable after creation.
+                  minLength: 3
+                  maxLength: 63
+                  pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                credentialsSecretName:
+                  type: string
+                  description: |
+                    Overrides the name of the credentials Secret written in this
+                    bucket's namespace. Defaults to
+                    `<metadata.name>-s3-credentials`.
+                  minLength: 1
+                  maxLength: 253
+            status:
+              type: object
+              description: |
+                Observed state of the bucket.
+              properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  description: |
+                    Most recent `metadata.generation` reconciled by the controller.
+                phase:
+                  type: string
+                  description: |
+                    Coarse-grained summary derived from Conditions.
+                  enum:
+                    - Pending
+                    - InProgress
+                    - Ready
+                    - Error
+                endpoint:
+                  type: string
+                  description: |
+                    In-cluster S3 endpoint URL of the system object storage.
+                bucketName:
+                  type: string
+                  description: |
+                    Effective bucket name created in the backend.
+                accessKeyID:
+                  type: string
+                  description: |
+                    Public access key id issued for this bucket (the secret key
+                    is only written into the credentials Secret).
+                secretRef:
+                  type: object
+                  description: |
+                    Reference to the Secret (in this bucket's namespace) holding
+                    the S3 connection variables and credentials: `S3_ENDPOINT`,
+                    `S3_REGION`, `S3_BUCKET`, `AWS_ACCESS_KEY_ID`,
+                    `AWS_SECRET_ACCESS_KEY`.
+                  properties:
+                    name:
+                      type: string
+                observedRotation:
+                  type: string
+                  description: |
+                    Last value of the `storage.deckhouse.io/rotate` annotation
+                    processed by the controller.
+                lastRotationTime:
+                  type: string
+                  format: date-time
+                  description: |
+                    Timestamp of the most recent key issuance.
+                conditions:
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys:
+                    - type
+                  description: |
+                    Per-stage conditions: `StorageReady`, `BucketReady`,
+                    `CredentialsReady`, and the aggregate `Ready`.
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                      - lastTransitionTime
+                      - reason
+                      - message
+                    properties:
+                      type:
+                        type: string
+                        maxLength: 316
+                        pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                        description: |
+                          Condition type, for example `Ready`, `StorageReady`,
+                          `BucketReady`, or `CredentialsReady`.
+                      status:
+                        type: string
+                        description: Current status of the condition.
+                        enum:
+                          - "True"
+                          - "False"
+                          - "Unknown"
+                      observedGeneration:
+                        type: integer
+                        minimum: 0
+                        format: int64
+                        description: |
+                          Value of `metadata.generation` the condition was last set against.
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                        description: |
+                          Timestamp of the last status transition for this condition.
+                      reason:
+                        type: string
+                        maxLength: 1024
+                        minLength: 1
+                        pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                        description: |
+                          Machine-readable reason for the current status, suitable for
+                          log filtering.
+                      message:
+                        type: string
+                        maxLength: 32768
+                        description: |
+                          Human-readable explanation of the current status.
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - jsonPath: .status.bucketName
+          name: Bucket
+          type: string
+        - jsonPath: .status.phase
+          name: Phase
+          type: string
+        - jsonPath: .status.secretRef.name
+          name: Secret
+          type: string
+        - jsonPath: .status.conditions[?(@.type=="Ready")].status
+          name: Ready
+          type: string
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date

@@ -1,0 +1,76 @@
+---
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}-src-artifact
+from: {{ index $.Images "builder/src" }}
+final: false
+
+git:
+  - add: {{ .ModuleDir }}
+    to: /src
+    includePaths:
+      - api
+      - images/{{ $.ImageName }}
+    stageDependencies:
+      install:
+        - '**/*'
+    excludePaths:
+      - images/{{ $.ImageName }}/werf.yaml
+
+shell:
+  install:
+    - echo "src artifact"
+
+---
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}-golang-artifact
+from: {{ index $.Images (eq .SVACE_ENABLED "false" | ternary "builder/golang" "builder/alpine-svace") }}
+final: false
+
+import:
+  - image: {{ .ModuleNamePrefix }}{{ .ImageName }}-src-artifact
+    add: /src
+    to: /src
+    before: install
+
+mount:
+{{ include "mount points for golang builds" . }}
+
+secrets:
+- id: GOPROXY
+  value: {{ .GOPROXY }}
+{{ include "secret for private go modules" . }}
+
+shell:
+  setup:
+    {{- include "auth for private go modules" . | nindent 4 }}
+    - cd /src/images/{{ $.ImageName }}/cmd
+    - GOPROXY=$(cat /run/secrets/GOPROXY) go mod download
+    - export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
+    - |
+      {{- include "image-build.build" (set $ "BuildCommand" (printf `go build -ldflags="-s -w" -tags "%s" -o /%s` .MODULE_EDITION $.ImageName)) | nindent 6 }}
+    # Absolute mode: see the note in .werf/defines/golang.tmpl -- `chmod +x` is masked by
+    # the umask in effect and can leave the binary executable by root only.
+    - chmod 0755 /{{ $.ImageName }}
+
+---
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}
+from: {{ index $.Images "builder/distroless" }}
+# An import is keyed on file content, not on mode: without this the pre-fix stage stays cached.
+fromCacheVersion: "1"
+
+import:
+  - image: {{ .ModuleNamePrefix }}{{ .ImageName }}-golang-artifact
+    add: /{{ $.ImageName }}
+    to: /{{ $.ImageName }}
+    before: setup
+git:
+{{- include "image mount points" . }}
+imageSpec:
+  config:
+    entrypoint: ["/{{ $.ImageName }}"]
+
+{{- /*
+Attach an OpenVEX attestation to the controller image so trivy suppresses the
+unfixable golang.org/x/crypto/openpgp advisory (GO-2026-5932) reported against
+the controller binary. Predicate:
+/images/controller/known_vulnerabilities.vex (per the "vex mitigation" template).
+*/ -}}
+{{- include "vex mitigation" (list $ $.ImageName) }}
