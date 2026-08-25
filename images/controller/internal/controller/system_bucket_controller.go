@@ -33,11 +33,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/deckhouse/sds-common-lib/conditions"
+	"github.com/deckhouse/sds-common-lib/logger"
 	v1alpha1 "github.com/deckhouse/sds-object-system/api/v1alpha1"
 	"github.com/deckhouse/sds-object-system/images/controller/internal/backend"
 	"github.com/deckhouse/sds-object-system/images/controller/pkg/config"
-	"github.com/deckhouse/sds-object-system/images/controller/pkg/logger"
 )
+
+// SystemBucketCtrlName names the controller in its logs, in the
+// controller-runtime registry and in the controller label on the reconcile
+// metrics; one spelling keeps the three joinable.
+const SystemBucketCtrlName = "system-bucket"
 
 // SystemBucketReconciler drives every SystemBucket through a short FSM:
 //
@@ -61,7 +66,7 @@ type SystemBucketReconciler struct {
 	// rotate a live key or refuse a legitimate namespace.
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
-	Log       *logger.Logger
+	Log       logger.Logger
 	Cfg       *config.Options
 	Store     *StoreManager
 	Driver    Driver
@@ -93,12 +98,12 @@ type bucketObserved struct {
 }
 
 // AddSystemBucketReconcilerToManager wires the SystemBucket reconciler.
-func AddSystemBucketReconcilerToManager(mgr manager.Manager, cfg *config.Options, log *logger.Logger, store *StoreManager, driver Driver) error {
+func AddSystemBucketReconcilerToManager(mgr manager.Manager, cfg *config.Options, log logger.Logger, store *StoreManager, driver Driver) error {
 	r := &SystemBucketReconciler{
 		Client:    mgr.GetClient(),
 		APIReader: mgr.GetAPIReader(),
 		Scheme:    mgr.GetScheme(),
-		Log:       log,
+		Log:       log.Named(SystemBucketCtrlName),
 		Cfg:       cfg,
 		Store:     store,
 		Driver:    driver,
@@ -111,7 +116,7 @@ func AddSystemBucketReconcilerToManager(mgr manager.Manager, cfg *config.Options
 	)
 
 	return ctrl.NewControllerManagedBy(mgr).
-		Named("system-bucket").
+		Named(SystemBucketCtrlName).
 		For(&v1alpha1.SystemBucket{}, builder.WithPredicates(bucketPredicate)).
 		// The credentials Secret is owned by the SystemBucket, so a consumer (or an
 		// operator) deleting it re-drives the bucket and a fresh key pair is issued.
@@ -120,13 +125,13 @@ func AddSystemBucketReconcilerToManager(mgr manager.Manager, cfg *config.Options
 		Complete(r)
 }
 
-func (r *SystemBucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *SystemBucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, err error) {
 	// Bound the reconcile: a backend that stops answering must not take the
 	// worker with it (see withReconcileTimeout).
 	ctx, cancel := withReconcileTimeout(ctx, r.Cfg.ReconcileTimeout)
 	defer cancel()
 
-	r.Log.Info(fmt.Sprintf("[Reconcile] start for SystemBucket %s", req.NamespacedName))
+	r.Log.Info("reconcile started", "systemBucket", req.String())
 
 	bucket := &v1alpha1.SystemBucket{}
 	if err := r.Client.Get(ctx, req.NamespacedName, bucket); err != nil {
@@ -370,7 +375,7 @@ func (r *SystemBucketReconciler) finish(
 	reconcileErr error,
 ) (ctrl.Result, error) {
 	if err := r.updateStatus(ctx, bucket, status, observed); err != nil {
-		r.Log.Error(err, "[finish] unable to update status")
+		r.Log.Error("unable to update the status", logger.Err(err))
 		if reconcileErr == nil {
 			reconcileErr = err
 		}

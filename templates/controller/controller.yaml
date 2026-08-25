@@ -14,6 +14,11 @@
   The data plane has no custom resource, so its settings reach the controller as
   environment: SINGLE_REPLICA, SIZE_PER_NODE and STORAGE_CLASS are what the
   ObjectStore CR used to carry in the user-facing module.
+
+  controllerMetricsPort is the loopback port the manager serves /metrics on; the
+  port that is actually published belongs to the kube-rbac-proxy sidecar
+  (controllerMetricsProxyPort) and reaches the ServiceMonitor through
+  helm_lib_module_webhook_service, which is the only Service this chart has.
 */ -}}
 {{- $config := dict
   "valuesKey" "sdsObjectSystem"
@@ -21,6 +26,8 @@
   "podSecurityContext" "deckhouse"
   "webhookEnabled" true
   "webhookCertPath" "internal.customWebhookCert"
+  "controllerMetricsPort" (int .Values.sdsObjectSystem.internal.controllerMetricsPort)
+  "controllerMetricsProxyPort" (int .Values.sdsObjectSystem.internal.controllerMetricsProxyPort)
   "additionalControllerEnvs" (list
     (dict "name" "GARAGE_IMAGE" "value" (include "helm_lib_module_image" (list . "garage")))
     (dict "name" "CLUSTER_DOMAIN" "value" .Values.global.discovery.clusterDomain)
@@ -31,8 +38,19 @@
 }}
 {{ include "helm_lib_module_controller_manifests" (list . $config) }}
 
-{{- /* Webhook Service */ -}}
-{{ include "helm_lib_module_webhook_service" (list . dict) }}
+{{- /*
+  Webhook Service. It carries the metrics port too: the controller and the
+  webhook share a pod, so one Service can front both, and a ServiceMonitor needs
+  a Service to select.
+*/ -}}
+{{- $serviceConfig := dict
+  "additionalPorts" (list (dict
+    "name" "https-metrics"
+    "port" (int .Values.sdsObjectSystem.internal.controllerMetricsProxyPort)
+    "targetPort" "https-metrics"
+  ))
+}}
+{{ include "helm_lib_module_webhook_service" (list . $serviceConfig) }}
 
 {{- /*
   ValidatingWebhookConfiguration for SystemBucket (namespaced).

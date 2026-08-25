@@ -43,8 +43,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/sds-object-system/images/controller/internal/backend"
-	"github.com/deckhouse/sds-object-system/images/controller/pkg/logger"
 )
 
 // garageVersion is the Garage release this driver targets. Keep it in sync with
@@ -65,19 +65,19 @@ type Driver struct {
 	client        client.Client
 	apiReader     client.Reader
 	restConfig    *rest.Config
-	log           *logger.Logger
+	log           logger.Logger
 	namespace     string
 	image         string
 	clusterDomain string
 }
 
 // New builds a Garage Driver.
-func New(c client.Client, apiReader client.Reader, restConfig *rest.Config, log *logger.Logger, namespace, image, clusterDomain string) *Driver {
+func New(c client.Client, apiReader client.Reader, restConfig *rest.Config, log logger.Logger, namespace, image, clusterDomain string) *Driver {
 	return &Driver{
 		client:        c,
 		apiReader:     apiReader,
 		restConfig:    restConfig,
-		log:           log,
+		log:           log.Named("garage"),
 		namespace:     namespace,
 		image:         image,
 		clusterDomain: clusterDomain,
@@ -118,9 +118,8 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (backend
 			return state, nil
 		}
 		pinned = pinnedState{rf: want, incarnation: pinned.incarnation + 1, exists: true}
-		d.log.Info(fmt.Sprintf(
-			"[EnsureStore] store %q torn down for a replica-count switch; rebuilding empty at incarnation %d (replication factor %d)",
-			store.Name, pinned.incarnation, pinned.rf))
+		d.log.Info("store torn down for a replica-count switch; rebuilding empty",
+			"store", store.Name, "incarnation", pinned.incarnation, "replicationFactor", pinned.rf)
 	}
 
 	rf := pinned.rf

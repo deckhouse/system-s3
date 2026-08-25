@@ -21,14 +21,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strings"
 
-	"github.com/sirupsen/logrus"
-	kwhlogrus "github.com/slok/kubewebhook/v2/pkg/log/logrus"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 
+	"github.com/deckhouse/sds-common-lib/logger"
+	"github.com/deckhouse/sds-common-lib/logger/kwhlogger"
 	"github.com/deckhouse/sds-object-system/images/webhooks/handlers"
 )
 
@@ -61,27 +60,17 @@ const (
 	SystemBucketValidatorID = "SystemBucketValidator"
 )
 
-// webhookLogLevel maps the module LOG_LEVEL env var to a logrus level,
-// defaulting to Info (the webhook previously hardcoded Debug, which was noisy).
-func webhookLogLevel() logrus.Level {
-	switch strings.ToUpper(os.Getenv("LOG_LEVEL")) {
-	case "ERROR":
-		return logrus.ErrorLevel
-	case "WARN":
-		return logrus.WarnLevel
-	case "DEBUG":
-		return logrus.DebugLevel
-	case "TRACE":
-		return logrus.TraceLevel
-	default:
-		return logrus.InfoLevel
-	}
-}
-
 func main() {
-	logrusLogEntry := logrus.NewEntry(logrus.New())
-	logrusLogEntry.Logger.SetLevel(webhookLogLevel())
-	logger := kwhlogrus.NewLogrus(logrusLogEntry)
+	// LOG_LEVEL arrives as a number 0..4 from lib-helm, which is what the
+	// controller container in this same pod already reads. The webhook used to map
+	// it from the ERROR..TRACE spelling instead, which the charts never emit, so
+	// its level was always the default no matter what the module setting said.
+	log, err := logger.NewLoggerFromEnv(logger.InfoLevel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "unable to create the logger: %s\n", err)
+		os.Exit(1)
+	}
+	kwhLog := kwhlogger.New(log)
 
 	cfg, err := initFlags()
 	if err != nil {
@@ -105,7 +94,7 @@ func main() {
 		validator.SystemBucketValidate,
 		SystemBucketValidatorID,
 		&unstructured.Unstructured{},
-		logger,
+		kwhLog,
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating systemBucketWebhookHandler: %s", err)
@@ -116,7 +105,7 @@ func main() {
 	mux.Handle("/systembucket-validate", systemBucketWebhookHandler)
 	mux.HandleFunc("/healthz", httpHandlerHealthz)
 
-	logger.Infof("Listening on %s", port)
+	log.Info("listening", "address", port)
 	err = http.ListenAndServeTLS(port, cfg.certFile, cfg.keyFile, mux)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error serving webhook: %s", err)

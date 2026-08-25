@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 
@@ -29,6 +30,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/sds-object-system/images/controller/internal/backend"
 )
 
@@ -94,16 +96,19 @@ func (d *Driver) ensureNodeIdentities(ctx context.Context, store *backend.Store)
 		}
 		priv, err := d.captureNodeKey(ctx, pod, nodeKeyPath)
 		if err != nil {
-			d.log.Warning(fmt.Sprintf("[ensureNodeIdentities] read node_key from %s: %v", pod, err))
+			d.log.Warn("unable to read node_key", logger.Err(err), slog.String("pod", pod))
 			continue
 		}
 		pub, err := d.captureNodeKey(ctx, pod, nodeKeyPubPath)
 		if err != nil {
-			d.log.Warning(fmt.Sprintf("[ensureNodeIdentities] read node_key.pub from %s: %v", pod, err))
+			d.log.Warn("unable to read node_key.pub", logger.Err(err), slog.String("pod", pod))
 			continue
 		}
 		if len(priv) != nodeKeyPrivBytes || len(pub) != nodeKeyPubBytes {
-			d.log.Warning(fmt.Sprintf("[ensureNodeIdentities] %s: unexpected identity sizes (priv=%d want %d, pub=%d want %d)", pod, len(priv), nodeKeyPrivBytes, len(pub), nodeKeyPubBytes))
+			d.log.Warn("unexpected node identity sizes",
+				"pod", pod,
+				"privBytes", len(priv), "wantPrivBytes", nodeKeyPrivBytes,
+				"pubBytes", len(pub), "wantPubBytes", nodeKeyPubBytes)
 			continue
 		}
 		captured[privKey] = priv

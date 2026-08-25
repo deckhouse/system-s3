@@ -18,13 +18,12 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/sds-object-system/images/controller/internal/backend"
 	"github.com/deckhouse/sds-object-system/images/controller/internal/backend/garage"
-	"github.com/deckhouse/sds-object-system/images/controller/pkg/logger"
 )
 
 // StoreManager owns the module's single system data plane.
@@ -47,7 +46,7 @@ import (
 type StoreManager struct {
 	driver   *garage.Driver
 	store    *backend.Store
-	log      *logger.Logger
+	log      logger.Logger
 	interval time.Duration
 
 	mu    sync.Mutex
@@ -55,11 +54,11 @@ type StoreManager struct {
 }
 
 // NewStoreManager builds the manager for the given store description.
-func NewStoreManager(driver *garage.Driver, store *backend.Store, log *logger.Logger, interval time.Duration) *StoreManager {
+func NewStoreManager(driver *garage.Driver, store *backend.Store, log logger.Logger, interval time.Duration) *StoreManager {
 	return &StoreManager{
 		driver:   driver,
 		store:    store,
-		log:      log,
+		log:      log.Named("store-manager"),
 		interval: interval,
 		state:    backend.StoreState{Message: "the system object storage has not been reconciled yet"},
 	}
@@ -80,7 +79,7 @@ func (m *StoreManager) Ensure(ctx context.Context) (backend.StoreState, error) {
 		return m.state, err
 	}
 	if state.Ready != m.state.Ready {
-		m.log.Info(fmt.Sprintf("[StoreManager] system object storage ready=%t: %s", state.Ready, state.Message))
+		m.log.Info("the system object storage changed readiness", "ready", state.Ready, "message", state.Message)
 	}
 	m.state = state
 	return state, nil
@@ -105,7 +104,7 @@ func (m *StoreManager) Start(ctx context.Context) error {
 			// Log and keep ticking: the data plane is reconciled again on the next
 			// tick, and returning an error here would take the whole manager down
 			// over a transient backend failure.
-			m.log.Error(err, "[StoreManager] reconciling the system object storage")
+			m.log.Error("unable to reconcile the system object storage", logger.Err(err))
 		}
 		select {
 		case <-ctx.Done():

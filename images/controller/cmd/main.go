@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	goruntime "runtime"
 
@@ -28,14 +29,16 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	"github.com/deckhouse/sds-common-lib/logger"
+	"github.com/deckhouse/sds-common-lib/monitoring"
 	v1alpha1 "github.com/deckhouse/sds-object-system/api/v1alpha1"
 	"github.com/deckhouse/sds-object-system/images/controller/internal/backend"
 	"github.com/deckhouse/sds-object-system/images/controller/internal/backend/garage"
 	"github.com/deckhouse/sds-object-system/images/controller/internal/controller"
 	"github.com/deckhouse/sds-object-system/images/controller/pkg/config"
 	"github.com/deckhouse/sds-object-system/images/controller/pkg/kubutils"
-	"github.com/deckhouse/sds-object-system/images/controller/pkg/logger"
 )
 
 var (
@@ -54,27 +57,32 @@ func main() {
 	ctx := context.Background()
 	cfgParams := config.NewConfig()
 
-	log, err := logger.NewLogger(cfgParams.Loglevel)
+	baseLog, err := logger.NewLogger(cfgParams.Loglevel)
 	if err != nil {
 		fmt.Printf("unable to create NewLogger, err: %v\n", err)
 		os.Exit(1)
 	}
+	log := baseLog.Named("main")
 
-	log.Info(fmt.Sprintf("[main] sds-object-system-controller version=%s commit=%s buildDate=%s", version, commit, buildDate))
-	log.Info(fmt.Sprintf("[main] Go Version: %s", goruntime.Version()))
-	log.Info(fmt.Sprintf("[main] OS/Arch: %s/%s", goruntime.GOOS, goruntime.GOARCH))
-	log.Info(fmt.Sprintf("[main] ControllerNamespace=%s", cfgParams.ControllerNamespace))
-	log.Info(fmt.Sprintf("[main] MaxConcurrentReconciles=%d", cfgParams.MaxConcurrentReconciles))
-	log.Info(fmt.Sprintf("[main] RequeueInterval=%s", cfgParams.RequeueInterval))
-	log.Info(fmt.Sprintf("[main] SingleReplica=%t SizePerNode=%s StorageClass=%s",
-		cfgParams.SingleReplica, cfgParams.SizePerNode, cfgParams.StorageClass))
+	log.Info("starting sds-object-system-controller",
+		"version", version, "commit", commit, "buildDate", buildDate,
+		"goVersion", goruntime.Version(), "os", goruntime.GOOS, "arch", goruntime.GOARCH)
+	log.Info("configuration",
+		"controllerNamespace", cfgParams.ControllerNamespace,
+		"maxConcurrentReconciles", cfgParams.MaxConcurrentReconciles,
+		// A Duration renders as a nanosecond integer in JSON; the string is what an
+		// operator reading the start-up line wants.
+		"requeueInterval", cfgParams.RequeueInterval.String(),
+		"singleReplica", cfgParams.SingleReplica,
+		"sizePerNode", cfgParams.SizePerNode,
+		"storageClass", cfgParams.StorageClass)
 
 	// The store description is built once at startup: it is what the module
 	// settings say the data plane should be, and it replaces the custom resource
 	// the System profile used to carry (see internal/backend).
 	sizePerNode, err := resource.ParseQuantity(cfgParams.SizePerNode)
 	if err != nil {
-		log.Error(err, fmt.Sprintf("[main] SIZE_PER_NODE=%q is not a Kubernetes quantity", cfgParams.SizePerNode))
+		log.Error("SIZE_PER_NODE is not a Kubernetes quantity", logger.Err(err), slog.String("sizePerNode", cfgParams.SizePerNode))
 		os.Exit(1)
 	}
 	store := &backend.Store{
@@ -86,63 +94,68 @@ func main() {
 
 	kConfig, err := kubutils.KubernetesDefaultConfigCreate()
 	if err != nil {
-		log.Error(err, "[main] unable to create kubernetes config")
+		log.Error("unable to create the kubernetes config", logger.Err(err))
 		os.Exit(1)
 	}
 
 	scheme := apiruntime.NewScheme()
 	for _, f := range resourcesSchemeFuncs {
 		if err := f(scheme); err != nil {
-			log.Error(err, "[main] unable to register scheme")
+			log.Error("unable to register the scheme", logger.Err(err))
 			os.Exit(1)
 		}
 	}
 
+	// Configured, not yet serving: the listener is opened by the manager below, and a
+	// port already in use is reported from mgr.Start.
+	log.Info("metrics endpoint configured", "address", cfgParams.MetricsBindAddress+monitoring.MetricsPath)
+
 	managerOpts := manager.Options{
 		Scheme:                  scheme,
 		HealthProbeBindAddress:  cfgParams.HealthProbeBindAddress,
+		Metrics:                 metricsserver.Options{BindAddress: cfgParams.MetricsBindAddress},
 		LeaderElection:          true,
 		LeaderElectionNamespace: cfgParams.ControllerNamespace,
 		LeaderElectionID:        config.DefaultControllerName,
-		Logger:                  log.GetLogger(),
+		Logger:                  baseLog.GetLogger(),
 	}
 
 	mgr, err := manager.New(kConfig, managerOpts)
 	if err != nil {
-		log.Error(err, "[main] unable to create manager")
+		log.Error("unable to create the manager", logger.Err(err))
 		os.Exit(1)
 	}
-	log.Info("[main] kubernetes manager created")
+	log.Info("kubernetes manager created")
 
-	driver := garage.New(mgr.GetClient(), mgr.GetAPIReader(), mgr.GetConfig(), log,
+	driver := garage.New(mgr.GetClient(), mgr.GetAPIReader(), mgr.GetConfig(), baseLog,
 		cfgParams.ControllerNamespace, cfgParams.GarageImage, cfgParams.ClusterDomain)
 
 	// The data plane converges from the background loop as well as from every
 	// SystemBucket reconcile, so a cluster with no consumer yet still gets its
 	// storage built. Leader election keeps the loop to one replica.
-	storeManager := controller.NewStoreManager(driver, store, log, cfgParams.RequeueInterval)
+	storeManager := controller.NewStoreManager(driver, store, baseLog, cfgParams.RequeueInterval)
 	if err := mgr.Add(storeManager); err != nil {
-		log.Error(err, "[main] unable to register the store manager")
+		log.Error("unable to register the store manager", logger.Err(err))
 		os.Exit(1)
 	}
 
-	if err := controller.AddSystemBucketReconcilerToManager(mgr, cfgParams, log, storeManager, driver); err != nil {
-		log.Error(err, "[main] unable to register SystemBucket reconciler")
+	if err := controller.AddSystemBucketReconcilerToManager(mgr, cfgParams, baseLog, storeManager, driver); err != nil {
+		log.Error("unable to register the SystemBucket reconciler", logger.Err(err))
 		os.Exit(1)
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		log.Error(err, "[main] unable to AddHealthzCheck")
+		log.Error("unable to add the healthz check", logger.Err(err))
 		os.Exit(1)
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		log.Error(err, "[main] unable to AddReadyzCheck")
+		log.Error("unable to add the readyz check", logger.Err(err))
 		os.Exit(1)
 	}
 
-	log.Info("[main] starting manager")
+	log.Info("starting the manager")
 	if err := mgr.Start(ctx); err != nil {
-		log.Error(err, "[main] manager exited with error")
+		log.Error("the manager exited with an error", logger.Err(err))
 		os.Exit(1)
 	}
 }

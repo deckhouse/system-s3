@@ -22,11 +22,11 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/deckhouse/sds-object-system/images/controller/pkg/logger"
+	"github.com/deckhouse/sds-common-lib/logger"
+	"github.com/deckhouse/sds-common-lib/monitoring"
 )
 
 const (
-	LogLevelEnv                = "LOG_LEVEL"
 	ControllerNamespaceEnv     = "CONTROLLER_NAMESPACE"
 	HealthProbeBindAddressEnv  = "HEALTH_PROBE_BIND_ADDRESS"
 	MaxConcurrentReconcilesEnv = "MAX_CONCURRENT_RECONCILES"
@@ -64,8 +64,11 @@ const (
 )
 
 type Options struct {
-	Loglevel                logger.Verbosity
-	HealthProbeBindAddress  string
+	Loglevel               logger.Verbosity
+	HealthProbeBindAddress string
+	// MetricsBindAddress is where the manager serves /metrics, injected via
+	// METRICS_BIND_ADDRESS from Helm.
+	MetricsBindAddress      string
 	ControllerNamespace     string
 	MaxConcurrentReconciles int
 	RequeueInterval         time.Duration
@@ -95,14 +98,18 @@ type Options struct {
 	ClusterDomain string
 }
 
+// defaultMetricsBindAddress keeps the endpoint on loopback when the chart says
+// nothing: the kube-rbac-proxy of the same pod is what publishes it. The fleet-wide
+// fallback is the wildcard ":8080", which would both answer unauthenticated on the
+// pod IP and collide with the proxy, since the two carry the same port number.
+const defaultMetricsBindAddress = "127.0.0.1:8080"
+
 func NewConfig() *Options {
 	var opts Options
 
-	if v := os.Getenv(LogLevelEnv); v != "" {
-		opts.Loglevel = logger.Verbosity(v)
-	} else {
-		opts.Loglevel = logger.InfoLevel
-	}
+	opts.Loglevel = logger.VerbosityFromEnv(logger.InfoLevel)
+
+	opts.MetricsBindAddress = monitoring.BindAddressFromEnvOr(defaultMetricsBindAddress)
 
 	if v := os.Getenv(HealthProbeBindAddressEnv); v != "" {
 		opts.HealthProbeBindAddress = v
