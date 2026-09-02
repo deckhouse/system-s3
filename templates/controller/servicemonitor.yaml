@@ -3,7 +3,7 @@
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: sds-object-system-controller
+  name: system-s3-controller
   namespace: d8-monitoring
   {{- include "helm_lib_module_labels" (list $ (dict "prometheus" "main")) | nindent 2 }}
 spec:
@@ -20,7 +20,7 @@ spec:
     - regex: endpoint|namespace|pod|container
       action: labeldrop
     - targetLabel: job
-      replacement: sds-object-system-controller
+      replacement: system-s3-controller
     - targetLabel: tier
       replacement: cluster
     - sourceLabels: [__meta_kubernetes_endpointslice_endpoint_conditions_ready]

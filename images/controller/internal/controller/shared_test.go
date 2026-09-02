@@ -24,7 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/deckhouse/sds-common-lib/conditions"
-	v1alpha1 "github.com/deckhouse/sds-object-system/api/v1alpha1"
+	v1alpha1 "github.com/deckhouse/system-s3/api/v1alpha1"
 )
 
 var testStages = []string{"A", "B"}

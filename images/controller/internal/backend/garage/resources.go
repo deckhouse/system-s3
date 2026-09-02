@@ -29,7 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	"github.com/deckhouse/sds-object-system/images/controller/internal/backend"
+	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 )
 
 // Port numbers used by the Garage processes.
@@ -47,14 +47,14 @@ const (
 
 	// hostPathBase is where Garage data lives on control-plane nodes (the
 	// backing directory of each node-sticky local PV).
-	hostPathBase = "/var/lib/deckhouse/sds-object-system/garage"
+	hostPathBase = "/var/lib/deckhouse/system-s3/garage"
 
 	// registryPullSecret is the module-scoped pull secret rendered by
 	// templates/registry-secret.yaml. The Garage image comes from the module's
 	// own ModuleSource (helm_lib_module_image), so its credentials live here —
 	// not in `deckhouse-registry`, which mirrors the global modules registry and
 	// carries no credentials for a separate ModuleSource.
-	registryPullSecret = "sds-object-system-module-registry"
+	registryPullSecret = "system-s3-module-registry"
 
 	// controlPlaneNodeLabel marks control-plane nodes; the StatefulSet is
 	// scheduled there (spread across them when several exist, co-located on the
@@ -143,7 +143,7 @@ func s3SvcName(store *backend.Store) string  { return resourceName(store) }
 // teardown paths select by them.
 func commonLabels(store *backend.Store) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/managed-by": "sds-object-system",
+		"app.kubernetes.io/managed-by": "system-s3",
 		"app.kubernetes.io/name":       "garage",
 		storeLabel:                     store.Name,
 	}

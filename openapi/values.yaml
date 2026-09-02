@@ -4,7 +4,7 @@ type: object
 properties:
   namespace:
     type: string
-    default: d8-sds-object-system
+    default: d8-system-s3
   registry:
     type: object
     description: "System field, overwritten by Deckhouse. Don't use"

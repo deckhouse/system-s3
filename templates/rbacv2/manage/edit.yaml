@@ -3,12 +3,12 @@ kind: ClusterRole
 metadata:
   labels:
     heritage: deckhouse
-    module: sds-object-system
+    module: system-s3
     rbac.deckhouse.io/aggregate-to-storage-as: manager
     rbac.deckhouse.io/kind: manage
     rbac.deckhouse.io/level: module
-    rbac.deckhouse.io/namespace: d8-sds-object-system
-  name: d8:manage:permission:module:sds-object-system:edit
+    rbac.deckhouse.io/namespace: d8-system-s3
+  name: d8:manage:permission:module:system-s3:edit
 rules:
   - apiGroups:
       - storage.deckhouse.io

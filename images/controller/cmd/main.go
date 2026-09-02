@@ -33,12 +33,12 @@ import (
 
 	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/sds-common-lib/monitoring"
-	v1alpha1 "github.com/deckhouse/sds-object-system/api/v1alpha1"
-	"github.com/deckhouse/sds-object-system/images/controller/internal/backend"
-	"github.com/deckhouse/sds-object-system/images/controller/internal/backend/garage"
-	"github.com/deckhouse/sds-object-system/images/controller/internal/controller"
-	"github.com/deckhouse/sds-object-system/images/controller/pkg/config"
-	"github.com/deckhouse/sds-object-system/images/controller/pkg/kubutils"
+	v1alpha1 "github.com/deckhouse/system-s3/api/v1alpha1"
+	"github.com/deckhouse/system-s3/images/controller/internal/backend"
+	"github.com/deckhouse/system-s3/images/controller/internal/backend/garage"
+	"github.com/deckhouse/system-s3/images/controller/internal/controller"
+	"github.com/deckhouse/system-s3/images/controller/pkg/config"
+	"github.com/deckhouse/system-s3/images/controller/pkg/kubutils"
 )
 
 var (
@@ -64,7 +64,7 @@ func main() {
 	}
 	log := baseLog.Named("main")
 
-	log.Info("starting sds-object-system-controller",
+	log.Info("starting system-s3-controller",
 		"version", version, "commit", commit, "buildDate", buildDate,
 		"goVersion", goruntime.Version(), "os", goruntime.GOOS, "arch", goruntime.GOARCH)
 	log.Info("configuration",

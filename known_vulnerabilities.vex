@@ -1,6 +1,6 @@
 {
   "@context": "https://openvex.dev/ns/v0.2.0",
-  "@id": "https://openvex.dev/docs/public/vex-sds-object-system-bundle",
+  "@id": "https://openvex.dev/docs/public/vex-system-s3-bundle",
   "author": "Deckhouse <contact@deckhouse.io>",
   "version": 1,
   "statements": [

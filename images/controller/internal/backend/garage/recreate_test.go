@@ -27,7 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/deckhouse/sds-object-system/images/controller/internal/backend"
+	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 )
 
 // teardownScheme carries the object kinds the System teardown touches.
@@ -67,7 +67,7 @@ func dataPlane(store *backend.Store, ns string) []client.Object {
 }
 
 func TestTeardownDataPlane(t *testing.T) {
-	ns := "d8-sds-object-system"
+	ns := "d8-system-s3"
 	store := systemStore()
 	ctx := context.Background()
 
@@ -114,7 +114,7 @@ func TestTeardownDataPlane(t *testing.T) {
 // TestTeardownDataPlaneKeepsForeignObjects guards the label selectors: objects
 // labelled for a different store name must not be swept up by the recreate.
 func TestTeardownDataPlaneKeepsForeignObjects(t *testing.T) {
-	ns := "d8-sds-object-system"
+	ns := "d8-system-s3"
 	system := systemStore()
 	other := &backend.Store{Name: "other", StorageClass: localSC}
 	ctx := context.Background()

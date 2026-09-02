@@ -21,7 +21,7 @@ import (
 
 	tlscertificate "github.com/deckhouse/module-sdk/common-hooks/tls-certificate"
 
-	consts "github.com/deckhouse/sds-object-system/hooks/go/consts"
+	consts "github.com/deckhouse/system-s3/hooks/go/consts"
 )
 
 var _ = tlscertificate.RegisterInternalTLSHookEM(tlscertificate.GenSelfSignedTLSHookConf{

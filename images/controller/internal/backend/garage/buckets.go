@@ -22,8 +22,8 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
-	"github.com/deckhouse/sds-object-system/images/controller/internal/backend"
-	"github.com/deckhouse/sds-object-system/images/controller/internal/backend/s3util"
+	"github.com/deckhouse/system-s3/images/controller/internal/backend"
+	"github.com/deckhouse/system-s3/images/controller/internal/backend/s3util"
 )
 
 // EnsureBucket creates the named bucket in Garage. Idempotent: an existing
@@ -98,7 +98,7 @@ func (d *Driver) DeleteBucket(ctx context.Context, store *backend.Store, name st
 // own (those belong to the SystemBucket's key, which may already be gone by the
 // time the bucket is reclaimed).
 func (d *Driver) emptyBucket(ctx context.Context, store *backend.Store, svc *adminClient, bucketID, name string) error {
-	key, err := svc.createKey(ctx, "sds-object-system-reclaim-"+name)
+	key, err := svc.createKey(ctx, "system-s3-reclaim-"+name)
 	if err != nil {
 		return fmt.Errorf("create temporary key to empty bucket %q: %w", name, err)
 	}

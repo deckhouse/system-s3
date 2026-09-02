@@ -1,10 +1,10 @@
-module github.com/deckhouse/sds-object-system/images/controller
+module github.com/deckhouse/system-s3/images/controller
 
 go 1.26.6
 
 require (
 	github.com/deckhouse/sds-common-lib v0.15.0
-	github.com/deckhouse/sds-object-system/api v0.0.0
+	github.com/deckhouse/system-s3/api v0.0.0
 	github.com/minio/minio-go/v7 v7.2.1
 	k8s.io/api v0.34.1
 	k8s.io/apimachinery v0.34.1
@@ -88,4 +88,4 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-replace github.com/deckhouse/sds-object-system/api => ../../api
+replace github.com/deckhouse/system-s3/api => ../../api

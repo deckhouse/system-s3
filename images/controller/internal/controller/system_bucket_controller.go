@@ -34,9 +34,9 @@ import (
 
 	"github.com/deckhouse/sds-common-lib/conditions"
 	"github.com/deckhouse/sds-common-lib/logger"
-	v1alpha1 "github.com/deckhouse/sds-object-system/api/v1alpha1"
-	"github.com/deckhouse/sds-object-system/images/controller/internal/backend"
-	"github.com/deckhouse/sds-object-system/images/controller/pkg/config"
+	v1alpha1 "github.com/deckhouse/system-s3/api/v1alpha1"
+	"github.com/deckhouse/system-s3/images/controller/internal/backend"
+	"github.com/deckhouse/system-s3/images/controller/pkg/config"
 )
 
 // SystemBucketCtrlName names the controller in its logs, in the

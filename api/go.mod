@@ -1,4 +1,4 @@
-module github.com/deckhouse/sds-object-system/api
+module github.com/deckhouse/system-s3/api
 
 go 1.26.6
 

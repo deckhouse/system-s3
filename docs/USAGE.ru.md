@@ -87,6 +87,6 @@ kubectl -n d8-monitoring delete systembucket loki
 Посмотреть на само хранилище:
 
 ```shell
-kubectl -n d8-sds-object-system get pods,sts,pvc
-kubectl -n d8-sds-object-system logs deploy/controller -c controller
+kubectl -n d8-system-s3 get pods,sts,pvc
+kubectl -n d8-system-s3 logs deploy/controller -c controller
 ```

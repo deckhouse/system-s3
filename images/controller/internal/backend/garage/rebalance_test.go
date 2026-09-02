@@ -26,7 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/deckhouse/sds-object-system/images/controller/internal/backend"
+	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 )
 
 func TestNextPlacementAction(t *testing.T) {
@@ -145,7 +145,7 @@ func TestNextPlacementAction(t *testing.T) {
 // PV pinned to a master that is gone), so the two modes are compared on identical
 // input.
 func TestReconcilePlacementSingleReplica(t *testing.T) {
-	ns := "d8-sds-object-system"
+	ns := "d8-system-s3"
 
 	newDriver := func(t *testing.T, store *backend.Store) (*Driver, client.Client) {
 		t.Helper()

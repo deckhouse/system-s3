@@ -1,12 +1,12 @@
 {{- /*
-  RBAC for the sds-object-system-controller.
+  RBAC for the system-s3-controller.
 
   The controller-runtime cache is cluster-scoped by default, so any namespaced
   resource the manager reads (Secret, ConfigMap, Service, ServiceAccount,
   StatefulSet) requires cluster-wide get/list/watch on the ServiceAccount.
   Mutation of the data-plane objects the Garage driver creates (ConfigMap,
   Service, ServiceAccount, StatefulSet) stays in the namespaced Role — they only
-  ever live in d8-sds-object-system. Secrets are the exception: the SystemBucket
+  ever live in d8-system-s3. Secrets are the exception: the SystemBucket
   reconciler writes the S3 credentials Secret into the consuming component's
   namespace, so secret write verbs are granted cluster-wide.
 

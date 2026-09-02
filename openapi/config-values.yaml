@@ -38,7 +38,7 @@ properties:
           > access keys are re-issued automatically, but the objects are gone —
           > back up anything you need first. The previous data directories are left
           > on the control-plane nodes under
-          > `/var/lib/deckhouse/sds-object-system/garage/system` and can be removed
+          > `/var/lib/deckhouse/system-s3/garage/system` and can be removed
           > manually once you no longer need them.
       sizePerNode:
         type: string
@@ -120,12 +120,12 @@ properties:
     type: object
     default: {}
     description: |
-      Settings of the sds-object-system-controller (the reconciler for
+      Settings of the system-s3-controller (the reconciler for
       SystemBucket resources and for the storage data plane).
     properties:
       resourcesManagement:
         description: |
-          sds-object-system-controller resources management options.
+          system-s3-controller resources management options.
         default: {}
         x-examples:
           - mode: VPA

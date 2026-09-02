@@ -1,5 +1,5 @@
 ---
-title: "Module sds-object-system"
+title: "Module system-s3"
 description: "Deckhouse Kubernetes Platform module that provides the platform's system S3 object storage."
 weight: 1
 ---
@@ -8,7 +8,7 @@ weight: 1
 The module is in the `Experimental` stage. The API, configuration, and custom resources may change without notice; do not use it for production workloads.
 {{< /alert >}}
 
-The `sds-object-system` module provides the **system** S3 object storage: the bucket a Deckhouse component keeps its data in. It runs one Garage cluster on the control-plane nodes and hands out buckets with credentials through a single custom resource.
+The `system-s3` module provides the **system** S3 object storage: the bucket a Deckhouse component keeps its data in. It runs one Garage cluster on the control-plane nodes and hands out buckets with credentials through a single custom resource.
 
 It is not a storage service for applications. Workloads get their object storage from the `sds-object` module, which offers the user-facing backends; this module exists so platform components have somewhere to put their data without waiting for that one, and it is deliberately the smaller of the two.
 
@@ -28,14 +28,14 @@ That is the whole API, and each omission is deliberate:
 
 `SystemBucket` is admitted only in namespaces labelled `heritage: deckhouse` — the label Deckhouse puts on the namespace of every module. The check is on the label rather than on a `d8-*` name, because a name is a convention any tenant could imitate.
 
-No user-facing RBAC is granted for the resource: only cluster and storage administrators (the `d8:manage:permission:module:sds-object-system:*` roles) can see or edit it.
+No user-facing RBAC is granted for the resource: only cluster and storage administrators (the `d8:manage:permission:module:system-s3:*` roles) can see or edit it.
 
 ## The data plane
 
 One Garage cluster, deployed by the controller:
 
 - three replicas by default with a replication factor of 3, independent of the control-plane node count — replicas spread one per master when several exist and co-locate on the single master otherwise;
-- storage is a node-sticky local volume per replica (a `hostPath`-backed, node-pinned `PersistentVolume` on the `sds-object-system-local` StorageClass), so a replica returns to its node — and its data — after a restart;
+- storage is a node-sticky local volume per replica (a `hostPath`-backed, node-pinned `PersistentVolume` on the `system-s3-local` StorageClass), so a replica returns to its node — and its data — after a restart;
 - `storage.singleReplica` trades all of that for a single replica with replication factor 1.
 
 {{< alert level="warning" >}}

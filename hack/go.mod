@@ -1,4 +1,4 @@
-module sds-object-system-release-notes
+module system-s3-release-notes
 
 go 1.26.6
 

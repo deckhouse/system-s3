@@ -24,7 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/deckhouse/sds-object-system/images/controller/internal/backend"
+	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 )
 
 // layoutZone is the Garage layout zone assigned to every node. A single zone is

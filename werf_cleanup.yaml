@@ -1,5 +1,5 @@
 configVersion: 1
-project: sds-object-system
+project: system-s3
 cleanup:
   keepPolicies:
   - references:

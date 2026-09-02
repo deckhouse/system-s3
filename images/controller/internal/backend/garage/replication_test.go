@@ -25,7 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/deckhouse/sds-object-system/images/controller/internal/backend"
+	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 )
 
 func rfScheme(t *testing.T) *runtime.Scheme {
@@ -44,7 +44,7 @@ func rfStore() *backend.Store {
 func TestPinnedState(t *testing.T) {
 	s := rfScheme(t)
 	store := rfStore()
-	ns := "d8-sds-object-system"
+	ns := "d8-system-s3"
 
 	configMap := func(data map[string]string) *corev1.ConfigMap {
 		return &corev1.ConfigMap{
@@ -121,7 +121,7 @@ func TestIncarnationFromConfigMap(t *testing.T) {
 
 	// The ConfigMap always records the counter: it is what keeps a recreated
 	// store off the previous incarnation's data directories.
-	if cm := buildConfigMap(sys, "d8-sds-object-system", 1, 3); cm.Data[incarnationKey] != "3" {
+	if cm := buildConfigMap(sys, "d8-system-s3", 1, 3); cm.Data[incarnationKey] != "3" {
 		t.Errorf("ConfigMap incarnation=%q, want 3", cm.Data[incarnationKey])
 	}
 }

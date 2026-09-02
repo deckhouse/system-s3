@@ -25,12 +25,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/deckhouse/sds-object-system/images/controller/internal/backend"
+	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 )
 
 // localSC is the managed local StorageClass the module ships; the fixtures name
 // it explicitly so a rename in config defaults cannot silently pass these tests.
-const localSC = "sds-object-system-local"
+const localSC = "system-s3-local"
 
 // systemStore is the store as the module builds it from its default settings.
 func systemStore() *backend.Store {
@@ -91,7 +91,7 @@ func TestClampRF(t *testing.T) {
 }
 
 func TestReplicationFactorFromConfigMap(t *testing.T) {
-	cm := buildConfigMap(systemStore(), "d8-sds-object-system", 2, firstIncarnation)
+	cm := buildConfigMap(systemStore(), "d8-system-s3", 2, firstIncarnation)
 	if got := replicationFactorFromConfigMap(cm); got != 2 {
 		t.Errorf("replicationFactorFromConfigMap=%d, want 2", got)
 	}
@@ -108,10 +108,10 @@ func TestNamesAndEndpoints(t *testing.T) {
 	if got := secretName(c); got != "system-garage-secrets" {
 		t.Errorf("secretName=%q", got)
 	}
-	if got := s3Endpoint(c, "d8-sds-object-system", "internal.store.local"); got != "http://system-garage.d8-sds-object-system.svc.internal.store.local:3900" {
+	if got := s3Endpoint(c, "d8-system-s3", "internal.store.local"); got != "http://system-garage.d8-system-s3.svc.internal.store.local:3900" {
 		t.Errorf("s3Endpoint=%q", got)
 	}
-	if got := adminEndpoint(c, "d8-sds-object-system", "store.local"); got != "http://system-garage.d8-sds-object-system.svc.store.local:3903" {
+	if got := adminEndpoint(c, "d8-system-s3", "store.local"); got != "http://system-garage.d8-system-s3.svc.store.local:3903" {
 		t.Errorf("adminEndpoint=%q", got)
 	}
 	if l := commonLabels(c); l["storage.deckhouse.io/system-store"] != "system" {
@@ -146,7 +146,7 @@ func TestDesiredReplicas(t *testing.T) {
 }
 
 func TestBuildSystemStatefulSet(t *testing.T) {
-	sts := buildStatefulSet(systemStore(), "d8-sds-object-system", "garage:v1", "hash")
+	sts := buildStatefulSet(systemStore(), "d8-system-s3", "garage:v1", "hash")
 
 	if sts.Spec.Replicas == nil || *sts.Spec.Replicas != replicasHA {
 		t.Fatalf("replicas=%v, want %d (fixed, independent of master count)", sts.Spec.Replicas, replicasHA)
@@ -260,7 +260,7 @@ func TestPodOrdinal(t *testing.T) {
 }
 
 func TestBuildSingleReplicaSystemStatefulSet(t *testing.T) {
-	sts := buildStatefulSet(singleReplicaStore(), "d8-sds-object-system", "garage:v1", "hash")
+	sts := buildStatefulSet(singleReplicaStore(), "d8-system-s3", "garage:v1", "hash")
 
 	if sts.Spec.Replicas == nil || *sts.Spec.Replicas != replicasSingle {
 		t.Fatalf("replicas=%v, want %d", sts.Spec.Replicas, replicasSingle)
@@ -401,9 +401,9 @@ func TestLayoutTotalCapacity(t *testing.T) {
 // global modules registry and holds no credentials for a second ModuleSource:
 // pulls then fail with 401 while the controller itself keeps running.
 func TestPullSecretIsModuleScoped(t *testing.T) {
-	const want = "sds-object-system-module-registry"
+	const want = "system-s3-module-registry"
 
-	sts := buildStatefulSet(systemStore(), "d8-sds-object-system", "garage:v1", "hash")
+	sts := buildStatefulSet(systemStore(), "d8-system-s3", "garage:v1", "hash")
 	secrets := sts.Spec.Template.Spec.ImagePullSecrets
 	if len(secrets) != 1 || secrets[0].Name != want {
 		t.Errorf("imagePullSecrets=%v, want [%s]", secrets, want)

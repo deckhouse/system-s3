@@ -1,4 +1,4 @@
-name: "sds-object-system"
+name: "system-s3"
 stage: "Experimental"
 subsystems:
   - storage
@@ -7,7 +7,7 @@ descriptions:
   ru: "Предоставляет системное объектное хранилище S3 для платформы."
 requirements:
   deckhouse: ">= 1.72"
-namespace: d8-sds-object-system
+namespace: d8-system-s3
 disable:
   confirmation: true
   message: |

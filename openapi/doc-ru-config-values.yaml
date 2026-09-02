@@ -34,7 +34,7 @@ properties:
           > выключении). Бакеты создаются заново, ключи доступа перевыпускаются
           > автоматически, но объекты теряются: сохраните нужные данные заранее.
           > Каталоги предыдущего кластера остаются на control-plane узлах в
-          > `/var/lib/deckhouse/sds-object-system/garage/system` и могут быть
+          > `/var/lib/deckhouse/system-s3/garage/system` и могут быть
           > удалены вручную, когда перестанут быть нужны.
       sizePerNode:
         description: |

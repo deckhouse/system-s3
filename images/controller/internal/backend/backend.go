@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package backend defines the contract between the sds-object-system
+// Package backend defines the contract between the system-s3
 // reconcilers and the Garage data plane that implements the system object
 // storage. The reconcilers own the Kubernetes-facing FSM (conditions, phases,
 // finalizers, credentials Secret); the driver owns everything backend-specific

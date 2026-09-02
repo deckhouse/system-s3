@@ -28,7 +28,7 @@ import (
 
 	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/sds-common-lib/logger/kwhlogger"
-	"github.com/deckhouse/sds-object-system/images/webhooks/handlers"
+	"github.com/deckhouse/system-s3/images/webhooks/handlers"
 )
 
 type config struct {

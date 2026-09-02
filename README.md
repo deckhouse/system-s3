@@ -1,4 +1,4 @@
-# sds-object-system
+# system-s3
 
 Deckhouse Kubernetes Platform module that provides the platform's **system** S3
 object storage: a Garage data plane the module owns end to end, and a single

@@ -87,6 +87,6 @@ A `SystemBucket` in a namespace without the `heritage: deckhouse` label is rejec
 To inspect the storage itself:
 
 ```shell
-kubectl -n d8-sds-object-system get pods,sts,pvc
-kubectl -n d8-sds-object-system logs deploy/controller -c controller
+kubectl -n d8-system-s3 get pods,sts,pvc
+kubectl -n d8-system-s3 logs deploy/controller -c controller
 ```

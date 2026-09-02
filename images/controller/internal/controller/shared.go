@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package controller holds the sds-object-system reconcilers. Each reconciler
+// Package controller holds the system-s3 reconcilers. Each reconciler
 // drives its CR through a small condition-based FSM: a fixed list of stage
 // conditions is advanced in order, downstream stages are gated when an upstream
 // stage is not Ready, and the aggregate Ready condition plus the coarse Phase are
@@ -41,7 +41,7 @@ import (
 // Finalizer is placed on every SystemBucket the controller reconciles, so the
 // bucket and its access key are removed from the backend before the CR
 // disappears.
-const Finalizer = "storage.deckhouse.io/sds-object-system-controller"
+const Finalizer = "storage.deckhouse.io/system-s3-controller"
 
 // conditionReady is the aggregate readiness condition type
 // (SystemBucketConditionReady), so the shared FSM gates it by this single

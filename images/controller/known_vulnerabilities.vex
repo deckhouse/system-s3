@@ -1,6 +1,6 @@
 {
   "@context": "https://openvex.dev/ns/v0.2.0",
-  "@id": "https://openvex.dev/docs/public/vex-sds-object-system-controller",
+  "@id": "https://openvex.dev/docs/public/vex-system-s3-controller",
   "author": "Deckhouse <contact@deckhouse.io>",
   "version": 1,
   "statements": [
@@ -15,7 +15,7 @@
       ],
       "status": "not_affected",
       "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "Advisory covers the unmaintained golang.org/x/crypto/openpgp subpackage. In the sds-object-system controller binary golang.org/x/crypto is pulled in transitively only for key derivation used by the S3 client (internal/backend/s3util -> github.com/minio/minio-go/v7 -> github.com/minio/minio-go/v7/pkg/encrypt -> golang.org/x/crypto/argon2); `go mod why golang.org/x/crypto/openpgp` reports that the main module does not need the openpgp package, so it is not compiled into the binary and the vulnerable code is not in the execution path. golang.org/x/crypto has no release that drops openpgp, so the finding cannot be resolved by upgrading."
+      "impact_statement": "Advisory covers the unmaintained golang.org/x/crypto/openpgp subpackage. In the system-s3 controller binary golang.org/x/crypto is pulled in transitively only for key derivation used by the S3 client (internal/backend/s3util -> github.com/minio/minio-go/v7 -> github.com/minio/minio-go/v7/pkg/encrypt -> golang.org/x/crypto/argon2); `go mod why golang.org/x/crypto/openpgp` reports that the main module does not need the openpgp package, so it is not compiled into the binary and the vulnerable code is not in the execution path. golang.org/x/crypto has no release that drops openpgp, so the finding cannot be resolved by upgrading."
     }
   ],
   "timestamp": "2026-07-27T00:00:00Z"

@@ -22,8 +22,8 @@ import (
 	"time"
 
 	"github.com/deckhouse/sds-common-lib/logger"
-	"github.com/deckhouse/sds-object-system/images/controller/internal/backend"
-	"github.com/deckhouse/sds-object-system/images/controller/internal/backend/garage"
+	"github.com/deckhouse/system-s3/images/controller/internal/backend"
+	"github.com/deckhouse/system-s3/images/controller/internal/backend/garage"
 )
 
 // StoreManager owns the module's single system data plane.

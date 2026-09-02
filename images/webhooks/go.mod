@@ -1,4 +1,4 @@
-module github.com/deckhouse/sds-object-system/images/webhooks
+module github.com/deckhouse/system-s3/images/webhooks
 
 go 1.26.6
 

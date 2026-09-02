@@ -14,7 +14,7 @@
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: sds-object-system-local
+  name: system-s3-local
   {{- include "helm_lib_module_labels" (list .) | nindent 2 }}
 provisioner: kubernetes.io/no-provisioner
 volumeBindingMode: WaitForFirstConsumer

@@ -39,10 +39,10 @@ const (
 	StorageClassEnv            = "STORAGE_CLASS"
 	ClusterDomainEnv           = "CLUSTER_DOMAIN"
 
-	DefaultControllerNamespace     = "d8-sds-object-system"
-	DefaultControllerName          = "sds-object-system-controller"
+	DefaultControllerNamespace     = "d8-system-s3"
+	DefaultControllerName          = "system-s3-controller"
 	DefaultSizePerNode             = "10Gi"
-	DefaultStorageClass            = "sds-object-system-local"
+	DefaultStorageClass            = "system-s3-local"
 	DefaultHealthProbeBindAddress  = ":8081"
 	DefaultRequeueIntervalSeconds  = 30
 	DefaultMaxConcurrentReconciles = 1

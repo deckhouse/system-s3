@@ -1,4 +1,4 @@
-module github.com/deckhouse/sds-object-system/hooks/go
+module github.com/deckhouse/system-s3/hooks/go
 
 go 1.26.6
 

@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package v1alpha1 contains API Schema definitions for the storage.deckhouse.io
-// resources managed by the sds-object-system module.
+// resources managed by the system-s3 module.
 //
 //   - SystemBucket — namespaced CR with which a Deckhouse component asks for a
 //     bucket in the platform's system object storage and receives S3

@@ -17,9 +17,9 @@ limitations under the License.
 package consts
 
 const (
-	ModuleName       string = "sdsObjectSystem"
-	ModuleNamespace  string = "d8-sds-object-system"
-	ModulePluralName string = "sds-object-system"
+	ModuleName       string = "systemS3"
+	ModuleNamespace  string = "d8-system-s3"
+	ModulePluralName string = "system-s3"
 	// WebhookCertCn is the CN used for the self-signed TLS material that
 	// the webhooks container consumes. It must match the Service name
 	// (helm_lib_module_webhook_service defaults to "webhooks").
@@ -35,7 +35,7 @@ var AllowedProvisioners = []string{}
 // WebhookConfigurationsToDelete lists ValidatingWebhookConfigurations the
 // module-delete hook removes on uninstall.
 var WebhookConfigurationsToDelete = []string{
-	"d8-sds-object-system-systembucket-validation",
+	"d8-system-s3-systembucket-validation",
 }
 
 // CRGVKsForFinalizerRemoval lists CRs the module creates and which may carry a

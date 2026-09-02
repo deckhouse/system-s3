@@ -4,7 +4,7 @@ metadata:
   name: systembuckets.storage.deckhouse.io
   labels:
     heritage: deckhouse
-    module: sds-object-system
+    module: system-s3
     backup.deckhouse.io/cluster-config: "true"
 spec:
   group: storage.deckhouse.io

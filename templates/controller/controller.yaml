@@ -1,6 +1,6 @@
 {{- /* Webhook TLS Certs Secret */ -}}
 {{- $secretConfig := dict
-  "valuesKey" "sdsObjectSystem"
+  "valuesKey" "systemS3"
   "webhookCertPath" "internal.customWebhookCert"
 }}
 {{ include "helm_lib_module_webhook_certs_secret" (list . $secretConfig) }}
@@ -8,7 +8,7 @@
 {{- /* Controller Deployment + VPA + PDB */ -}}
 {{- /*
   helm_lib_module_controller_manifests already injects LOG_LEVEL (from
-  .Values.sdsObjectSystem.logLevel via helm_lib_module_controller_log_level) and
+  .Values.systemS3.logLevel via helm_lib_module_controller_log_level) and
   CONTROLLER_NAMESPACE (valueFrom fieldRef metadata.namespace).
 
   The data plane has no custom resource, so its settings reach the controller as
@@ -21,19 +21,19 @@
   helm_lib_module_webhook_service, which is the only Service this chart has.
 */ -}}
 {{- $config := dict
-  "valuesKey" "sdsObjectSystem"
+  "valuesKey" "systemS3"
   "onMasterNode" true
   "podSecurityContext" "deckhouse"
   "webhookEnabled" true
   "webhookCertPath" "internal.customWebhookCert"
-  "controllerMetricsPort" (int .Values.sdsObjectSystem.internal.controllerMetricsPort)
-  "controllerMetricsProxyPort" (int .Values.sdsObjectSystem.internal.controllerMetricsProxyPort)
+  "controllerMetricsPort" (int .Values.systemS3.internal.controllerMetricsPort)
+  "controllerMetricsProxyPort" (int .Values.systemS3.internal.controllerMetricsProxyPort)
   "additionalControllerEnvs" (list
     (dict "name" "GARAGE_IMAGE" "value" (include "helm_lib_module_image" (list . "garage")))
     (dict "name" "CLUSTER_DOMAIN" "value" .Values.global.discovery.clusterDomain)
-    (dict "name" "SINGLE_REPLICA" "value" (.Values.sdsObjectSystem.storage.singleReplica | toString))
-    (dict "name" "SIZE_PER_NODE" "value" .Values.sdsObjectSystem.storage.sizePerNode)
-    (dict "name" "STORAGE_CLASS" "value" "sds-object-system-local")
+    (dict "name" "SINGLE_REPLICA" "value" (.Values.systemS3.storage.singleReplica | toString))
+    (dict "name" "SIZE_PER_NODE" "value" .Values.systemS3.storage.sizePerNode)
+    (dict "name" "STORAGE_CLASS" "value" "system-s3-local")
   )
 }}
 {{ include "helm_lib_module_controller_manifests" (list . $config) }}
@@ -46,7 +46,7 @@
 {{- $serviceConfig := dict
   "additionalPorts" (list (dict
     "name" "https-metrics"
-    "port" (int .Values.sdsObjectSystem.internal.controllerMetricsProxyPort)
+    "port" (int .Values.systemS3.internal.controllerMetricsProxyPort)
     "targetPort" "https-metrics"
   ))
 }}
@@ -69,7 +69,7 @@
 {{- $systemBucketWebhookConfig := dict
   "name" "systembucket-validation"
   "webhookName" "systembucket-validation"
-  "valuesKey" "sdsObjectSystem"
+  "valuesKey" "systemS3"
   "path" "/systembucket-validate"
   "failurePolicy" "Fail"
   "rules" (list
