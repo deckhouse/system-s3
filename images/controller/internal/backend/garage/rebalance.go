@@ -171,6 +171,16 @@ func (d *Driver) systemReplicaNodes(ctx context.Context, store *backend.Store) (
 			}
 			return nil, err
 		}
+		if pvc.DeletionTimestamp != nil {
+			// A move is already under way: the PVC is waiting for pvc-protection to
+			// let go. Reading it as "still on the wrong node" is what turns one
+			// recycle into a loop — nextPlacementAction would ask for the same move,
+			// recycleReplica would delete the pod again, and the pod is the consumer
+			// keeping the finalizer on. Reported as unplaced instead, which asks for
+			// nothing.
+			out[ord] = ""
+			continue
+		}
 		if pvc.Spec.VolumeName == "" {
 			out[ord] = ""
 			continue
@@ -198,16 +208,30 @@ func (d *Driver) recycleReplica(ctx context.Context, store *backend.Store, ordin
 	name := fmt.Sprintf("%s-%d", resourceName(store), ordinal)
 	pvcName := "data-" + name
 
-	pvc := &corev1.PersistentVolumeClaim{}
-	pvc.Namespace, pvc.Name = d.namespace, pvcName
-	if err := d.client.Delete(ctx, pvc); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete pvc %s: %w", pvcName, err)
-	}
-
+	// The pod first, the PVC second, and the order is the whole difference.
+	//
+	// Deleting the PVC while its pod still mounts it only stamps a
+	// deletionTimestamp: pvc-protection holds the object as long as a consumer
+	// exists. Then the pod goes, and the StatefulSet controller immediately
+	// recreates it under the same name with the same claim — so whether this
+	// works comes down to a race between pvc-protection dropping the finalizer
+	// and the new pod appearing. Lose that race and the new pod references a
+	// terminating PVC, stays Pending on "persistentvolumeclaim is being deleted",
+	// and by existing it keeps the finalizer from ever being dropped.
+	//
+	// Removing the pod first means that when the PVC delete lands there is no
+	// consumer to hold it, so the finalizer goes immediately and the claim is
+	// gone before the StatefulSet has recreated anything.
 	pod := &corev1.Pod{}
 	pod.Namespace, pod.Name = d.namespace, name
 	if err := d.client.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete pod %s: %w", name, err)
+	}
+
+	pvc := &corev1.PersistentVolumeClaim{}
+	pvc.Namespace, pvc.Name = d.namespace, pvcName
+	if err := d.client.Delete(ctx, pvc); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete pvc %s: %w", pvcName, err)
 	}
 	return nil
 }

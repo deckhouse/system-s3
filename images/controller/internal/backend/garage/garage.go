@@ -302,10 +302,38 @@ func (d *Driver) ensureWorkload(ctx context.Context, store *backend.Store, cfgHa
 	if sts.Spec.Replicas != nil {
 		desired = *sts.Spec.Replicas
 	}
-	if sts.Status.ReadyReplicas < desired {
-		return false, fmt.Sprintf("Garage StatefulSet rolling out (%d/%d pods ready)", sts.Status.ReadyReplicas, desired), nil
+
+	ready, msg := workloadRolledOut(sts, desired)
+	return ready, msg, nil
+}
+
+// workloadRolledOut reports whether the StatefulSet is serving the revision that
+// was just applied, and what to say while it is not.
+//
+// Revision matters as much as count, and readyReplicas cannot tell them apart.
+// Garage reads garage.toml once, at startup. When the config hash changes the pod
+// template changes with it, and for a moment the old pods are still Ready while
+// the StatefulSet has not even begun rolling — observedGeneration still behind
+// generation. A gate that counts only ready pods opens right there, and what runs
+// immediately after it is mesh and layout: peers connected and a layout applied
+// against a Garage cluster running the previous config, while consumers hold
+// credentials for an endpoint reported Ready.
+//
+// Hence the order: generation, then revision, then count. The same lesson as
+// "pods Ready" not meaning "pods of the revision you just applied".
+func workloadRolledOut(sts *appsv1.StatefulSet, desired int32) (bool, string) {
+	if sts.Status.ObservedGeneration < sts.Generation {
+		return false, "Garage StatefulSet update not observed yet"
 	}
-	return true, "", nil
+	if sts.Status.UpdateRevision != "" && sts.Status.CurrentRevision != sts.Status.UpdateRevision {
+		return false, fmt.Sprintf("Garage StatefulSet rolling out (%d/%d pods on the new revision)",
+			sts.Status.UpdatedReplicas, desired)
+	}
+	if sts.Status.ReadyReplicas < desired {
+		return false, fmt.Sprintf("Garage StatefulSet rolling out (%d/%d pods ready)",
+			sts.Status.ReadyReplicas, desired)
+	}
+	return true, ""
 }
 
 // apply creates or updates obj. On update it overwrites the spec-bearing fields
