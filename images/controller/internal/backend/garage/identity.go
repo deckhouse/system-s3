@@ -181,7 +181,13 @@ func (d *Driver) storeNodeIdentities(ctx context.Context, store *backend.Store, 
 	key := client.ObjectKey{Namespace: d.namespace, Name: nodeIdentitySecretName(store)}
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		secret := &corev1.Secret{}
-		if err := d.client.Get(ctx, key, secret); err != nil {
+		// apiReader, not the cache. RetryOnConflict re-reads on every attempt, and
+		// the whole point of re-reading is to get the version the conflict was
+		// about. A cached read hands back the same stale copy each time, so the
+		// retry mutates the object that already lost and conflicts again until the
+		// informer happens to catch up — the retry becoming a spin rather than a
+		// resolution.
+		if err := d.apiReader.Get(ctx, key, secret); err != nil {
 			return err
 		}
 		if secret.Data == nil {

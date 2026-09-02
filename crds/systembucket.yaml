@@ -51,6 +51,8 @@ spec:
               x-kubernetes-validations:
                 - rule: "oldSelf == null || !has(self.bucketName) && !has(oldSelf.bucketName) || has(self.bucketName) && has(oldSelf.bucketName) && self.bucketName == oldSelf.bucketName"
                   message: "spec.bucketName is immutable after creation."
+                - rule: "oldSelf == null || !has(self.credentialsSecretName) && !has(oldSelf.credentialsSecretName) || has(self.credentialsSecretName) && has(oldSelf.credentialsSecretName) && self.credentialsSecretName == oldSelf.credentialsSecretName"
+                  message: "spec.credentialsSecretName is immutable after creation: renaming it would leave the old Secret behind — it is owned by this resource, so nothing else removes it while this one lives — and the new one starts empty, which the controller reads as a lost secret key and answers with a rotation. Delete the SystemBucket and create it with the name you want."
               properties:
                 bucketName:
                   type: string
@@ -69,6 +71,12 @@ spec:
                     Overrides the name of the credentials Secret written in this
                     bucket's namespace. Defaults to
                     `<metadata.name>-s3-credentials`.
+
+                    Immutable after creation: the Secret is owned by this
+                    resource, so renaming it would leave the old one behind for as
+                    long as this resource lives, and the new name starts with no
+                    Secret at all — which the controller treats as a lost secret
+                    key and answers by rotating the access key.
                   minLength: 1
                   maxLength: 253
             status:

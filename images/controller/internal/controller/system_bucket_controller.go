@@ -220,7 +220,19 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 		return r.finish(ctx, bucket, status, observed, err)
 	}
 	if !platform {
-		status.Set(v1alpha1.SystemBucketConditionStorageReady, metav1.ConditionFalse, "NamespaceNotPlatform",
+		// ReconcileFailed, not a reason of its own, and the reason is the phase.
+		//
+		// Stages.Phase reports Error only when some stage carries the failed reason;
+		// anything else leaves it InProgress, and the gated stages below get
+		// WaitingForDependency. So a custom reason here made the one genuinely
+		// terminal refusal in the whole FSM read as "still working": nothing moves
+		// until somebody relabels the namespace, and no reconcile will change that.
+		// An operator waiting for a terminal state — or a script that distinguishes
+		// Ready from Error — waits forever.
+		//
+		// The text keeps saying what is actually wrong; only the reason is the one
+		// the phase derivation understands.
+		status.Set(v1alpha1.SystemBucketConditionStorageReady, metav1.ConditionFalse, conditions.ReasonReconcileFailed,
 			fmt.Sprintf("namespace %q is not a Deckhouse platform namespace (label %s=%s); the system object storage is not available to it",
 				bucket.Namespace, v1alpha1.LabelHeritage, v1alpha1.HeritageDeckhouse))
 		status.GateAfter(v1alpha1.SystemBucketConditionStorageReady)
@@ -274,7 +286,16 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 		}
 	}
 
-	mintFresh := rotationValue != observedRotation || recordedKey == "" || !secretExists
+	// A Secret with an empty secret key is the same case as no Secret at all.
+	//
+	// Garage returns a key's secret half once and never again, so reusing a key
+	// whose only copy is gone means writing credentials that cannot work — and
+	// then reporting CredentialsReady=True over them. The consumer gets 403 on
+	// every request while the resource says Ready, and it never heals: the next
+	// pass makes the same decision. Checking that the Secret exists is not enough;
+	// what matters is whether it still carries the half nobody can reissue.
+	secretUsable := secretExists && len(existing.Data[v1alpha1.SecretKeySecretAccessID]) > 0
+	mintFresh := rotationValue != observedRotation || recordedKey == "" || !secretUsable
 
 	astate, err := r.Driver.EnsureAccess(ctx, store, name,
 		backend.AccessResourceName(bucket.Namespace, bucket.Name), recordedKey, mintFresh)
@@ -398,12 +419,20 @@ func (r *SystemBucketReconciler) ensureCredentialsSecret(
 		// so a consumer deleting it by hand would go unnoticed.
 		secret.Labels[v1alpha1.ManagedByLabel] = v1alpha1.ManagedByValue
 		secret.Type = corev1.SecretTypeOpaque
-		secret.StringData = map[string]string{
-			v1alpha1.SecretKeyS3Endpoint:     state.Endpoint,
-			v1alpha1.SecretKeyS3Region:       state.Region,
-			v1alpha1.SecretKeyS3Bucket:       bucketName,
-			v1alpha1.SecretKeyAccessKeyID:    accessKeyID,
-			v1alpha1.SecretKeySecretAccessID: secretKey,
+		// Data rather than StringData, so CreateOrUpdate can recognise a no-op.
+		//
+		// StringData is write-only: the server folds it into Data and never returns
+		// it, so an object read back has Data set and StringData nil. Setting
+		// StringData in the mutate function therefore makes the comparison differ
+		// every time, and an Update request goes out on every pass. The server
+		// collapses it — the resulting Data is identical, so resourceVersion does
+		// not move and no watch fires — but the request is still pointless.
+		secret.Data = map[string][]byte{
+			v1alpha1.SecretKeyS3Endpoint:     []byte(state.Endpoint),
+			v1alpha1.SecretKeyS3Region:       []byte(state.Region),
+			v1alpha1.SecretKeyS3Bucket:       []byte(bucketName),
+			v1alpha1.SecretKeyAccessKeyID:    []byte(accessKeyID),
+			v1alpha1.SecretKeySecretAccessID: []byte(secretKey),
 		}
 		return controllerutil.SetControllerReference(bucket, secret, r.Scheme)
 	})
@@ -444,7 +473,26 @@ func (r *SystemBucketReconciler) updateStatus(
 	sb *conditions.Builder,
 	observed *bucketObserved,
 ) error {
-	return conditions.UpdateStatus(ctx, r.Client, bucket, func(latest *v1alpha1.SystemBucket) {
+	// Read through APIReader, write through Client.
+	//
+	// UpdateStatus re-reads with whatever client it is given, and this one was
+	// given the cached one. RetryOnConflict re-reads on every attempt precisely to
+	// get the version the conflict was about; a cached read returns the same stale
+	// copy each time, so the retry re-mutates the object that already lost and
+	// conflicts again until the informer catches up. UpdateStatusVia exists to
+	// separate the two.
+	read := func(ctx context.Context) (*v1alpha1.SystemBucket, error) {
+		fresh := &v1alpha1.SystemBucket{}
+		if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(bucket), fresh); err != nil {
+			return nil, err
+		}
+		return fresh, nil
+	}
+	write := func(ctx context.Context, obj *v1alpha1.SystemBucket) error {
+		return r.Client.Status().Update(ctx, obj)
+	}
+
+	return conditions.UpdateStatusVia(ctx, read, write, func(latest *v1alpha1.SystemBucket) {
 		if latest.Status == nil {
 			latest.Status = &v1alpha1.SystemBucketStatus{}
 		}

@@ -115,7 +115,7 @@ func reconcilerScheme(t *testing.T) *runtime.Scheme {
 
 // platformNS is a namespace the module accepts: the gate is the heritage label,
 // not a d8-* name, which a tenant could imitate.
-func platformNS(name string) *corev1.Namespace {
+func platformNS(name string) *corev1.Namespace { //nolint:unparam // one caller today; a second namespace is a plausible next test
 	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name:   name,
 		Labels: map[string]string{"heritage": "deckhouse"},
@@ -293,4 +293,93 @@ type failingDeleteDriver struct{ *fakeDriver }
 
 func (f *failingDeleteDriver) DeleteBucket(_ context.Context, _ *backend.Store, _ string) error {
 	return apierrors.NewServiceUnavailable("garage is down")
+}
+
+// A Secret that exists but has lost its secret key is the same case as no Secret.
+//
+// Garage returns a key's secret half once and never again, so reusing a key whose
+// only copy is gone writes credentials that cannot work — and then reports Ready
+// over them. The consumer gets 403 on every request while the resource says Ready,
+// and it never heals: the next pass makes the same decision.
+func TestAnEmptySecretKeyForcesAFreshKey(t *testing.T) {
+	const ns, name = "d8-monitoring", "loki"
+
+	for _, tc := range []struct {
+		name     string
+		secret   *corev1.Secret
+		wantMint bool
+	}{
+		{
+			name:     "no Secret at all",
+			secret:   nil,
+			wantMint: true,
+		},
+		{
+			name: "a Secret with a usable secret key",
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-s3-credentials", Namespace: ns},
+				Data: map[string][]byte{
+					v1alpha1.SecretKeyAccessKeyID:    []byte("AK1"),
+					v1alpha1.SecretKeySecretAccessID: []byte("secret-of-AK1"),
+				},
+			},
+			wantMint: false,
+		},
+		{
+			// Hand-edited, restored from a backup without data, or a partial first
+			// write. Existence alone used to be enough to reuse the key.
+			name: "a Secret whose secret key is empty",
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-s3-credentials", Namespace: ns},
+				Data: map[string][]byte{
+					v1alpha1.SecretKeyAccessKeyID:    []byte("AK1"),
+					v1alpha1.SecretKeySecretAccessID: []byte(""),
+				},
+			},
+			wantMint: true,
+		},
+		{
+			name: "a Secret with no secret key at all",
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-s3-credentials", Namespace: ns},
+				Data:       map[string][]byte{v1alpha1.SecretKeyAccessKeyID: []byte("AK1")},
+			},
+			wantMint: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			drv := &fakeDriver{mintedKeys: []string{"AK-new"}}
+			bucket := bucketFor(ns, name)
+			bucket.Status = &v1alpha1.SystemBucketStatus{AccessKeyID: "AK1"}
+
+			objs := []client.Object{platformNS(ns), bucket}
+			if tc.secret != nil {
+				objs = append(objs, tc.secret)
+			}
+			r, _ := newReconciler(t, drv, objs...)
+
+			if _, err := r.Reconcile(context.Background(),
+				ctrl.Request{NamespacedName: client.ObjectKey{Namespace: ns, Name: name}}); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+
+			minted := false
+			reused := false
+			for _, c := range drv.calls {
+				switch c {
+				case "EnsureAccess:mint:AK-new":
+					minted = true
+				case "EnsureAccess:reuse:AK1":
+					reused = true
+				}
+			}
+			if minted != tc.wantMint {
+				t.Fatalf("minted a fresh key = %v, want %v (calls %v); reusing a key whose secret "+
+					"half is gone writes credentials that cannot work", minted, tc.wantMint, drv.calls)
+			}
+			if reused == tc.wantMint && tc.wantMint {
+				t.Fatalf("the key was reused as well as minted: %v", drv.calls)
+			}
+		})
+	}
 }
