@@ -40,6 +40,26 @@ import (
 // coupling the split was meant to remove.
 const StoreName = "system"
 
+// The labels below name the cluster-scoped objects the driver owns. They live
+// here, next to StoreName, because two things far apart need the same strings:
+// the driver, which sets and selects on them, and the manager's cache
+// configuration in main, which restricts its Node and PersistentVolume
+// informers to exactly these objects.
+const (
+	// StoreLabel carries the store name on every object the driver creates (used
+	// as a selector, e.g. to list the local-PV pool).
+	StoreLabel = "storage.deckhouse.io/system-store"
+
+	// LocalNodeLabel marks a controller-provisioned local PV and records the node
+	// (its kubernetes.io/hostname value) its nodeAffinity pins it to. Its
+	// presence distinguishes pool PVs from any other PV.
+	LocalNodeLabel = "storage.deckhouse.io/system-local-node"
+
+	// ControlPlaneNodeLabel marks control-plane nodes: the only nodes the data
+	// plane is scheduled on, and so the only nodes the module ever reads.
+	ControlPlaneNodeLabel = "node-role.kubernetes.io/control-plane"
+)
+
 // Store is the single system data plane the module manages. It stands in for the
 // custom resource the System profile used to be, so the driver keeps taking a
 // description of the desired store rather than reading module settings itself.

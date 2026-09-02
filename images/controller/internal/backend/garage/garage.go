@@ -157,13 +157,20 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (backend
 	// changes (spread across 3 masters, consolidate onto 1). One health-gated
 	// PVC recycle per reconcile; when it acts, report progress and requeue so
 	// the move settles before the next one.
-	acted, msg, err := d.reconcilePlacement(ctx, store)
+	acted, placementMsg, err := d.reconcilePlacement(ctx, store)
 	if err != nil {
 		return state, fmt.Errorf("reconcile placement: %w", err)
 	}
 	if acted {
-		state.Message = msg
+		state.Message = placementMsg
 		return state, nil
+	}
+	// Not acted, but a message: placement gave up after repeating the same move
+	// (see maxPlacementAttempts). Reconciliation continues — the store serves with
+	// the replicas where they are — and the message is appended at the end so it
+	// reaches the condition instead of being overwritten by the mesh state.
+	if placementMsg != "" {
+		d.log.Error("placement is not converging", "store", store.Name, "reason", placementMsg)
 	}
 
 	workloadReady, workloadMsg, err := d.ensureWorkload(ctx, store, cfgHash)
@@ -190,6 +197,10 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (backend
 	// ID and leaves the old one in the layout as a dead node. The store stays
 	// Ready — nothing is broken yet — but an operator has to be able to see that
 	// the protection is off before a rebalance turns it into layout churn.
+	if placementMsg != "" {
+		state.Message = fmt.Sprintf("%s; %s", state.Message, placementMsg)
+	}
+
 	if identitiesMissing > 0 {
 		state.Message = fmt.Sprintf(
 			"%s; node identity not captured for %d replica(s): a placement move would give them new node IDs",
@@ -355,8 +366,7 @@ func workloadRolledOut(sts *appsv1.StatefulSet, desired int32) (bool, string) {
 func (d *Driver) apply(ctx context.Context, obj client.Object) error {
 	desired := obj.DeepCopyObject().(client.Object)
 	_, err := controllerutil.CreateOrUpdate(ctx, d.client, obj, func() error {
-		mergeDesired(obj, desired)
-		return nil
+		return mergeDesired(obj, desired)
 	})
 	return err
 }
@@ -365,10 +375,35 @@ func (d *Driver) apply(ctx context.Context, obj client.Object) error {
 // CreateOrUpdate, preserving server-managed metadata. Immutable fields
 // (StatefulSet selector/volumeClaimTemplates, headless ClusterIP) are not
 // changed once set.
-func mergeDesired(live, desired client.Object) {
+// mergeDesired copies the spec-bearing fields of desired onto live.
+//
+// An unknown type is an error rather than a silent no-op, and the difference is
+// not academic. Silently doing nothing here means an object created once, on the
+// pass where CreateOrUpdate took the create branch, and never updated again — so
+// a changed spec would apply the first time the module is installed and be
+// ignored for the rest of its life. That failure is invisible: no error, no
+// condition, and an object in the cluster that simply does not follow the code
+// that owns it. Adding a type to apply() and forgetting this switch is an easy
+// mistake, so it is made a loud one.
+func mergeDesired(live, desired client.Object) error {
 	switch l := live.(type) {
 	case *corev1.ConfigMap:
-		l.Data = desired.(*corev1.ConfigMap).Data
+		// Desired keys win, placement bookkeeping survives. buildConfigMap
+		// describes the desired state and knows nothing about the attempt counter
+		// the placement reconcile keeps in the same object; a plain assignment
+		// would wipe it on every pass, which is every 30 seconds, and the counter
+		// would never reach its cap.
+		data := desired.(*corev1.ConfigMap).Data
+		merged := make(map[string]string, len(data)+2)
+		for k, v := range data {
+			merged[k] = v
+		}
+		for k, v := range l.Data {
+			if isPlacementBookkeepingKey(k) {
+				merged[k] = v
+			}
+		}
+		l.Data = merged
 		l.Labels = desired.GetLabels()
 	case *corev1.ServiceAccount:
 		l.AutomountServiceAccountToken = desired.(*corev1.ServiceAccount).AutomountServiceAccountToken
@@ -384,7 +419,10 @@ func mergeDesired(live, desired client.Object) {
 		l.Labels = d.Labels
 		l.Spec.Replicas = d.Spec.Replicas
 		l.Spec.Template = d.Spec.Template
+	default:
+		return fmt.Errorf("mergeDesired has no case for %T: it would be created once and never updated", live)
 	}
+	return nil
 }
 
 // randomHex returns n random bytes hex-encoded.

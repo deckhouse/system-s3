@@ -19,9 +19,11 @@ package garage
 import (
 	"context"
 	"fmt"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend/s3util"
 )
@@ -102,7 +104,29 @@ func (d *Driver) emptyBucket(ctx context.Context, store *backend.Store, svc *adm
 	if err != nil {
 		return fmt.Errorf("create temporary key to empty bucket %q: %w", name, err)
 	}
-	defer func() { _ = svc.deleteKey(ctx, key.AccessKeyID) }()
+	defer func() {
+		// Its own context, not the one being unwound.
+		//
+		// The common way to reach this defer is the reconcile timeout expiring
+		// inside the emptying loop below — and on a cancelled context the revoke
+		// does not even get sent. What stays behind is an owner key on a bucket
+		// that is being deleted: full read and write, no resource naming it, and
+		// nothing that will ever come back for it. Emptying a bucket is exactly
+		// when a leftover owner key matters most.
+		//
+		// WithoutCancel keeps the values (they carry the logger and request
+		// metadata) and drops the cancellation; the short deadline is there so a
+		// backend that stopped answering cannot hold the worker either.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer cancel()
+		if err := svc.deleteKey(cleanupCtx, key.AccessKeyID); err != nil {
+			// Logged, not swallowed. It cannot be returned — the function may be
+			// returning a more important error — but an owner key nobody revoked is
+			// not something to drop on the floor.
+			d.log.Error("unable to revoke the temporary key used to empty a bucket",
+				logger.Err(err), "bucket", name, "accessKeyID", key.AccessKeyID)
+		}
+	}()
 
 	if err := svc.allow(ctx, bucketID, key.AccessKeyID, permissions{Read: true, Write: true, Owner: true}); err != nil {
 		return fmt.Errorf("grant temporary key on bucket %q: %w", name, err)

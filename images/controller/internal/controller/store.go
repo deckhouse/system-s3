@@ -21,10 +21,19 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend/garage"
 )
+
+// storeDriver is the one driver call the manager makes. Narrowed to an interface
+// so the collapsing in Ensure can be tested without a Kubernetes API and a Garage
+// admin endpoint behind it; *garage.Driver is the only implementation.
+type storeDriver interface {
+	EnsureStore(ctx context.Context, store *backend.Store) (backend.StoreState, error)
+}
 
 // StoreManager owns the module's single system data plane.
 //
@@ -44,13 +53,32 @@ import (
 // driver's reconcile is not safe to run twice concurrently (it pins the
 // replication factor, recycles PVCs and rewrites the Garage layout).
 type StoreManager struct {
-	driver   *garage.Driver
+	driver   storeDriver
 	store    *backend.Store
 	log      logger.Logger
 	interval time.Duration
 
 	mu    sync.Mutex
 	state backend.StoreState
+
+	// flight collapses concurrent Ensure calls instead of queueing them.
+	//
+	// Serialising convergence is right — EnsureStore pins the replication factor,
+	// recycles PVCs and rewrites the layout, and two of those at once is not a
+	// thing to allow. Queueing it was the problem. A reconcile waits on a plain
+	// mutex, which does not see the context deadline, so a reconcile with a
+	// 300-second timeout queued behind a convergence that takes ten minutes waits
+	// the full ten: the timeout only fires once the lock is acquired, which is
+	// precisely the case withReconcileTimeout claims to protect against.
+	//
+	// And N reconciles produced N full convergences in sequence, each listing PVs,
+	// Nodes and Pods and calling the admin API, when all N wanted the same answer.
+	// Raising MAX_CONCURRENT_RECONCILES — an operation that looks harmless and
+	// usually speeds a controller up — made the work quadratic instead.
+	//
+	// singleflight gives the same guarantee with the opposite shape: the first
+	// caller converges, everyone who arrives while it runs gets that result.
+	flight singleflight.Group
 
 	// lastNotReadyMsg and lastNotReadyAt throttle the "still not ready" log.
 	//
@@ -108,6 +136,18 @@ func (m *StoreManager) Store() *backend.Store { return m.store }
 
 // Ensure reconciles the data plane and returns its observed state.
 func (m *StoreManager) Ensure(ctx context.Context) (backend.StoreState, error) {
+	// One convergence at a time, and everyone waiting shares its result rather
+	// than queueing for their own. See the flight field.
+	res, err, _ := m.flight.Do("ensure", func() (interface{}, error) {
+		return m.ensureOnce(ctx)
+	})
+	state, _ := res.(backend.StoreState)
+	return state, err
+}
+
+// ensureOnce is one convergence. Only ever entered by a single caller at a time,
+// through flight.
+func (m *StoreManager) ensureOnce(ctx context.Context) (backend.StoreState, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

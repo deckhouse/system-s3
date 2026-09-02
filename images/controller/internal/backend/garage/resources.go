@@ -60,7 +60,7 @@ const (
 	// controlPlaneNodeLabel marks control-plane nodes; the StatefulSet is
 	// scheduled there (spread across them when several exist, co-located on the
 	// single master otherwise).
-	controlPlaneNodeLabel = "node-role.kubernetes.io/control-plane"
+	controlPlaneNodeLabel = backend.ControlPlaneNodeLabel
 
 	// hostnameTopologyKey is the node label carrying the hostname; used both for
 	// the soft pod anti-affinity and as the local-PV nodeAffinity key that pins a
@@ -113,17 +113,50 @@ func desiredReplicas(store *backend.Store) int32 {
 // recover from).
 const incarnationKey = "incarnation"
 
+// placementAttemptTargetKey and placementAttemptCountKey record how many times
+// in a row the placement reconcile has asked for the same migration, in the same
+// ConfigMap as the incarnation (the store has no custom resource of its own to
+// keep state on). The target is "<ordinal>/<reason>": when it changes the count
+// starts over, so the cap bounds a repeating move and not a sequence of
+// legitimate ones.
+const (
+	placementAttemptTargetKey = "placement-attempt-target"
+	placementAttemptCountKey  = "placement-attempt-count"
+)
+
+// maxPlacementAttempts caps the identical migrations the placement reconcile
+// will perform before it gives up and says so.
+//
+// A migration recycles the replica's PVC, which throws away that replica's copy
+// of the data and makes Garage re-replicate it by anti-entropy. The move is only
+// worth it because the scheduler is expected to place the replica on a different
+// master — but that is a preference, not a guarantee: the pod anti-affinity is
+// preferred (it has to be, or replicas could not run on a single master) and the
+// pool holds a free PV on every node, so the scheduler may legally return the
+// replica to the node it just left. Without a cap that is an unbounded retry
+// (Nygard, Release It!, 2nd ed., ch. 4): every few minutes one replica loses its
+// data and rebuilds it, forever, and the log looks like progress.
+const maxPlacementAttempts = 3
+
+// isPlacementBookkeepingKey reports whether a garage.toml ConfigMap key is
+// runtime bookkeeping written by the placement reconcile rather than desired
+// state produced by buildConfigMap. mergeDesired carries these across, so the
+// apply that runs on every pass does not reset the attempt counter.
+func isPlacementBookkeepingKey(key string) bool {
+	return key == placementAttemptTargetKey || key == placementAttemptCountKey
+}
+
 // firstIncarnation is the incarnation of a store that was never recreated.
 const firstIncarnation int32 = 1
 
 // labelSystemLocalNode marks a controller-provisioned local PV and records the
 // node (its kubernetes.io/hostname value) its nodeAffinity pins it to. Its
 // presence distinguishes pool PVs from any other PV.
-const labelSystemLocalNode = "storage.deckhouse.io/system-local-node"
+const labelSystemLocalNode = backend.LocalNodeLabel
 
 // storeLabel carries the store name on every object the driver creates (used as
 // a selector, e.g. to list the local-PV pool).
-const storeLabel = "storage.deckhouse.io/system-store"
+const storeLabel = backend.StoreLabel
 
 // resourceName is the common name/prefix for every object backing the store.
 func resourceName(store *backend.Store) string {

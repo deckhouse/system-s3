@@ -117,6 +117,14 @@ func main() {
 	// port already in use is reported from mgr.Start.
 	log.Info("metrics endpoint configured", "address", cfgParams.MetricsBindAddress+monitoring.MetricsPath)
 
+	// "the label exists", whatever its value: control-plane nodes carry
+	// node-role.kubernetes.io/control-plane with an empty value.
+	controlPlaneSelector, err := labels.Parse(backend.ControlPlaneNodeLabel)
+	if err != nil {
+		log.Error("unable to build the control-plane node selector", logger.Err(err))
+		os.Exit(1)
+	}
+
 	managerOpts := manager.Options{
 		Scheme:                  scheme,
 		HealthProbeBindAddress:  cfgParams.HealthProbeBindAddress,
@@ -145,6 +153,29 @@ func main() {
 					Label: labels.SelectorFromSet(labels.Set{
 						v1alpha1.ManagedByLabel: v1alpha1.ManagedByValue,
 					}),
+				},
+
+				// The local-PV pool, and nothing else.
+				//
+				// EnsureStore runs on a 30-second ticker and on every SystemBucket
+				// reconcile, and it needs the pool on every pass. Read through the
+				// APIReader that was a quorum read of every PersistentVolume in the
+				// cluster each time: on a DKP running sds-local-volume and
+				// sds-replicated-volume that is a few thousand objects listed from etcd
+				// twice a minute, by a controller that owns nine of them.
+				&v1.PersistentVolume{}: {
+					Label: labels.SelectorFromSet(labels.Set{
+						backend.StoreLabel: backend.StoreName,
+					}),
+				},
+
+				// Control-plane nodes, the only ones the data plane is placed on.
+				//
+				// The driver reads them on every pass to build the pool and the
+				// nodeAffinity that pins it. Membership changes on the timescale of a
+				// cluster edit, so a watch is both cheaper and fresher than re-listing.
+				&v1.Node{}: {
+					Label: controlPlaneSelector,
 				},
 			},
 		},

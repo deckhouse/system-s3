@@ -6,6 +6,7 @@ require (
 	github.com/deckhouse/sds-common-lib v0.15.0
 	github.com/deckhouse/system-s3/api v0.0.0
 	github.com/minio/minio-go/v7 v7.2.1
+	golang.org/x/sync v0.21.0
 	k8s.io/api v0.34.1
 	k8s.io/apimachinery v0.34.1
 	k8s.io/client-go v0.34.1
@@ -67,7 +68,6 @@ require (
 	golang.org/x/exp v0.0.0-20250711185948-6ae5c78190dc // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/term v0.44.0 // indirect
 	golang.org/x/text v0.39.0 // indirect

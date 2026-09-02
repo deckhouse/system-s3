@@ -46,8 +46,16 @@ func (d *Driver) ensureLocalPVs(ctx context.Context, store *backend.Store, incar
 		return err
 	}
 
+	// Cached: the manager's PersistentVolume informer is restricted to this very
+	// pool (see the cache options in main), and both users of the list tolerate a
+	// stale one. A missing entry means a Create that comes back AlreadyExists,
+	// which is ignored below; an entry that is already gone means a Delete that
+	// comes back NotFound, which gcLocalPVs ignores. The teardown path in
+	// recreate.go deliberately keeps reading through the APIReader instead —
+	// there, under-reporting would declare the previous data plane gone while it
+	// is not.
 	existing := &corev1.PersistentVolumeList{}
-	if err := d.apiReader.List(ctx, existing,
+	if err := d.client.List(ctx, existing,
 		client.MatchingLabels{storeLabel: store.Name},
 		client.HasLabels{labelSystemLocalNode},
 	); err != nil {
@@ -104,12 +112,14 @@ func (d *Driver) gcLocalPVs(ctx context.Context, pool *corev1.PersistentVolumeLi
 
 // controlPlaneHostnames lists control-plane nodes and returns their hostnames
 // (the kubernetes.io/hostname label value, falling back to the node name), which
-// key both the PV nodeAffinity and its deterministic name. Read through the
-// non-cached apiReader so the controller does not need a cluster-wide Node
-// informer.
+// key both the PV nodeAffinity and its deterministic name. Read from the cache,
+// whose Node informer is restricted to the same label (see the cache options in
+// main), so this is still not a cluster-wide Node informer: control-plane
+// membership changes on the timescale of a cluster edit, and this runs every 30
+// seconds.
 func (d *Driver) controlPlaneHostnames(ctx context.Context) ([]string, error) {
 	nodes := &corev1.NodeList{}
-	if err := d.apiReader.List(ctx, nodes, client.HasLabels{controlPlaneNodeLabel}); err != nil {
+	if err := d.client.List(ctx, nodes, client.HasLabels{controlPlaneNodeLabel}); err != nil {
 		return nil, err
 	}
 	out := make([]string, 0, len(nodes.Items))

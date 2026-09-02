@@ -19,9 +19,11 @@ package garage
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
@@ -116,6 +118,12 @@ func nextPlacementAction(cpNodes []string, replicaNode map[int32]string, replica
 // so the StatefulSet re-homes it onto the correct master. It returns a
 // human-readable message and whether it acted (the caller then reports "not
 // ready" and requeues so the move can settle before the next one).
+//
+// acted=false with a non-empty message is the third outcome: the same migration
+// has been attempted maxPlacementAttempts times and is not being attempted
+// again. The store is left as it is — co-located replicas still serve — and the
+// caller surfaces the message so an operator sees why the placement is wrong
+// instead of watching one replica rebuild itself forever.
 func (d *Driver) reconcilePlacement(ctx context.Context, store *backend.Store) (acted bool, msg string, err error) {
 	// A single-replica store never migrates. A relocation recycles the replica's
 	// PVC and lets it re-replicate from the surviving copies — with one replica
@@ -145,13 +153,117 @@ func (d *Driver) reconcilePlacement(ctx context.Context, store *backend.Store) (
 
 	action := nextPlacementAction(cpNodes, replicaNode, replicas, healthy)
 	if !action.act {
+		// Converged (or nothing to do): forget the bookkeeping, so a later,
+		// legitimate migration starts from a clean count.
+		if err := d.clearPlacementAttempts(ctx, store); err != nil {
+			return false, "", fmt.Errorf("clear placement attempts: %w", err)
+		}
 		return false, "", nil
+	}
+
+	// Same migration asked for over and over means the previous ones did not
+	// achieve it: the replica keeps coming back to a node it was moved off.
+	// Attempting it forever costs a copy of the data each time, so stop and say so.
+	target := fmt.Sprintf("%d/%s", action.ordinal, action.reason)
+	recorded, attempts, err := d.placementAttempt(ctx, store)
+	if err != nil {
+		return false, "", fmt.Errorf("read placement attempts: %w", err)
+	}
+	if recorded != target {
+		attempts = 0
+	}
+	if attempts >= maxPlacementAttempts {
+		return false, fmt.Sprintf(
+			"placement of replica %d gave up after %d attempts (%s): the replica keeps returning to the same node — check node taints, resource pressure and cluster-wide topology constraints",
+			action.ordinal, maxPlacementAttempts, action.reason), nil
+	}
+	if err := d.recordPlacementAttempt(ctx, store, target, attempts+1); err != nil {
+		return false, "", fmt.Errorf("record placement attempt: %w", err)
 	}
 
 	if err := d.recycleReplica(ctx, store, action.ordinal); err != nil {
 		return false, "", fmt.Errorf("recycle replica %d (%s): %w", action.ordinal, action.reason, err)
 	}
 	return true, fmt.Sprintf("rebalancing System placement: recycling %s-%d (%s)", resourceName(store), action.ordinal, action.reason), nil
+}
+
+// placementAttempt reads the recorded migration target and how many times it has
+// been attempted in a row. A store whose ConfigMap is missing the keys (or the
+// ConfigMap itself, on first bring-up) has attempted nothing.
+func (d *Driver) placementAttempt(ctx context.Context, store *backend.Store) (target string, attempts int, err error) {
+	cm := &corev1.ConfigMap{}
+	key := client.ObjectKey{Namespace: d.namespace, Name: configName(store)}
+	if err := d.apiReader.Get(ctx, key, cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", 0, nil
+		}
+		return "", 0, err
+	}
+	target = cm.Data[placementAttemptTargetKey]
+	// An unparseable count reads as "none": the cap is a safety net, and refusing
+	// to place replicas because a hand-edited ConfigMap holds garbage would be
+	// worse than starting the count over.
+	n, convErr := strconv.Atoi(cm.Data[placementAttemptCountKey])
+	if convErr != nil || n < 0 {
+		return target, 0, nil
+	}
+	return target, n, nil
+}
+
+// recordPlacementAttempt persists the migration about to be attempted and its
+// running count.
+func (d *Driver) recordPlacementAttempt(ctx context.Context, store *backend.Store, target string, attempts int) error {
+	return d.mutatePlacementAttempt(ctx, store, func(data map[string]string) bool {
+		if data[placementAttemptTargetKey] == target &&
+			data[placementAttemptCountKey] == strconv.Itoa(attempts) {
+			return false
+		}
+		data[placementAttemptTargetKey] = target
+		data[placementAttemptCountKey] = strconv.Itoa(attempts)
+		return true
+	})
+}
+
+// clearPlacementAttempts drops the bookkeeping. Called on every converged pass,
+// hence the "nothing to do" short-circuit: this must not write to the ConfigMap
+// once every 30 seconds for a store that is simply in place.
+func (d *Driver) clearPlacementAttempts(ctx context.Context, store *backend.Store) error {
+	return d.mutatePlacementAttempt(ctx, store, func(data map[string]string) bool {
+		_, hadTarget := data[placementAttemptTargetKey]
+		_, hadCount := data[placementAttemptCountKey]
+		if !hadTarget && !hadCount {
+			return false
+		}
+		delete(data, placementAttemptTargetKey)
+		delete(data, placementAttemptCountKey)
+		return true
+	})
+}
+
+// mutatePlacementAttempt applies mutate to the garage.toml ConfigMap's data and
+// writes it back, retrying on conflict against a fresh read (the same ConfigMap
+// is rewritten by the config apply on every pass). mutate reports whether it
+// changed anything; when it did not, no write is issued. A missing ConfigMap is
+// not an error: the config apply creates it later in the same pass, and the
+// bookkeeping is re-derived on the next one.
+func (d *Driver) mutatePlacementAttempt(ctx context.Context, store *backend.Store, mutate func(map[string]string) bool) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cm := &corev1.ConfigMap{}
+		key := client.ObjectKey{Namespace: d.namespace, Name: configName(store)}
+		if err := d.apiReader.Get(ctx, key, cm); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if cm.Data == nil {
+			cm.Data = map[string]string{}
+		}
+		if !mutate(cm.Data) {
+			return nil
+		}
+		return d.client.Update(ctx, cm)
+	})
 }
 
 // systemReplicaNodes maps each replica ordinal to the control-plane node its
