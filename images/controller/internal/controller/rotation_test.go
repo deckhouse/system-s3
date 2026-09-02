@@ -114,3 +114,21 @@ func TestNoStatusMeansNothingToRevoke(t *testing.T) {
 		t.Fatalf("supersededKeyOf on a statusless bucket = %q, want empty", got)
 	}
 }
+
+// Every Secret the module reads through the cached client must carry the label
+// the cache is scoped to, or the read silently returns NotFound.
+//
+// This is not a hypothetical: the cache selector and the places that set labels
+// are in different files, and adding a Secret without the label would fail only
+// at runtime, only on the path that reads it. So the label is one constant and
+// this asserts the constant is what the writers use.
+func TestTheCacheLabelIsTheOneTheWritersSet(t *testing.T) {
+	if v1alpha1.ManagedByLabel != "app.kubernetes.io/managed-by" {
+		t.Fatalf("ManagedByLabel = %q; the RBAC comment and the cache selector name this key",
+			v1alpha1.ManagedByLabel)
+	}
+	if v1alpha1.ManagedByValue != "system-s3" {
+		t.Fatalf("ManagedByValue = %q; it has to match the module name the data plane is labelled with",
+			v1alpha1.ManagedByValue)
+	}
+}

@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
+	v1alpha1 "github.com/deckhouse/system-s3/api/v1alpha1"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 )
 
@@ -143,9 +144,9 @@ func s3SvcName(store *backend.Store) string  { return resourceName(store) }
 // teardown paths select by them.
 func commonLabels(store *backend.Store) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/managed-by": "system-s3",
-		"app.kubernetes.io/name":       "garage",
-		storeLabel:                     store.Name,
+		v1alpha1.ManagedByLabel:  v1alpha1.ManagedByValue,
+		"app.kubernetes.io/name": "garage",
+		storeLabel:               store.Name,
 	}
 }
 

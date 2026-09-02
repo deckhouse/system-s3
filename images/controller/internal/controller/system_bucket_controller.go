@@ -381,6 +381,10 @@ func (r *SystemBucketReconciler) ensureCredentialsSecret(
 			secret.Labels = map[string]string{}
 		}
 		secret.Labels["storage.deckhouse.io/system-bucket"] = bucket.Name
+		// The label the controller's Secret cache is scoped to. Without it this
+		// Secret would be invisible to the cached client and to the Owns() watch,
+		// so a consumer deleting it by hand would go unnoticed.
+		secret.Labels[v1alpha1.ManagedByLabel] = v1alpha1.ManagedByValue
 		secret.Type = corev1.SecretTypeOpaque
 		secret.StringData = map[string]string{
 			v1alpha1.SecretKeyS3Endpoint:     state.Endpoint,

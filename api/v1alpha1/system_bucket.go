@@ -195,6 +195,18 @@ var SystemBucketConditionTypes = []string{
 	SystemBucketConditionReady,
 }
 
+// ManagedByLabel and ManagedByValue mark every object this module creates,
+// including the credentials Secret it writes into a consumer's namespace.
+//
+// The label is not decoration: the controller's cache is scoped to it, because a
+// cache over every Secret in the cluster would hold each Helm release in the
+// controller's heap. Anything this module has to read through that cache must
+// carry it.
+const (
+	ManagedByLabel = "app.kubernetes.io/managed-by"
+	ManagedByValue = "system-s3"
+)
+
 // SystemBucketKind is the kind constant used for OwnerReferences and dynamic
 // GVK lookups.
 const SystemBucketKind = "SystemBucket"

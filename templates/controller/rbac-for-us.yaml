@@ -20,10 +20,24 @@
 
   The webhooks share the same ServiceAccount but exercise only the read verbs.
 
-  Note for future editors: do not place Helm/Go-template comments inside the
-  argument expression of the function call below (the rule lists), the template
-  parser fails with 'unexpected "{" in operand'. Keep rule-level commentary in
-  this header block.
+  Cluster-wide Secret verbs carry no `delete`, deliberately: the credentials
+  Secret has a controllerReference to its SystemBucket and is garbage-collected
+  with it, and the module's own Secrets live in its namespace and are covered by
+  the Role above. Nothing needs cluster-wide delete on Secrets, and the token
+  that would carry it is mounted in the same Pod as the admission webhook.
+
+  Cluster-wide `list` and `watch` on Secrets stay because RBAC cannot be narrowed
+  by label — a Kubernetes limitation, not an oversight here. What is narrowed is
+  the cache: the manager only watches Secrets carrying
+  app.kubernetes.io/managed-by=system-s3, and only the Nodes and
+  PersistentVolumes this module owns (see cmd/main.go).
+
+  Note for future editors: do not place comments of ANY kind inside the argument
+  expression of the function call below (the rule lists). A Helm/Go-template
+  comment fails the parser with 'unexpected "{" in operand', and a YAML-style `#`
+  comment fails it with 'unexpected "#" in operand' — the rule lists are one Go
+  template action, not YAML, and it has no comment syntax. Keep rule-level
+  commentary in this header block.
 */ -}}
 {{- $rbacConfig := dict
   "roleRules" (list
@@ -37,7 +51,7 @@
   )
   "clusterRoleRules" (list
     (dict "apiGroups" (list "storage.deckhouse.io") "resources" (list "systembuckets" "systembuckets/status" "systembuckets/finalizers") "verbs" (list "get" "list" "watch" "create" "update" "patch" "delete"))
-    (dict "apiGroups" (list "") "resources" (list "secrets") "verbs" (list "get" "list" "watch" "create" "update" "patch" "delete"))
+    (dict "apiGroups" (list "") "resources" (list "secrets") "verbs" (list "get" "list" "watch" "create" "update" "patch"))
     (dict "apiGroups" (list "") "resources" (list "configmaps" "services" "serviceaccounts") "verbs" (list "get" "list" "watch"))
     (dict "apiGroups" (list "") "resources" (list "namespaces") "verbs" (list "get" "list" "watch"))
     (dict "apiGroups" (list "") "resources" (list "nodes") "verbs" (list "get" "list" "watch"))

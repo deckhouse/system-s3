@@ -25,8 +25,11 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/labels"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -118,6 +121,29 @@ func main() {
 		LeaderElectionNamespace: cfgParams.ControllerNamespace,
 		LeaderElectionID:        config.DefaultControllerName,
 		Logger:                  baseLog.GetLogger(),
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				// Only the Secrets this module writes itself.
+				//
+				// The default cache is cluster-wide and this controller watches
+				// Secrets — it owns the credentials Secret it puts in a consumer's
+				// namespace. Unscoped, that means an informer over every Secret in
+				// the cluster: on a DKP with a few thousand of them, most being Helm
+				// 3 release state, that is tens to hundreds of megabytes of heap and
+				// a full list of all of them on every restart, for a controller whose
+				// job is a handful of platform buckets.
+				//
+				// Everything this module creates carries the label, so everything it
+				// reads through the cached client is visible. Reads of Secrets it does
+				// not own go through the uncached APIReader, which this does not
+				// affect.
+				&v1.Secret{}: {
+					Label: labels.SelectorFromSet(labels.Set{
+						v1alpha1.ManagedByLabel: v1alpha1.ManagedByValue,
+					}),
+				},
+			},
+		},
 	}
 
 	mgr, err := manager.New(kConfig, managerOpts)
