@@ -63,6 +63,12 @@ func dataPlane(store *backend.Store, ns string) []client.Object {
 			Name:   localPVName(store, "m0", firstIncarnation, 0),
 			Labels: map[string]string{storeLabel: store.Name, labelSystemLocalNode: "m0"},
 		}},
+		// The bucket-ownership record: it names buckets of the cluster being torn
+		// down, so leaving it behind would keep those names claimed by owners whose
+		// data no longer exists.
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Name: bucketOwnersName(store), Namespace: ns, Labels: commonLabels(store),
+		}},
 	}
 }
 

@@ -66,13 +66,13 @@ type fakeDriver struct {
 	ensureErr   error
 }
 
-func (f *fakeDriver) EnsureBucket(_ context.Context, _ *backend.Store, name string) (backend.BucketState, error) {
-	f.calls = append(f.calls, "EnsureBucket:"+name)
+func (f *fakeDriver) EnsureBucket(_ context.Context, _ *backend.Store, name, owner string) (backend.BucketState, error) {
+	f.calls = append(f.calls, "EnsureBucket:"+name+":"+owner)
 	return backend.BucketState{Ready: true, BucketName: name}, nil
 }
 
-func (f *fakeDriver) DeleteBucket(_ context.Context, _ *backend.Store, name string) error {
-	f.calls = append(f.calls, "DeleteBucket:"+name)
+func (f *fakeDriver) DeleteBucket(_ context.Context, _ *backend.Store, name, owner string) error {
+	f.calls = append(f.calls, "DeleteBucket:"+name+":"+owner)
 	return nil
 }
 
@@ -252,7 +252,9 @@ func TestDeleteRevokesThenRemovesThenReleases(t *testing.T) {
 		t.Fatalf("reconcile delete: %v", err)
 	}
 
-	want := []string{"DeleteAccess:AK1", "DeleteBucket:d8-monitoring-loki"}
+	// The owner is part of the call: the driver refuses to destroy a bucket
+	// recorded against a different SystemBucket.
+	want := []string{"DeleteAccess:AK1", "DeleteBucket:d8-monitoring-loki:d8-monitoring/loki"}
 	if len(drv.calls) != len(want) || drv.calls[0] != want[0] || drv.calls[1] != want[1] {
 		t.Fatalf("calls = %v, want %v", drv.calls, want)
 	}
@@ -291,7 +293,7 @@ func TestAFailedTeardownKeepsTheFinalizer(t *testing.T) {
 
 type failingDeleteDriver struct{ *fakeDriver }
 
-func (f *failingDeleteDriver) DeleteBucket(_ context.Context, _ *backend.Store, _ string) error {
+func (f *failingDeleteDriver) DeleteBucket(_ context.Context, _ *backend.Store, _, _ string) error {
 	return apierrors.NewServiceUnavailable("garage is down")
 }
 

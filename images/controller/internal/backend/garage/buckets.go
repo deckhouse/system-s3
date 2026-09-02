@@ -28,12 +28,25 @@ import (
 	"github.com/deckhouse/system-s3/images/controller/internal/backend/s3util"
 )
 
-// EnsureBucket creates the named bucket in Garage. Idempotent: an existing
-// bucket with the same alias is reused.
+// EnsureBucket creates the named bucket in Garage on behalf of owner
+// ("namespace/name" of the SystemBucket). Idempotent: a bucket this owner already
+// holds is reused.
+//
+// A bucket another SystemBucket holds is not: the call reports not-ready with the
+// current owner and touches nothing. See bucket_owners.go for why this is decided
+// here and not only in the admission webhook.
 //
 // Credentials are not issued here — EnsureAccess mints the key pair the
 // SystemBucket hands to its consumer.
-func (d *Driver) EnsureBucket(ctx context.Context, store *backend.Store, name string) (backend.BucketState, error) {
+func (d *Driver) EnsureBucket(ctx context.Context, store *backend.Store, name, owner string) (backend.BucketState, error) {
+	// The claim comes before anything reaches Garage: nothing about this bucket
+	// should be created for an owner that is not going to be given it.
+	if other, err := d.claimBucket(ctx, store, name, owner); err != nil {
+		return backend.BucketState{}, fmt.Errorf("claim bucket %q for %s: %w", name, owner, err)
+	} else if other != "" {
+		return backend.BucketState{Message: bucketTakenMessage(name, other)}, nil
+	}
+
 	svc, ready, err := d.adminClientFor(ctx, store)
 	if err != nil {
 		return backend.BucketState{}, err
@@ -63,7 +76,35 @@ func (d *Driver) EnsureBucket(ctx context.Context, store *backend.Store, name st
 //
 // There is no reclaim policy to consult: a SystemBucket owns its data outright,
 // so deleting the resource deletes the objects.
-func (d *Driver) DeleteBucket(ctx context.Context, store *backend.Store, name string) error {
+//
+// owner is the SystemBucket being deleted ("namespace/name"). A bucket recorded
+// against a different owner is left alone and the call succeeds: the resource
+// going away never held that bucket (it was refused credentials for it), so its
+// finalizer must be released without destroying the actual owner's data.
+func (d *Driver) DeleteBucket(ctx context.Context, store *backend.Store, name, owner string) error {
+	recorded, err := d.bucketOwner(ctx, store, name)
+	if err != nil {
+		return fmt.Errorf("read the owner of bucket %q: %w", name, err)
+	}
+	if recorded != "" && recorded != owner {
+		d.log.Info("not deleting a bucket owned by another SystemBucket",
+			"bucket", name, "owner", recorded, "requestedBy", owner)
+		return nil
+	}
+
+	if err := d.destroyBucket(ctx, store, name); err != nil {
+		return err
+	}
+
+	// The claim is released last, and only on success: dropping it while the data
+	// is still there would let the next SystemBucket of the same name adopt
+	// somebody else's objects.
+	return d.releaseBucket(ctx, store, name, owner)
+}
+
+// destroyBucket empties and removes the bucket, tolerating a data plane that is
+// already gone or not yet up.
+func (d *Driver) destroyBucket(ctx context.Context, store *backend.Store, name string) error {
 	svc, ready, err := d.adminClientFor(ctx, store)
 	if err != nil {
 		if apierrors.IsNotFound(err) {

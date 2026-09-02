@@ -31,7 +31,8 @@ import (
 
 // teardownDataPlane removes everything that binds the System cluster to its
 // current storage and Garage identities — the StatefulSet (hence its pods), the
-// per-replica PVCs, the node-identity Secret and the local-PV pool — so the next
+// per-replica PVCs, the node-identity Secret, the bucket-ownership record and the
+// local-PV pool — so the next
 // reconcile can rebuild the cluster from scratch at the following incarnation. It
 // is the only sanctioned way out of a pinned replication factor, used when the
 // System replica count switches (see EnsureCluster).
@@ -97,6 +98,22 @@ func (d *Driver) teardownDataPlane(ctx context.Context, store *backend.Store) (b
 		}
 	case !apierrors.IsNotFound(err):
 		return false, "", fmt.Errorf("get node identity secret: %w", err)
+	}
+
+	// The bucket-ownership record describes buckets of the cluster being torn
+	// down. Keeping it would leave every name claimed by a resource whose data no
+	// longer exists, so a SystemBucket recreated by a different owner would be
+	// refused a bucket that is not there.
+	owners := &corev1.ConfigMap{}
+	err = d.client.Get(ctx, client.ObjectKey{Namespace: d.namespace, Name: bucketOwnersName(store)}, owners)
+	switch {
+	case err == nil:
+		remaining++
+		if err := d.deleteIfNotDeleting(ctx, owners); err != nil {
+			return false, "", fmt.Errorf("delete bucket ownership record: %w", err)
+		}
+	case !apierrors.IsNotFound(err):
+		return false, "", fmt.Errorf("get bucket ownership record: %w", err)
 	}
 
 	pvs := &corev1.PersistentVolumeList{}

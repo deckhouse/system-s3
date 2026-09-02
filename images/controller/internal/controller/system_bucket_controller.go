@@ -87,8 +87,8 @@ type StoreConverger interface {
 // Driver is the backend surface the reconciler needs. It is an interface so the
 // reconciler can be tested without a Garage instance.
 type Driver interface {
-	EnsureBucket(ctx context.Context, store *backend.Store, name string) (backend.BucketState, error)
-	DeleteBucket(ctx context.Context, store *backend.Store, name string) error
+	EnsureBucket(ctx context.Context, store *backend.Store, name, owner string) (backend.BucketState, error)
+	DeleteBucket(ctx context.Context, store *backend.Store, name, owner string) error
 	EnsureAccess(ctx context.Context, store *backend.Store, bucketName, keyName, prevKeyID string, mintFresh bool) (backend.AccessState, error)
 	DeleteAccess(ctx context.Context, store *backend.Store, keyID string) error
 }
@@ -196,7 +196,7 @@ func (r *SystemBucketReconciler) reconcileDelete(ctx context.Context, bucket *v1
 			return fmt.Errorf("revoke access key for SystemBucket %s/%s: %w", bucket.Namespace, bucket.Name, err)
 		}
 	}
-	if err := r.Driver.DeleteBucket(ctx, store, name); err != nil {
+	if err := r.Driver.DeleteBucket(ctx, store, name, bucketOwnerRef(bucket)); err != nil {
 		return fmt.Errorf("delete bucket %q: %w", name, err)
 	}
 
@@ -250,7 +250,7 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 	store := r.Store.Store()
 	name := effectiveBucketName(bucket)
 
-	bstate, err := r.Driver.EnsureBucket(ctx, store, name)
+	bstate, err := r.Driver.EnsureBucket(ctx, store, name, bucketOwnerRef(bucket))
 	if bstate.BucketName != "" {
 		observed.bucketName = bstate.BucketName
 	}
@@ -344,6 +344,13 @@ func (r *SystemBucketReconciler) platformNamespace(ctx context.Context, name str
 		return false, fmt.Errorf("read namespace %q: %w", name, err)
 	}
 	return ns.Labels[v1alpha1.LabelHeritage] == v1alpha1.HeritageDeckhouse, nil
+}
+
+// bucketOwnerRef identifies a SystemBucket in the backend's ownership record.
+// "namespace/name" — the object's identity, which is what has to be compared when
+// deciding whether a bucket may be handed to this resource.
+func bucketOwnerRef(bucket *v1alpha1.SystemBucket) string {
+	return bucket.Namespace + "/" + bucket.Name
 }
 
 // effectiveBucketName is spec.bucketName, or <namespace>-<name> when unset. The
