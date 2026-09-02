@@ -55,7 +55,7 @@ kubectl -n d8-monitoring annotate systembucket loki \
   storage.deckhouse.io/rotate="$(date +%s)" --overwrite
 ```
 
-The controller issues a fresh key pair, updates the `Secret` and revokes the previous key. `status.observedRotation` records the value it processed and `status.lastRotationTime` when. Restart the consuming workload if it does not re-read the `Secret` by itself.
+The controller issues a fresh key pair, updates the `Secret`, and revokes the previous key **on a later pass** — `status.supersededAccessKeyID` holds it in the meantime. The order is deliberate: the backend hands back a key's secret half once and never again, so revoking before the new secret is stored would leave the consumer holding a key that no longer works while its replacement became unusable to everyone. For a few seconds after a rotation both keys work. `status.observedRotation` records the value it processed and `status.lastRotationTime` when. Restart the consuming workload if it does not re-read the `Secret` by itself.
 
 The same happens when the credentials `Secret` is deleted: it is owned by the `SystemBucket`, so its removal re-drives the resource and a new key pair is issued.
 

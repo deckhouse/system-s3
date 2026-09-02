@@ -118,6 +118,22 @@ spec:
                   description: |
                     Last value of the `storage.deckhouse.io/rotate` annotation
                     processed by the controller.
+                supersededAccessKeyID:
+                  type: string
+                  description: |
+                    Access key that a rotation replaced and that has yet to be
+                    revoked in the backend.
+
+                    A rotation cannot be made atomic: the backend hands back a
+                    key's secret half once and never again, so the secret has to
+                    reach the credentials Secret before the old key is taken
+                    away. Revoking first would leave a window in which the
+                    consumer holds a key that no longer works while the new
+                    secret exists only in the controller's memory.
+
+                    So the replaced key is recorded here and revoked on a later
+                    pass. A non-empty value means one revoke is still owed; it is
+                    cleared once the backend confirms it.
                 lastRotationTime:
                   type: string
                   format: date-time

@@ -123,6 +123,25 @@ type SystemBucketStatus struct {
 	// +optional
 	ObservedRotation string `json:"observedRotation,omitempty"`
 
+	// SupersededAccessKeyID is a key that has been replaced and still
+	// has to be revoked in the backend.
+	//
+	// It exists because the two halves of a rotation cannot be made
+	// atomic: the backend mints a key and hands back its secret half
+	// once and never again, so the secret has to reach the consumer's
+	// Secret before the old key is taken away. Revoking first leaves a
+	// window — a conflict on the Secret write, a reconcile timeout, an
+	// evicted Pod — in which the consumer holds a key that no longer
+	// works and the new secret exists only in the controller's memory.
+	//
+	// So the old key is recorded here instead and revoked on a later
+	// pass, once the new one is durable. The field is what makes that
+	// retryable: a revoke that fails is tried again rather than
+	// forgotten, which is the difference between a stale key and an
+	// orphan nobody will ever clean up.
+	// +optional
+	SupersededAccessKeyID string `json:"supersededAccessKeyID,omitempty"`
+
 	// LastRotationTime is the timestamp of the most recent key issuance.
 	// +optional
 	LastRotationTime *metav1.Time `json:"lastRotationTime,omitempty"`

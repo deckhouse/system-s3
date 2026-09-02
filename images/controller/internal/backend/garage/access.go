@@ -85,13 +85,20 @@ func (d *Driver) EnsureAccess(ctx context.Context, store *backend.Store, bucketN
 		return backend.AccessState{}, fmt.Errorf("grant key on bucket: %w", err)
 	}
 
-	// Revoke the superseded key after the new one is granted.
-	if mintFresh && prevKeyID != "" && prevKeyID != accessKey {
-		if err := svc.deleteKey(ctx, prevKeyID); err != nil {
-			return backend.AccessState{}, fmt.Errorf("revoke previous access key: %w", err)
-		}
-	}
-
+	// The superseded key is NOT revoked here, and that is the point.
+	//
+	// Garage hands back a key's secret half once, at creation, and never again.
+	// Revoking the old key at this moment would put that secret — which so far
+	// exists only in this function's return value — on the wrong side of every
+	// ordinary interruption: a conflict on the Secret write, the reconcile
+	// timeout, an evicted controller Pod. The consumer would be left holding a
+	// key the backend no longer knows, while the key that replaced it became
+	// unusable to everyone, permanently.
+	//
+	// So the old key is left alone here. The reconciler can tell a rotation
+	// happened — it passed prevKeyID in and gets a different AccessKeyID back
+	// together with a non-empty SecretAccessKey — and it revokes the old one on a
+	// later pass, once the new secret is in etcd.
 	return backend.AccessState{
 		Ready:           true,
 		Message:         "access key provisioned",

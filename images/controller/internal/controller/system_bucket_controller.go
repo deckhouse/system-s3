@@ -95,6 +95,13 @@ type bucketObserved struct {
 	secretName       string
 	observedRotation string
 	rotated          bool
+
+	// supersededKeyID is a key a rotation replaced, carried into the status so a
+	// later pass can revoke it. supersededHandled says the status field should be
+	// cleared because the revoke succeeded — the two are separate because
+	// "remember this key" and "forget this key" are written on different passes.
+	supersededKeyID   string
+	supersededHandled bool
 }
 
 // AddSystemBucketReconcilerToManager wires the SystemBucket reconciler.
@@ -239,6 +246,22 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 	if err != nil {
 		return r.finish(ctx, bucket, status, observed, err)
 	}
+
+	// A key an earlier rotation replaced is revoked here, on the pass after the
+	// one that recorded it — which is the whole point: by now the secret half of
+	// its replacement is in etcd, so revoking cannot leave the consumer holding a
+	// key that no longer works. Failure is not fatal and not swallowed either:
+	// the field stays, so the next pass tries again rather than leaving an orphan
+	// key on a platform bucket forever.
+	if superseded := revokeCandidate(bucket, recordedKey); superseded != "" {
+		if rerr := r.Driver.DeleteAccess(ctx, store, superseded); rerr != nil {
+			r.Log.Error("unable to revoke the superseded access key; will retry",
+				logger.Err(rerr), "systemBucket", bucket.Name, "accessKeyID", superseded)
+		} else {
+			observed.supersededHandled = true
+		}
+	}
+
 	mintFresh := rotationValue != observedRotation || recordedKey == "" || !secretExists
 
 	astate, err := r.Driver.EnsureAccess(ctx, store, name,
@@ -262,6 +285,13 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 	observed.secretName = secretName
 	observed.observedRotation = rotationValue
 	observed.rotated = astate.SecretAccessKey != ""
+	// Recorded only now, together with the Secret that carries the new key: a
+	// rotation is a fresh secret (SecretAccessKey is only non-empty when a key was
+	// minted) that displaced a key this resource had recorded before.
+	if replaced := supersededAfterRotation(recordedKey, astate.AccessKeyID, astate.SecretAccessKey); replaced != "" {
+		observed.supersededKeyID = replaced
+		observed.supersededHandled = false
+	}
 
 	status.SetReady("All stages reconciled")
 	return r.finish(ctx, bucket, status, observed, nil)
@@ -425,6 +455,59 @@ func (r *SystemBucketReconciler) updateStatus(
 				now := metav1.Now()
 				latest.Status.LastRotationTime = &now
 			}
+			// Written in the same status update as the Secret reference, which is
+			// what makes the revoke safe to do later: by the time anything reads
+			// this field, the key that replaced the recorded one is durable.
+			if observed.supersededKeyID != "" {
+				latest.Status.SupersededAccessKeyID = observed.supersededKeyID
+			}
+		}
+		// Cleared only on a successful revoke. A failed one leaves the field so the
+		// next pass retries — an orphan key on a platform bucket is not something
+		// to forget about.
+		if observed.supersededHandled {
+			latest.Status.SupersededAccessKeyID = ""
 		}
 	})
+}
+
+// supersededKeyOf is the key a previous rotation replaced and left to be
+// revoked, or empty.
+func supersededKeyOf(bucket *v1alpha1.SystemBucket) string {
+	if bucket.Status == nil {
+		return ""
+	}
+	return bucket.Status.SupersededAccessKeyID
+}
+
+// revokeCandidate is the key this pass may revoke: one a previous rotation
+// recorded, and not the one currently in use.
+//
+// The second half is the guard that matters. If the recorded key somehow equals
+// the key the resource is using — a status written half-way, an operator editing
+// status by hand — revoking it would take away the credentials the consumer is
+// holding, which is the very failure this whole mechanism exists to prevent. So
+// the answer is "revoke nothing" rather than "revoke and hope".
+func revokeCandidate(bucket *v1alpha1.SystemBucket, inUseKeyID string) string {
+	superseded := supersededKeyOf(bucket)
+	if superseded == "" || superseded == inUseKeyID {
+		return ""
+	}
+	return superseded
+}
+
+// supersededAfterRotation is the key a rotation just replaced, or empty when
+// nothing was replaced.
+//
+// A rotation is three things at once, and all three have to hold: a secret half
+// came back (the backend only returns one when it mints), this resource had a
+// key recorded before, and the key it has now is a different one. Any two
+// without the third is something else — first provisioning, a re-read of an
+// existing key, a key the backend handed back unchanged — and recording a
+// superseded key for those would schedule a revoke of a key still in use.
+func supersededAfterRotation(recordedKeyID, newKeyID, newSecretKey string) string {
+	if newSecretKey == "" || recordedKeyID == "" || recordedKeyID == newKeyID {
+		return ""
+	}
+	return recordedKeyID
 }
