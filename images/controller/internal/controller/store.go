@@ -51,6 +51,45 @@ type StoreManager struct {
 
 	mu    sync.Mutex
 	state backend.StoreState
+
+	// lastNotReadyMsg and lastNotReadyAt throttle the "still not ready" log.
+	//
+	// The store has no custom resource of its own, so on a cluster with no
+	// SystemBucket yet — the normal state of a fresh installation, and the reason
+	// the background ticker exists — the log is the only place its message can
+	// appear. Logging only readiness transitions meant a store that never came up
+	// said so at most once and then went quiet every thirty seconds forever.
+	//
+	// Repeating it every pass would be its own problem, so it repeats when the
+	// message changes, and otherwise at most once per notReadyLogInterval.
+	lastNotReadyMsg string
+	lastNotReadyAt  time.Time
+
+	// now is time.Now, replaced in tests.
+	now func() time.Time
+}
+
+// notReadyLogInterval is how often a store that is still not ready repeats
+// itself when nothing about the reason has changed.
+const notReadyLogInterval = 5 * time.Minute
+
+// clock is time.Now unless a test replaced it.
+func (m *StoreManager) clock() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
+// shouldRepeatNotReady decides whether a store that is still not ready says so
+// again: always when the reason changed, otherwise no more often than
+// notReadyLogInterval. A changed message is new information and a repeated one is
+// a reminder, and the two deserve different rates.
+func (m *StoreManager) shouldRepeatNotReady(msg string) bool {
+	if msg != m.lastNotReadyMsg {
+		return true
+	}
+	return m.clock().Sub(m.lastNotReadyAt) >= notReadyLogInterval
 }
 
 // NewStoreManager builds the manager for the given store description.
@@ -78,8 +117,20 @@ func (m *StoreManager) Ensure(ctx context.Context) (backend.StoreState, error) {
 		// probe is not evidence that the store went away.
 		return m.state, err
 	}
-	if state.Ready != m.state.Ready {
+	switch {
+	case state.Ready != m.state.Ready:
 		m.log.Info("the system object storage changed readiness", "ready", state.Ready, "message", state.Message)
+		m.lastNotReadyMsg, m.lastNotReadyAt = "", time.Time{}
+	case !state.Ready:
+		// Not a transition, and not normal either. Without this the only channel
+		// carrying this message is the StorageReady condition on a SystemBucket,
+		// and on an installation that has none there is nothing to carry it: no
+		// object, no event, no metric, and no repeated log line. The first consumer
+		// to create a SystemBucket a week later would be the first to see why.
+		if m.shouldRepeatNotReady(state.Message) {
+			m.log.Warn("the system object storage is still not ready", "message", state.Message)
+			m.lastNotReadyMsg, m.lastNotReadyAt = state.Message, m.clock()
+		}
 	}
 	m.state = state
 	return state, nil

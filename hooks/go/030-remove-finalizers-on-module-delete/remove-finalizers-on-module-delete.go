@@ -27,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -152,6 +153,41 @@ func handlerRemoveFinalizersOnModuleDelete(ctx context.Context, input *pkg.HookI
 			if err := removeFinalizersFromObject(ctx, cl, cr, input.Logger); err != nil {
 				resultErr = errors.Join(resultErr, err)
 			}
+		}
+	}
+
+	// The local PV pool is the one thing the module leaves behind, and it is the
+	// one thing that makes re-enabling it unsafe.
+	//
+	// These PersistentVolumes are cluster-scoped, so deleting the namespace does
+	// not take them; Helm does not own them, because the controller creates them
+	// rather than the chart; and the store has no custom resource for them to be
+	// owned by. Their only collector lives in the controller, which is gone by the
+	// time this runs. So without this step they stay in the cluster forever,
+	// Available or Released, pointing at a StorageClass that no longer exists —
+	// and re-enabling the module starts at incarnation 1, binds the same PV names,
+	// and brings the new data plane up on the previous installation's data. That
+	// is exactly what the incarnation mechanism exists to prevent.
+	pvList := &corev1.PersistentVolumeList{}
+	if err := cl.List(ctx, pvList,
+		client.HasLabels{consts.SystemLocalNodeLabel},
+		client.HasLabels{consts.SystemStoreLabel},
+	); err != nil {
+		input.Logger.Info(fmt.Sprintf("[%s]: skipping the local PV pool: %v", hookName, err))
+	} else {
+		for i := range pvList.Items {
+			pv := &pvList.Items[i]
+			if len(pv.Finalizers) > 0 {
+				if err := removeFinalizersFromObject(ctx, cl, pv, input.Logger); err != nil {
+					resultErr = errors.Join(resultErr, err)
+					continue
+				}
+			}
+			if err := cl.Delete(ctx, pv); err != nil && !apierrors.IsNotFound(err) {
+				resultErr = errors.Join(resultErr, fmt.Errorf("delete local pv %s: %w", pv.Name, err))
+				continue
+			}
+			input.Logger.Info(fmt.Sprintf("[%s]: deleted local pool PV %s", hookName, pv.Name))
 		}
 	}
 

@@ -17,6 +17,17 @@ limitations under the License.
 package consts
 
 const (
+	// SystemStoreLabel and SystemLocalNodeLabel are on every local PersistentVolume
+	// the controller provisions for the data plane.
+	//
+	// The module-delete hook needs them because that pool is the one thing the
+	// module leaves behind: PersistentVolumes are cluster-scoped, so deleting the
+	// namespace does not take them, Helm does not own them (the controller creates
+	// them, not the chart), and the store has no custom resource for them to be
+	// owned by. The only collector lives in the controller, which is gone by then.
+	SystemStoreLabel     string = "storage.deckhouse.io/system-store"
+	SystemLocalNodeLabel string = "storage.deckhouse.io/system-local-node"
+
 	ModuleName       string = "systemS3"
 	ModuleNamespace  string = "d8-system-s3"
 	ModulePluralName string = "system-s3"

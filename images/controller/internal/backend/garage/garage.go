@@ -343,6 +343,15 @@ func workloadRolledOut(sts *appsv1.StatefulSet, desired int32) (bool, string) {
 // owned by. The data plane is identified by commonLabels instead and torn down
 // explicitly — by the recreate path (recreate.go) and, when the module is
 // disabled, together with the namespace that holds it.
+//
+// That last sentence holds for what is namespaced, which is everything applied
+// here. It does not hold for the local PV pool: PersistentVolumes are
+// cluster-scoped, Helm does not own them because the controller creates them, and
+// there is no custom resource to own them either. Deleting the namespace leaves
+// them, so the module-delete hook removes them explicitly
+// (hooks/go/030-remove-finalizers-on-module-delete). The directories they point at
+// on the masters are left behind — the module has no node agent — and
+// CONFIGURATION documents that.
 func (d *Driver) apply(ctx context.Context, obj client.Object) error {
 	desired := obj.DeepCopyObject().(client.Object)
 	_, err := controllerutil.CreateOrUpdate(ctx, d.client, obj, func() error {

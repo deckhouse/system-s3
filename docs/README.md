@@ -43,3 +43,17 @@ Toggling `storage.singleReplica` on a running installation **destroys everything
 {{< /alert >}}
 
 Garage is used as-is, through its standard admin API. It is AGPL-licensed, which is why it backs the platform's own storage only and is never offered as a service to users.
+
+## Removing the module
+
+Disabling the module deletes its namespace, and with it the Garage workload, its
+configuration and its Secrets. Two things it does not delete, and both matter.
+
+The local `PersistentVolume` pool is cluster-scoped, so the namespace does not
+take it — the module removes it explicitly when it is disabled.
+
+The directories those volumes point at, `/var/lib/deckhouse/system-s3/garage/` on
+every control-plane node, are **left in place**: the module has no node agent and
+cannot reach them. They still hold the objects that were in the system storage.
+Remove them by hand if the data is not wanted, and remember they are there before
+re-enabling the module.
