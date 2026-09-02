@@ -193,7 +193,14 @@ func (c *adminClient) do(ctx context.Context, method, path string, body, out any
 	}
 	defer resp.Body.Close()
 
-	data, _ := io.ReadAll(resp.Body)
+	data, readErr := io.ReadAll(resp.Body)
+	if readErr != nil && (resp.StatusCode >= 200 && resp.StatusCode < 300) {
+		// A connection cut mid-body used to surface as a JSON decode failure on a
+		// truncated document, which reads like a protocol mismatch and sends the
+		// reader to the wrong place. On a non-2xx the partial body is still the best
+		// description of the failure, so it is kept for the apiError below.
+		return fmt.Errorf("garage admin %s %s: read response body: %w", method, path, readErr)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &apiError{Method: method, Path: path, StatusCode: resp.StatusCode, Body: string(data)}
 	}
@@ -325,18 +332,4 @@ func (c *adminClient) allow(ctx context.Context, bucketID, accessKeyID string, p
 		"permissions": perms,
 	}
 	return c.do(ctx, http.MethodPost, "/v2/AllowBucketKey", body, nil)
-}
-
-// bucketQuotas is the quota block of the UpdateBucket request. A nil field
-// means "no limit"; Garage stores sizes in bytes.
-type bucketQuotas struct {
-	MaxSize    *int64 `json:"maxSize"`
-	MaxObjects *int64 `json:"maxObjects"`
-}
-
-// updateBucket sets the bucket's quotas (idempotent). Passing a bucketQuotas
-// with nil fields clears the limits, so it also reconciles quota removal.
-func (c *adminClient) updateBucket(ctx context.Context, bucketID string, quotas bucketQuotas) error {
-	body := map[string]any{"quotas": quotas}
-	return c.do(ctx, http.MethodPost, "/v2/UpdateBucket?id="+url.QueryEscape(bucketID), body, nil)
 }

@@ -315,7 +315,7 @@ func (d *Driver) systemReplicaNodes(ctx context.Context, store *backend.Store) (
 // binds a pool PV on the master the scheduler picks — an empty master (soft
 // anti-affinity) when spreading, or the sole survivor when consolidating. The
 // replica boots empty and Garage re-replicates once the cluster is whole again.
-// Retain means the old PV is left Released for gcSystemLocalPVs to reap.
+// Retain means the old PV is left Released for gcLocalPVs to reap.
 func (d *Driver) recycleReplica(ctx context.Context, store *backend.Store, ordinal int32) error {
 	name := fmt.Sprintf("%s-%d", resourceName(store), ordinal)
 	pvcName := "data-" + name

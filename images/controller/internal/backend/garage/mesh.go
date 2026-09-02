@@ -30,8 +30,13 @@ import (
 // layoutZone is the Garage layout zone assigned to every node. A single zone is
 // deliberate: the store must keep a fixed replica count even on a single master
 // (replicas co-located there), which a per-host zone would forbid.
-// The trade-off — co-located replicas share a physical disk, so redundancy is at
-// the process level until masters allow spreading — is documented in DESIGN.
+// The trade-off is deliberate and worth stating: co-located replicas share a
+// physical disk, so on a single master the redundancy is at the process level
+// only — a lost disk loses the store. It buys a replica count that does not
+// change when masters are added or removed, which is what keeps the pinned
+// replication factor and the Garage quorum stable (see replicasHA); the placement
+// reconcile spreads the replicas as soon as there are masters to spread them
+// across.
 const layoutZone = "dc1"
 
 // garageStatusHealthy is the value Garage's admin GET /v2/GetClusterHealth

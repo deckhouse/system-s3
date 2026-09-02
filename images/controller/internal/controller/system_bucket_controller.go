@@ -294,7 +294,7 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 	// every request while the resource says Ready, and it never heals: the next
 	// pass makes the same decision. Checking that the Secret exists is not enough;
 	// what matters is whether it still carries the half nobody can reissue.
-	secretUsable := secretExists && len(existing.Data[v1alpha1.SecretKeySecretAccessID]) > 0
+	secretUsable := secretExists && len(existing.Data[v1alpha1.SecretKeySecretAccessKey]) > 0
 	mintFresh := rotationValue != observedRotation || recordedKey == "" || !secretUsable
 
 	astate, err := r.Driver.EnsureAccess(ctx, store, name,
@@ -404,7 +404,7 @@ func (r *SystemBucketReconciler) ensureCredentialsSecret(
 	if secretKey == "" && existing != nil {
 		// Reused key: keep the secret key already stored. Garage cannot recover a
 		// secret key after creation, so the Secret is the only copy.
-		secretKey = string(existing.Data[v1alpha1.SecretKeySecretAccessID])
+		secretKey = string(existing.Data[v1alpha1.SecretKeySecretAccessKey])
 		if accessKeyID == "" {
 			accessKeyID = string(existing.Data[v1alpha1.SecretKeyAccessKeyID])
 		}
@@ -435,11 +435,11 @@ func (r *SystemBucketReconciler) ensureCredentialsSecret(
 		// collapses it — the resulting Data is identical, so resourceVersion does
 		// not move and no watch fires — but the request is still pointless.
 		secret.Data = map[string][]byte{
-			v1alpha1.SecretKeyS3Endpoint:     []byte(state.Endpoint),
-			v1alpha1.SecretKeyS3Region:       []byte(state.Region),
-			v1alpha1.SecretKeyS3Bucket:       []byte(bucketName),
-			v1alpha1.SecretKeyAccessKeyID:    []byte(accessKeyID),
-			v1alpha1.SecretKeySecretAccessID: []byte(secretKey),
+			v1alpha1.SecretKeyS3Endpoint:      []byte(state.Endpoint),
+			v1alpha1.SecretKeyS3Region:        []byte(state.Region),
+			v1alpha1.SecretKeyS3Bucket:        []byte(bucketName),
+			v1alpha1.SecretKeyAccessKeyID:     []byte(accessKeyID),
+			v1alpha1.SecretKeySecretAccessKey: []byte(secretKey),
 		}
 		return controllerutil.SetControllerReference(bucket, secret, r.Scheme)
 	})

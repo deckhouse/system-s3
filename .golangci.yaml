@@ -16,6 +16,11 @@ linters:
     - staticcheck
     - unconvert
     - unparam
+    # In golangci-lint v2 "unused" is its own linter, not part of staticcheck.
+    # Without it, code that came along with a port and is called by nobody passes
+    # CI unnoticed -- which is how a set of bucket-policy and quota helpers for an
+    # API this module does not have lived here.
+    - unused
     - whitespace
   settings:
     sloglint:

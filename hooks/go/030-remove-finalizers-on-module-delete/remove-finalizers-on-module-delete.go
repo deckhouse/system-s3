@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/deckhouse/module-sdk/pkg"
 	"github.com/deckhouse/module-sdk/pkg/registry"
@@ -42,13 +43,36 @@ const hookName = "remove-finalizers-on-module-delete"
 func removeFinalizersFromObject(ctx context.Context, cl client.Client, obj client.Object, logger pkg.Logger) error {
 	logger.Info(fmt.Sprintf("[%s]: Removing finalizers from %s %s", hookName, obj.GetObjectKind().GroupVersionKind().Kind, obj.GetName()))
 
+	kept := make([]string, 0, len(obj.GetFinalizers()))
+	for _, f := range obj.GetFinalizers() {
+		if !isModuleFinalizer(f) {
+			kept = append(kept, f)
+		}
+	}
+	if len(kept) == len(obj.GetFinalizers()) {
+		return nil
+	}
+
 	patch := client.MergeFrom(obj.DeepCopyObject().(client.Object))
-	obj.SetFinalizers(nil)
+	obj.SetFinalizers(kept)
 
 	if err := cl.Patch(ctx, obj, patch); err != nil {
 		return fmt.Errorf("failed to patch %s %s: %w", obj.GetObjectKind().GroupVersionKind().Kind, obj.GetName(), err)
 	}
 	return nil
+}
+
+// isModuleFinalizer reports whether a finalizer belongs to this module.
+//
+// The hook used to clear the whole list. On the objects it touches there should be
+// nothing else — they live in the module namespace, or they are the module's own
+// CRs — so nothing was observably broken by it. But "remove every finalizer from
+// every object in this namespace" is not a capability an uninstall hook should
+// have at all: the one object that ever acquires a foreign finalizer, from a
+// backup operator or a policy controller, would have it silently dropped and
+// whatever it was protecting would be released.
+func isModuleFinalizer(f string) bool {
+	return strings.HasPrefix(f, consts.ModuleFinalizerPrefix)
 }
 
 var _ = registry.RegisterFunc(configRemoveFinalizersOnModuleDelete, handlerRemoveFinalizersOnModuleDelete)
@@ -110,28 +134,9 @@ func handlerRemoveFinalizersOnModuleDelete(ctx context.Context, input *pkg.HookI
 		}
 	}
 
-	for _, provisioner := range consts.AllowedProvisioners {
-		scList := &storagev1.StorageClassList{}
-		if err := cl.List(ctx, scList); err != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("[%s]: failed to list storage classes: %w", hookName, err))
-			break
-		}
-		for i := range scList.Items {
-			if scList.Items[i].Provisioner != provisioner {
-				continue
-			}
-			if len(scList.Items[i].Finalizers) == 0 {
-				continue
-			}
-			if err := removeFinalizersFromObject(ctx, cl, &scList.Items[i], input.Logger); err != nil {
-				resultErr = errors.Join(resultErr, err)
-			}
-		}
-	}
-
 	for _, crgvk := range consts.CRGVKsForFinalizerRemoval {
 		// List cluster-wide (no namespace scoping): the module's namespaced CRs
-		// (e.g. BucketAccess) live in the consuming applications'
+		// (SystemBucket) live in the consuming applications'
 		// namespaces, not in the module namespace, so restricting to
 		// ModuleNamespace would leave their finalizers set and the objects stuck
 		// in Terminating forever after the module (and its controller) is gone.

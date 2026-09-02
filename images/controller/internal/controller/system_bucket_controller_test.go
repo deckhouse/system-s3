@@ -321,8 +321,8 @@ func TestAnEmptySecretKeyForcesAFreshKey(t *testing.T) {
 			secret: &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: name + "-s3-credentials", Namespace: ns},
 				Data: map[string][]byte{
-					v1alpha1.SecretKeyAccessKeyID:    []byte("AK1"),
-					v1alpha1.SecretKeySecretAccessID: []byte("secret-of-AK1"),
+					v1alpha1.SecretKeyAccessKeyID:     []byte("AK1"),
+					v1alpha1.SecretKeySecretAccessKey: []byte("secret-of-AK1"),
 				},
 			},
 			wantMint: false,
@@ -334,8 +334,8 @@ func TestAnEmptySecretKeyForcesAFreshKey(t *testing.T) {
 			secret: &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: name + "-s3-credentials", Namespace: ns},
 				Data: map[string][]byte{
-					v1alpha1.SecretKeyAccessKeyID:    []byte("AK1"),
-					v1alpha1.SecretKeySecretAccessID: []byte(""),
+					v1alpha1.SecretKeyAccessKeyID:     []byte("AK1"),
+					v1alpha1.SecretKeySecretAccessKey: []byte(""),
 				},
 			},
 			wantMint: true,

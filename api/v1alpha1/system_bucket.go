@@ -229,14 +229,21 @@ const (
 // `envFrom` it directly, and identical to the keys the user-facing sds-object
 // module writes.
 const (
-	SecretKeyS3Endpoint     = "S3_ENDPOINT"
-	SecretKeyS3Region       = "S3_REGION"
-	SecretKeyS3Bucket       = "S3_BUCKET"
-	SecretKeyAccessKeyID    = "AWS_ACCESS_KEY_ID"
-	SecretKeySecretAccessID = "AWS_SECRET_ACCESS_KEY"
+	SecretKeyS3Endpoint      = "S3_ENDPOINT"
+	SecretKeyS3Region        = "S3_REGION"
+	SecretKeyS3Bucket        = "S3_BUCKET"
+	SecretKeyAccessKeyID     = "AWS_ACCESS_KEY_ID"
+	SecretKeySecretAccessKey = "AWS_SECRET_ACCESS_KEY"
 )
 
 // Status.phase values.
+//
+// Declared here on purpose, even though sds-common-lib's conditions package has
+// the same four: this module is the public API a consumer imports, and it must not
+// drag the controller's helper library in to name a value it reads off an object.
+// The controller writes the library's values; a test in images/controller keeps
+// the two sets identical, so a change on either side is caught rather than
+// discovered by a consumer comparing against a string that no longer appears.
 const (
 	PhasePending    = "Pending"
 	PhaseInProgress = "InProgress"

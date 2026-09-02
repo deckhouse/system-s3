@@ -35,7 +35,7 @@ import (
 // local-PV pool — so the next
 // reconcile can rebuild the cluster from scratch at the following incarnation. It
 // is the only sanctioned way out of a pinned replication factor, used when the
-// System replica count switches (see EnsureCluster).
+// System replica count switches (see EnsureStore).
 //
 // Deletion is asynchronous — a PVC keeps its protection finalizer until its pod
 // is gone, and a Retain PV lingers until its PVC is gone — so every pass issues
@@ -47,10 +47,10 @@ import (
 // What it deliberately does NOT do: wipe the data on disk. hostPath directories
 // are out of the controller's reach (no node agent) and Retain never destroys
 // data, so the previous incarnation's directories stay behind as garbage while
-// the new incarnation starts on fresh ones (see systemLocalPVPath). The
-// rebuilt cluster is therefore EMPTY: buckets are recreated by the Bucket
-// reconciler and access keys are re-issued (BucketAccess re-mints a key that
-// vanished from the backend), but the stored objects are gone.
+// the new incarnation starts on fresh ones (see localPVPath). The
+// rebuilt cluster is therefore EMPTY: buckets are recreated by the SystemBucket
+// reconciler and access keys are re-issued (it re-mints a key that vanished from
+// the backend), but the stored objects are gone.
 func (d *Driver) teardownDataPlane(ctx context.Context, store *backend.Store) (bool, string, error) {
 	remaining := 0
 

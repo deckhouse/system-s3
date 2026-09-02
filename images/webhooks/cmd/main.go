@@ -17,10 +17,12 @@ limitations under the License.
 package main
 
 import (
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
@@ -30,6 +32,11 @@ import (
 	"github.com/deckhouse/sds-common-lib/logger/kwhlogger"
 	"github.com/deckhouse/system-s3/images/webhooks/handlers"
 )
+
+// webhookReadHeaderTimeout bounds how long a client may take to send its request
+// headers. Generous for the only client there is (the apiserver, on the same
+// network), short enough that idle half-open connections cannot accumulate.
+const webhookReadHeaderTimeout = 10 * time.Second
 
 type config struct {
 	certFile string
@@ -105,8 +112,25 @@ func main() {
 	mux.Handle("/systembucket-validate", systemBucketWebhookHandler)
 	mux.HandleFunc("/healthz", httpHandlerHealthz)
 
+	// An explicit server, not http.ListenAndServeTLS, for two reasons.
+	//
+	// ReadHeaderTimeout: this endpoint gates object creation with
+	// failurePolicy: Fail, so connections that open and never finish sending
+	// headers are not just wasted sockets — enough of them and no SystemBucket can
+	// be created at all. Only the apiserver reaches this port, which is why the
+	// surface is narrow rather than absent.
+	//
+	// MinVersion: without it the floor is whatever the Go runtime's default is,
+	// which is a property of the toolchain rather than a decision of this module.
+	srv := &http.Server{
+		Addr:              port,
+		Handler:           mux,
+		ReadHeaderTimeout: webhookReadHeaderTimeout,
+		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+
 	log.Info("listening", "address", port)
-	err = http.ListenAndServeTLS(port, cfg.certFile, cfg.keyFile, mux)
+	err = srv.ListenAndServeTLS(cfg.certFile, cfg.keyFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error serving webhook: %s", err)
 		os.Exit(1)

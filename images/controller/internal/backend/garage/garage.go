@@ -34,11 +34,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"sync"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -69,6 +71,27 @@ type Driver struct {
 	namespace     string
 	image         string
 	clusterDomain string
+
+	// The exec clientset is built once. Capturing node identities execs into
+	// every replica on every pass, and a clientset per exec is a set of REST
+	// clients and rate limiters rebuilt for a call that lasts milliseconds. The
+	// transports are cached globally by client-go, so this is not about TLS
+	// handshakes — just about not constructing the rest of it six times a minute.
+	execOnce   sync.Once
+	execClient *kubernetes.Clientset
+	execErr    error
+}
+
+// clientset returns the shared exec clientset, building it on first use.
+func (d *Driver) clientset() (*kubernetes.Clientset, error) {
+	d.execOnce.Do(func() {
+		if d.restConfig == nil {
+			d.execErr = fmt.Errorf("no rest config configured for exec")
+			return
+		}
+		d.execClient, d.execErr = kubernetes.NewForConfig(d.restConfig)
+	})
+	return d.execClient, d.execErr
 }
 
 // New builds a Garage Driver.

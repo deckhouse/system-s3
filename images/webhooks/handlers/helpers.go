@@ -17,10 +17,7 @@ limitations under the License.
 package handlers
 
 import (
-	"encoding/json"
-
 	kwhvalidating "github.com/slok/kubewebhook/v2/pkg/webhook/validating"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 // reject returns a deny ValidatorResult with the supplied message.
@@ -31,21 +28,4 @@ func reject(message string) *kwhvalidating.ValidatorResult {
 		Valid:   false,
 		Message: message,
 	}
-}
-
-// decodeUnstructured parses a raw admission-request payload (for example
-// AdmissionReview.OldObjectRaw) into an unstructured.Unstructured.
-//
-// Empty/nil input yields (nil, nil) so the caller can treat
-// "old object missing" as "first-time create" rather than an error —
-// kubewebhook leaves OldObjectRaw nil on CREATE.
-func decodeUnstructured(raw []byte) (*unstructured.Unstructured, error) {
-	if len(raw) == 0 {
-		return nil, nil
-	}
-	out := &unstructured.Unstructured{}
-	if err := json.Unmarshal(raw, &out.Object); err != nil {
-		return nil, err
-	}
-	return out, nil
 }

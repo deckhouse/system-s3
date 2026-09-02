@@ -134,7 +134,7 @@ func (d *Driver) controlPlaneHostnames(ctx context.Context) ([]string, error) {
 }
 
 // desiredLocalPVs is the full pool the controller wants for the given
-// incarnation: systemReplicas PVs per control-plane hostname (one per hostname in
+// incarnation: desiredReplicas PVs per control-plane hostname (one per hostname in
 // single-replica mode, so the scheduler can still place the sole replica on any
 // master).
 func desiredLocalPVs(store *backend.Store, hostnames []string, incarnation int32) []*corev1.PersistentVolume {

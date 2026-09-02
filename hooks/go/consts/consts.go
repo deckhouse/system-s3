@@ -37,11 +37,11 @@ const (
 	WebhookCertCn string = "webhooks"
 )
 
-// AllowedProvisioners lists provisioners for which the module-delete hook
-// should strip finalizers from StorageClass objects. The module ships one
-// StorageClass — the no-provisioner local class backing the data plane's
-// PersistentVolumes — and nothing puts a finalizer on it, so the list is empty.
-var AllowedProvisioners = []string{}
+// ModuleFinalizerPrefix is what a finalizer this module sets looks like (the
+// controller's is ModuleFinalizerPrefix + "-controller"). The module-delete hook
+// removes only finalizers matching it, so a foreign finalizer on one of the same
+// objects — set by a backup operator or a policy controller — is left where it is.
+const ModuleFinalizerPrefix = "storage.deckhouse.io/system-s3"
 
 // WebhookConfigurationsToDelete lists ValidatingWebhookConfigurations the
 // module-delete hook removes on uninstall.

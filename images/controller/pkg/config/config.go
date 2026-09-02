@@ -127,37 +127,14 @@ func NewConfig() *Options {
 		}
 	}
 
-	opts.MaxConcurrentReconciles = DefaultMaxConcurrentReconciles
-	if v := os.Getenv(MaxConcurrentReconcilesEnv); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			opts.MaxConcurrentReconciles = n
-		}
-	}
-
-	opts.RequeueInterval = time.Duration(DefaultRequeueIntervalSeconds) * time.Second
-	if v := os.Getenv(RequeueIntervalEnv); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			opts.RequeueInterval = time.Duration(n) * time.Second
-		}
-	}
-
-	opts.ReconcileTimeout = time.Duration(DefaultReconcileTimeoutSeconds) * time.Second
-	if v := os.Getenv(ReconcileTimeoutEnv); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			opts.ReconcileTimeout = time.Duration(n) * time.Second
-		}
-	}
-
-	opts.ReadyResyncInterval = time.Duration(DefaultReadyResyncIntervalSeconds) * time.Second
-	if v := os.Getenv(ReadyResyncIntervalEnv); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			opts.ReadyResyncInterval = time.Duration(n) * time.Second
-		}
-	}
+	opts.MaxConcurrentReconciles = positiveIntFromEnv(MaxConcurrentReconcilesEnv, DefaultMaxConcurrentReconciles)
+	opts.RequeueInterval = secondsFromEnv(RequeueIntervalEnv, DefaultRequeueIntervalSeconds)
+	opts.ReconcileTimeout = secondsFromEnv(ReconcileTimeoutEnv, DefaultReconcileTimeoutSeconds)
+	opts.ReadyResyncInterval = secondsFromEnv(ReadyResyncIntervalEnv, DefaultReadyResyncIntervalSeconds)
 
 	opts.GarageImage = os.Getenv(GarageImageEnv)
 
-	opts.SingleReplica = os.Getenv(SingleReplicaEnv) == "true"
+	opts.SingleReplica = boolFromEnv(SingleReplicaEnv, false)
 
 	opts.SizePerNode = os.Getenv(SizePerNodeEnv)
 	if opts.SizePerNode == "" {
@@ -175,4 +152,50 @@ func NewConfig() *Options {
 	}
 
 	return &opts
+}
+
+// The three helpers below share one rule: a value that cannot be used is
+// reported, not swallowed.
+//
+// The chart renders all of these, and it renders them correctly, so none of this
+// fires in a normal installation. It fires when somebody edits the environment of
+// a running pod to change the module's behaviour — which is exactly the moment a
+// typo must not look like it worked. SINGLE_REPLICA is the sharpest case: it is
+// the one switch whose activation destroys data, and a silent "it did not take"
+// is the wrong default for it in both directions.
+
+// positiveIntFromEnv reads a positive integer, falling back to def and saying so
+// when the value is unusable.
+func positiveIntFromEnv(name string, def int) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		log.Printf("%s=%q is not a positive integer; using %d", name, v, def)
+		return def
+	}
+	return n
+}
+
+// secondsFromEnv reads a positive number of seconds as a duration.
+func secondsFromEnv(name string, defSeconds int) time.Duration {
+	return time.Duration(positiveIntFromEnv(name, defSeconds)) * time.Second
+}
+
+// boolFromEnv reads a boolean through strconv.ParseBool, so "True", "1" and "yes"
+// mean what whoever typed them meant, and anything else is reported rather than
+// read as false.
+func boolFromEnv(name string, def bool) bool {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		log.Printf("%s=%q is not a boolean; using %t", name, v, def)
+		return def
+	}
+	return b
 }

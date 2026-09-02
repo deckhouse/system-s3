@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 
 	v1alpha1 "github.com/deckhouse/system-s3/api/v1alpha1"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
@@ -83,7 +84,19 @@ const (
 // (rather than one pod per master) keeps the pinned replication factor and the
 // Garage quorum stable across master-count changes: three replicas always run —
 // spread across control-plane nodes when several exist, co-located on the single
-// master otherwise (see DESIGN, "master-count change scenarios").
+// master otherwise.
+//
+// The master-count changes this has to survive, and what happens on each:
+//   - 1 -> 3: the replicas stay where they are and the placement reconcile moves
+//     them out one at a time, health-gated, so the store keeps serving.
+//   - 3 -> 1: the two replicas whose masters are gone are consolidated onto the
+//     survivor; they hold no reachable data, so recycling them restores quorum
+//     rather than risking it.
+//   - 3 -> 2 (and 2 -> 3): left alone. It is a transient of a shrink or a grow,
+//     and neither spreading across two nor consolidating from two is a state
+//     worth moving data for.
+//
+// See nextPlacementAction in rebalance.go, which implements exactly these rules.
 const replicasHA int32 = 3
 
 // replicasSingle is the replica count of the single-replica store (the
@@ -339,8 +352,8 @@ func buildS3Service(store *backend.Store, namespace string) *corev1.Service {
 		Spec: corev1.ServiceSpec{
 			Selector: commonLabels(store),
 			Ports: []corev1.ServicePort{
-				{Name: "s3", Port: s3Port, TargetPort: intstr.FromInt(s3Port)},
-				{Name: "admin", Port: adminPort, TargetPort: intstr.FromInt(adminPort)},
+				{Name: "s3", Port: s3Port, TargetPort: intstr.FromInt32(s3Port)},
+				{Name: "admin", Port: adminPort, TargetPort: intstr.FromInt32(adminPort)},
 			},
 		},
 	}
@@ -360,7 +373,7 @@ func buildRPCService(store *backend.Store, namespace string) *corev1.Service {
 			PublishNotReadyAddresses: true,
 			Selector:                 commonLabels(store),
 			Ports: []corev1.ServicePort{
-				{Name: "rpc", Port: rpcPort, TargetPort: intstr.FromInt(rpcPort)},
+				{Name: "rpc", Port: rpcPort, TargetPort: intstr.FromInt32(rpcPort)},
 			},
 		},
 	}
@@ -398,7 +411,7 @@ func garageContainer(image string) corev1.Container {
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path: "/health",
-					Port: intstr.FromInt(adminPort),
+					Port: intstr.FromInt32(adminPort),
 				},
 			},
 			InitialDelaySeconds: 5,
@@ -461,17 +474,14 @@ func podSpec(store *backend.Store, image string) corev1.PodSpec {
 		// data-plane pod runs as root, consistent with how Deckhouse storage data
 		// planes run.
 		SecurityContext: &corev1.PodSecurityContext{
-			RunAsUser:  ptrInt64(0),
-			RunAsGroup: ptrInt64(0),
-			FSGroup:    ptrInt64(0),
+			RunAsUser:  ptr.To[int64](0),
+			RunAsGroup: ptr.To[int64](0),
+			FSGroup:    ptr.To[int64](0),
 		},
 		Containers: []corev1.Container{c},
 		Volumes:    volumes,
 	}
 }
-
-func ptrInt64(v int64) *int64 { return &v }
-func ptrBool(v bool) *bool    { return &v }
 
 // hardenedRoot is the container security context for the data plane.
 //
@@ -488,9 +498,9 @@ func ptrBool(v bool) *bool    { return &v }
 // verified rather than assumed.
 func hardenedRoot() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
-		RunAsUser:                ptrInt64(0),
-		RunAsGroup:               ptrInt64(0),
-		AllowPrivilegeEscalation: ptrBool(false),
+		RunAsUser:                ptr.To[int64](0),
+		RunAsGroup:               ptr.To[int64](0),
+		AllowPrivilegeEscalation: ptr.To(false),
 		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
@@ -575,7 +585,7 @@ func buildStatefulSet(store *backend.Store, namespace, image, cfgHash string) *a
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
 				SecretName: nodeIdentitySecretName(store),
-				Optional:   ptrBool(true),
+				Optional:   ptr.To(true),
 			},
 		},
 	})

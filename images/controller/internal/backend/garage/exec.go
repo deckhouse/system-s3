@@ -22,7 +22,6 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -57,10 +56,7 @@ func (d *Driver) runningGaragePods(ctx context.Context, store *backend.Store) (m
 // execInPod runs cmd in a container of a pod, returning its stdout bytes. On
 // failure the error carries stderr.
 func (d *Driver) execInPod(ctx context.Context, pod, container string, cmd []string) ([]byte, error) {
-	if d.restConfig == nil {
-		return nil, fmt.Errorf("no rest config configured for exec")
-	}
-	cs, err := kubernetes.NewForConfig(d.restConfig)
+	cs, err := d.clientset()
 	if err != nil {
 		return nil, err
 	}
