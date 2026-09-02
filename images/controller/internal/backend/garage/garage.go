@@ -149,7 +149,8 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (backend
 	// a recycled replica (fresh empty PV on another master) rejoins with its
 	// stable node ID instead of generating a new one (which strands the old ID
 	// as a dead node and churns the layout beyond recovery on consolidate).
-	if err := d.ensureNodeIdentities(ctx, store); err != nil {
+	identitiesMissing, err := d.ensureNodeIdentities(ctx, store)
+	if err != nil {
 		return state, fmt.Errorf("ensure node identities: %w", err)
 	}
 	// Converge replica placement onto the target topology as the master count
@@ -183,6 +184,17 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (backend
 	state.TotalCapacity = mesh.total
 	state.Ready = mesh.ready
 	state.Message = mesh.msg
+
+	// Said on the object, not only in the log. A replica with no stored identity
+	// works fine until the next placement move, and then rejoins under a new node
+	// ID and leaves the old one in the layout as a dead node. The store stays
+	// Ready — nothing is broken yet — but an operator has to be able to see that
+	// the protection is off before a rebalance turns it into layout churn.
+	if identitiesMissing > 0 {
+		state.Message = fmt.Sprintf(
+			"%s; node identity not captured for %d replica(s): a placement move would give them new node IDs",
+			state.Message, identitiesMissing)
+	}
 	return state, nil
 }
 

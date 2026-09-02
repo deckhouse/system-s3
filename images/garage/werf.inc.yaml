@@ -85,7 +85,16 @@ shell:
   # distroless base has no libc, so ship the glibc runtime (loader + core libs)
   # and libgcc_s. Without this `/garage` fails with "no such file or directory".
   setup:
-    - pm install libc gnu-gcc-lib
+    # coreutils is not decoration: base64 is what the controller reads a node's
+    # identity with (identity.go:captureNodeKey), and cp/mkdir/chmod are what the
+    # restore-node-key initContainer puts it back with. Without them the stable
+    # node ID mechanism does not work, and — before this was made loud — did not
+    # work quietly: a rebalance then recreates the PVC, Garage generates a new
+    # node ID, and the old one stays in the layout as a dead node.
+    #
+    # builder/distroless does not carry it by default: base/vex in this same
+    # repository installs coreutils explicitly for the same reason.
+    - pm install libc gnu-gcc-lib coreutils
 
 imageSpec:
   config:

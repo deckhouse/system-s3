@@ -72,22 +72,34 @@ func podOrdinal(name string) (int32, bool) {
 // already-captured ordinal is never overwritten. Capture is best-effort: a pod
 // not answering yet is retried on the next reconcile; only genuine API errors are
 // returned.
-func (d *Driver) ensureNodeIdentities(ctx context.Context, store *backend.Store) error {
+//
+// It returns how many Running replicas still have no stored identity, and the
+// count is the point. This mechanism protects data placement, and it used to fail
+// silently: a Warning in the log, a successful reconcile, no condition touched,
+// and an identity Secret that stays empty forever. The next rebalance then
+// recreates the replica's PVC, Garage generates a new node ID because there was
+// nothing to restore, and the old ID stays in the layout as a dead node —
+// accumulating exactly the churn the mechanism exists to prevent.
+//
+// A pod that has not answered yet is normal and transient. A count that stays
+// above zero is not, so the caller reports it where an operator will see it.
+func (d *Driver) ensureNodeIdentities(ctx context.Context, store *backend.Store) (int, error) {
 	if d.restConfig == nil {
-		return nil // no exec transport (e.g. in tests) — nothing to capture
+		return 0, nil // no exec transport (e.g. in tests) — nothing to capture
 	}
 
 	secret, err := d.ensureNodeIdentitySecret(ctx, store)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	pods, err := d.runningGaragePods(ctx, store)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	captured := map[string][]byte{}
+	uncaptured := 0
 	for ord, pod := range pods {
 		privKey := nodeIdentityDataKey(ord)
 		pubKey := privKey + ".pub"
@@ -96,19 +108,27 @@ func (d *Driver) ensureNodeIdentities(ctx context.Context, store *backend.Store)
 		}
 		priv, err := d.captureNodeKey(ctx, pod, nodeKeyPath)
 		if err != nil {
-			d.log.Warn("unable to read node_key", logger.Err(err), slog.String("pod", pod))
+			// Error, not Warning: a replica whose identity is never captured loses
+			// its node ID on the next PVC recycle, and that is a data-placement
+			// problem rather than a slow pod.
+			d.log.Error("unable to read node_key; this replica would rejoin under a new node ID",
+				logger.Err(err), slog.String("pod", pod))
+			uncaptured++
 			continue
 		}
 		pub, err := d.captureNodeKey(ctx, pod, nodeKeyPubPath)
 		if err != nil {
-			d.log.Warn("unable to read node_key.pub", logger.Err(err), slog.String("pod", pod))
+			d.log.Error("unable to read node_key.pub; this replica would rejoin under a new node ID",
+				logger.Err(err), slog.String("pod", pod))
+			uncaptured++
 			continue
 		}
 		if len(priv) != nodeKeyPrivBytes || len(pub) != nodeKeyPubBytes {
-			d.log.Warn("unexpected node identity sizes",
+			d.log.Error("unexpected node identity sizes; refusing to store them",
 				"pod", pod,
 				"privBytes", len(priv), "wantPrivBytes", nodeKeyPrivBytes,
 				"pubBytes", len(pub), "wantPubBytes", nodeKeyPubBytes)
+			uncaptured++
 			continue
 		}
 		captured[privKey] = priv
@@ -116,9 +136,12 @@ func (d *Driver) ensureNodeIdentities(ctx context.Context, store *backend.Store)
 	}
 
 	if len(captured) == 0 {
-		return nil
+		return uncaptured, nil
 	}
-	return d.storeNodeIdentities(ctx, store, captured)
+	if err := d.storeNodeIdentities(ctx, store, captured); err != nil {
+		return uncaptured, err
+	}
+	return uncaptured, nil
 }
 
 // ensureNodeIdentitySecret returns the identity Secret, creating an empty
