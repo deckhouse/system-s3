@@ -68,8 +68,20 @@ type SystemBucketReconciler struct {
 	Scheme    *runtime.Scheme
 	Log       logger.Logger
 	Cfg       *config.Options
-	Store     *StoreManager
+	Store     StoreConverger
 	Driver    Driver
+}
+
+// StoreConverger is the data-plane surface the reconciler needs: the store it
+// provisions buckets in, and a way to drive it towards the desired shape.
+//
+// An interface for the same reason Driver is one — StoreManager talks to a real
+// Garage and holds a mutex around a full convergence, so a reconciler that takes
+// it concretely cannot be driven in a test. Which is how the whole of
+// reconcileNormal came to have no coverage at all.
+type StoreConverger interface {
+	Store() *backend.Store
+	Ensure(ctx context.Context) (backend.StoreState, error)
 }
 
 // Driver is the backend surface the reconciler needs. It is an interface so the
@@ -105,7 +117,7 @@ type bucketObserved struct {
 }
 
 // AddSystemBucketReconcilerToManager wires the SystemBucket reconciler.
-func AddSystemBucketReconcilerToManager(mgr manager.Manager, cfg *config.Options, log logger.Logger, store *StoreManager, driver Driver) error {
+func AddSystemBucketReconcilerToManager(mgr manager.Manager, cfg *config.Options, log logger.Logger, store StoreConverger, driver Driver) error {
 	r := &SystemBucketReconciler{
 		Client:    mgr.GetClient(),
 		APIReader: mgr.GetAPIReader(),
