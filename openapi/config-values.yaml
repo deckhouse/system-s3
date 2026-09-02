@@ -11,7 +11,37 @@ properties:
       control-plane node count, unless `singleReplica` reduces it to one. There is
       no custom resource for it — the module runs exactly one data plane, and
       these are all its knobs.
+    x-deckhouse-validations:
+      # Flipping singleReplica rebuilds the data plane and destroys everything in
+      # it: Garage cannot change its replication factor in place. One boolean in a
+      # ModuleConfig is too small a gesture for that, and the warning is in
+      # documentation the person editing the ModuleConfig may never have read.
+      #
+      # x-deckhouse-validations, not x-kubernetes-validations: module values are
+      # validated by Deckhouse, and it reads this key with `expression`. The
+      # Kubernetes spelling would be accepted by the YAML and evaluated by nobody.
+      - expression: |
+          !has(oldSelf) || self.singleReplica == oldSelf.singleReplica ||
+          (has(self.recreateConfirmation) &&
+           self.recreateConfirmation == 'i-understand-this-destroys-all-system-object-data')
+        message: >-
+          Changing storage.singleReplica recreates the data plane and destroys every object
+          stored in the system object storage. To proceed, set storage.recreateConfirmation to
+          'i-understand-this-destroys-all-system-object-data' in the same change.
     properties:
+      recreateConfirmation:
+        type: string
+        description: |
+          Acknowledges that changing `singleReplica` destroys everything stored
+          in the system object storage.
+
+          Required in the same change that flips `singleReplica`, and ignored
+          otherwise. Set it to
+          `i-understand-this-destroys-all-system-object-data`.
+
+          Remove it once the change is applied: left in place it would
+          authorise the next flip as well, and the point of it is to be a
+          deliberate gesture per change rather than a setting.
       singleReplica:
         type: boolean
         default: false

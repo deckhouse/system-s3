@@ -355,8 +355,18 @@ func garageContainer(image string) corev1.Container {
 			{Name: "data", MountPath: dataMountPath},
 		},
 		ReadinessProbe: &corev1.Probe{
+			// /health on the admin port, not a TCP connect on the S3 one.
+			//
+			// Garage binds S3 at startup, long before it has joined the mesh or been
+			// given a role in the layout, so an open socket says the process is up
+			// and nothing about whether it can serve. A readiness probe that answers
+			// "yes" there is what lets the rollout gate above it count a pod as
+			// ready while it cannot take a request.
 			ProbeHandler: corev1.ProbeHandler{
-				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(s3Port)},
+				HTTPGet: &corev1.HTTPGetAction{
+					Path: "/health",
+					Port: intstr.FromInt(adminPort),
+				},
 			},
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       10,
@@ -367,6 +377,10 @@ func garageContainer(image string) corev1.Container {
 				corev1.ResourceMemory: resource.MustParse("256Mi"),
 			},
 		},
+		// The container had no security context of its own at all: it inherited
+		// root from the pod and kept the runtime's default capability set on top of
+		// a hostPath mount. See hardenedRoot.
+		SecurityContext: hardenedRoot(),
 	}
 }
 
@@ -425,6 +439,29 @@ func podSpec(store *backend.Store, image string) corev1.PodSpec {
 
 func ptrInt64(v int64) *int64 { return &v }
 func ptrBool(v bool) *bool    { return &v }
+
+// hardenedRoot is the container security context for the data plane.
+//
+// root stays, and it is not optional: the directory behind a hostPath-backed PV
+// is created by the kubelet as root:root, and fsGroup does not apply to hostPath.
+// But root with no capabilities and no escalation is a much smaller surface than
+// root with the default set, and Garage needs none of them — it listens on 3900,
+// 3901 and 3903, all unprivileged, and writes to a volume root already owns.
+//
+// ReadOnlyRootFilesystem is deliberately not set. It is the one part of this that
+// could stop the data plane rather than merely constrain it, if Garage or the
+// restore script writes anywhere outside its mounts, and the e2e run that would
+// answer that is currently blocked on the stand. Worth adding once it can be
+// verified rather than assumed.
+func hardenedRoot() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		RunAsUser:                ptrInt64(0),
+		RunAsGroup:               ptrInt64(0),
+		AllowPrivilegeEscalation: ptrBool(false),
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+}
 
 // nodeIdentitySecretName is the Secret holding each replica's persisted Garage
 // node identity (keys node-<ord> and node-<ord>.pub), so a replica
@@ -517,7 +554,7 @@ func buildStatefulSet(store *backend.Store, namespace, image, cfgHash string) *a
 			{Name: "data", MountPath: dataMountPath},
 			{Name: "node-identity", MountPath: nodeIdentityMountPath, ReadOnly: true},
 		},
-		SecurityContext: &corev1.SecurityContext{RunAsUser: ptrInt64(0), RunAsGroup: ptrInt64(0)},
+		SecurityContext: hardenedRoot(),
 	}}
 
 	replicas := desiredReplicas(store)

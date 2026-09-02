@@ -17,7 +17,6 @@ limitations under the License.
 package main
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -28,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -57,7 +57,11 @@ var resourcesSchemeFuncs = []func(*apiruntime.Scheme) error{
 }
 
 func main() {
-	ctx := context.Background()
+	// SetupSignalHandler, not Background: without a cancellable context SIGTERM
+	// does not make the manager release the leader lease. The next pod then waits
+	// out LeaseDuration before it can start, and for that whole window nothing is
+	// converging the data plane — which for this module is the only one there is.
+	ctx := ctrl.SetupSignalHandler()
 	cfgParams := config.NewConfig()
 
 	baseLog, err := logger.NewLogger(cfgParams.Loglevel)
