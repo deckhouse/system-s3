@@ -61,3 +61,81 @@ properties:
           с которым создаются новые PersistentVolume пула.
   logLevel:
     description: Уровень логирования модуля.
+  controller:
+    description: |
+      Настройки system-s3-controller — контроллера, который сводит ресурсы
+      SystemBucket и data plane хранилища.
+    properties:
+      resourcesManagement:
+        description: |
+          Управление ресурсами system-s3-controller.
+        properties:
+          mode:
+            description: |
+              Режим управления запросами ресурсов: классические `Static`
+              requests/limits или `VPA`.
+          vpa:
+            description: |
+              Параметры режима VPA.
+            properties:
+              mode:
+                description: |
+                  Режим работы VPA.
+              cpu:
+                description: |
+                  Параметры, относящиеся к CPU.
+                properties:
+                  max:
+                    description: |
+                      Максимально допустимый запрос CPU.
+                  min:
+                    description: |
+                      Минимально допустимый запрос CPU.
+                  limitRatio:
+                    description: |
+                      Коэффициент, по которому из запроса вычисляется начальный
+                      лимит CPU.
+
+                      Полученное соотношение limits/requests VPA сохраняет и при
+                      дальнейшей подстройке ресурсов.
+              memory:
+                description: |
+                  Параметры, относящиеся к памяти.
+                properties:
+                  max:
+                    description: |
+                      Максимально допустимый запрос памяти.
+                  min:
+                    description: |
+                      Минимально допустимый запрос памяти.
+                  limitRatio:
+                    description: |
+                      Коэффициент, по которому из запроса вычисляется начальный
+                      лимит памяти.
+
+                      Полученное соотношение limits/requests VPA сохраняет и при
+                      дальнейшей подстройке ресурсов.
+          static:
+            description: |
+              Настройки статического управления ресурсами.
+            properties:
+              requests:
+                description: |
+                  Запросы ресурсов для пода контроллера.
+                properties:
+                  cpu:
+                    description: |
+                      Запрос CPU.
+                  memory:
+                    description: |
+                      Запрос памяти.
+              limits:
+                description: |
+                  Лимиты ресурсов для пода контроллера.
+                properties:
+                  cpu:
+                    description: |
+                      Лимит CPU.
+                  memory:
+                    description: |
+                      Лимит памяти.

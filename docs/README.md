@@ -36,7 +36,8 @@ One Garage cluster, deployed by the controller:
 
 - three replicas by default with a replication factor of 3, independent of the control-plane node count — replicas spread one per master when several exist and co-locate on the single master otherwise;
 - storage is a node-sticky local volume per replica (a `hostPath`-backed, node-pinned `PersistentVolume` on the `system-s3-local` StorageClass), so a replica returns to its node — and its data — after a restart;
-- `storage.singleReplica` trades all of that for a single replica with replication factor 1.
+- `storage.singleReplica` trades all of that for a single replica with replication factor 1;
+- placement is not configurable. Both the controller and the data plane run on the control-plane nodes and tolerate their taints: the replicas' local volumes are `hostPath` directories on those nodes, so a node selector that moved a pod elsewhere would move it away from its data. The module therefore has no `nodeSelector` or `tolerations` settings.
 
 {{< alert level="warning" >}}
 Toggling `storage.singleReplica` on a running installation **destroys everything stored in the system object storage**: Garage cannot change its replication factor in place, so the controller rebuilds the data plane empty. Buckets are recreated and access keys re-issued automatically; the objects are not.
