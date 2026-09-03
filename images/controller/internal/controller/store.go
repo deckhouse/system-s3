@@ -26,6 +26,7 @@ import (
 	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend/garage"
+	"github.com/deckhouse/system-s3/images/controller/internal/monitoring"
 )
 
 // storeDriver is the one driver call the manager makes. Narrowed to an interface
@@ -173,7 +174,28 @@ func (m *StoreManager) ensureOnce(ctx context.Context) (backend.StoreState, erro
 		}
 	}
 	m.state = state
+	m.publish(state)
 	return state, nil
+}
+
+// publish mirrors the observed state onto the module's metrics.
+//
+// The data plane has no custom resource, so its state reaches the outside only as
+// a condition copied onto every SystemBucket — and a cluster that has none (the
+// normal state of a fresh installation) has nowhere to show that its system
+// storage never came up. These two gauges are that channel.
+//
+// The capacity is also the only consumer of what the driver computes from the
+// assigned layout; before this it was calculated on every pass and dropped.
+func (m *StoreManager) publish(state backend.StoreState) {
+	monitoring.StoreReady(m.store.Name, state.Ready)
+
+	var capacity *int64
+	if state.TotalCapacity != nil {
+		v := state.TotalCapacity.Value()
+		capacity = &v
+	}
+	monitoring.StoreCapacityBytes(m.store.Name, capacity)
 }
 
 // State returns the last observed state without touching the backend.
