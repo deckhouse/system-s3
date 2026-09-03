@@ -1,6 +1,6 @@
 module github.com/deckhouse/system-s3/hooks/go
 
-go 1.26.6
+go 1.27.0
 
 require (
 	github.com/deckhouse/sds-common-lib v0.9.0
