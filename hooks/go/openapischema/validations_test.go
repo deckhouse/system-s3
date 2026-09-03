@@ -20,7 +20,9 @@ limitations under the License.
 package openapischema
 
 import (
+	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -76,90 +78,42 @@ func TestEveryValidationRuleCompiles(t *testing.T) {
 	}
 }
 
-// TestRecreateConfirmationRule pins what the singleReplica guard actually does,
-// case by case.
+// TestNoTransitionRulesInModuleValues forbids a rule that mentions oldSelf.
 //
-// The evaluation here mirrors the Deckhouse harness
-// (deckhouse-controller/internal/packages/values/schema/cel): self and oldSelf
-// are dynamic values, a rule that mentions oldSelf is a transition rule and is
-// skipped when there is no previous value, and the rule lives at the root of the
-// settings — which is what makes the "storage was not mentioned before" case fire
-// rather than being skipped.
-func TestRecreateConfirmationRule(t *testing.T) {
-	const ack = "i-understand-this-destroys-all-system-object-data"
-
-	doc := loadSchema(t, schemaFiles[0])
-	rules := collectRules(t, schemaFiles[0], doc)
-	var expr string
-	for _, r := range rules {
-		if r.where == "(root)" {
-			expr = r.expression
+// This module had one — the singleReplica guard — and it wedged Deckhouse's main
+// task queue on a live cluster. A transition rule is evaluated in two places with
+// two different notions of "previous":
+//
+//   - admission compares against the stored ModuleConfig, so an edit that passes
+//     there is accepted and stored;
+//   - the ApplyKubeConfigValues task compares against the last values Deckhouse
+//     successfully applied, and it retries forever when the rule refuses.
+//
+// So a sequence of accepted edits can leave a state the platform cannot apply:
+// the task fails on every retry and everything behind it in the main queue stops.
+// Measured — the queue held ModuleRun for this module and for upmeter behind a
+// task with 38 failures and counting:
+//
+//	Queue 'main': length 4, status: 'sleep after fail for 32s'
+//	 1. ApplyKubeConfigValues ... failures 38: Changing storage.singleReplica ...
+//	 3. ModuleRun:main:system-s3:KubeConfig-Changed-Modules
+//	 4. ModuleRun:main:upmeter:Schedule-Change-ModuleValues
+//
+// A guard that can jam the platform is worse than the mistake it prevents. The
+// replica-count switch is refused by the driver instead, which reports it on
+// StorageReady and blocks nothing (see TestReplicaSwitchNeedsTheAcknowledgement
+// in the garage package).
+func TestNoTransitionRulesInModuleValues(t *testing.T) {
+	for _, path := range schemaFiles {
+		doc := loadSchema(t, path)
+		for _, r := range collectRules(t, path, doc) {
+			if usesOldSelf(r.expression) {
+				t.Errorf("%s (%s): the rule mentions oldSelf, which makes it a transition rule — "+
+					"those are re-evaluated by ApplyKubeConfigValues against the last applied values and "+
+					"retry forever when they refuse, which stops the whole main queue. Enforce the "+
+					"transition in the controller instead.\nexpression:\n%s", path, r.where, r.expression)
+			}
 		}
-	}
-	if expr == "" {
-		t.Fatal("no root-level validation rule in config-values.yaml: the singleReplica guard has to be at the " +
-			"root, or it is skipped for a ModuleConfig that never mentioned storage")
-	}
-
-	env := celEnv(t)
-	ast, issues := env.Compile(expr)
-	if issues.Err() != nil {
-		t.Fatalf("compile: %v", issues.Err())
-	}
-	prg, err := env.Program(ast)
-	if err != nil {
-		t.Fatalf("program: %v", err)
-	}
-
-	storage := func(kv map[string]any) map[string]any { return map[string]any{"storage": kv} }
-
-	cases := []struct {
-		name string
-		self map[string]any
-		old  map[string]any
-		// want is the verdict: true = the change is allowed.
-		// A nil old means a create, where the rule is skipped entirely.
-		skipped bool
-		want    bool
-	}{
-		{name: "create", self: storage(map[string]any{"singleReplica": true}), old: nil, skipped: true},
-		{name: "no change", self: storage(map[string]any{"singleReplica": false}), old: storage(map[string]any{"singleReplica": false}), want: true},
-		{name: "unrelated edit", self: storage(map[string]any{"singleReplica": true, "sizePerNode": "20Gi"}), old: storage(map[string]any{"singleReplica": true, "sizePerNode": "10Gi"}), want: true},
-		{name: "flip on without the acknowledgement", self: storage(map[string]any{"singleReplica": true}), old: storage(map[string]any{"singleReplica": false}), want: false},
-		{name: "flip on with the acknowledgement", self: storage(map[string]any{"singleReplica": true, "recreateConfirmation": ack}), old: storage(map[string]any{"singleReplica": false}), want: true},
-		{name: "flip off without the acknowledgement", self: storage(map[string]any{"singleReplica": false}), old: storage(map[string]any{"singleReplica": true}), want: false},
-		// Removing the flag is flipping it back: the default is false, and the
-		// rebuild it causes is just as destructive.
-		{name: "flip off by omission", self: storage(map[string]any{"sizePerNode": "10Gi"}), old: storage(map[string]any{"singleReplica": true}), want: false},
-		// The case a rule attached to `storage` silently skipped: a running
-		// installation whose ModuleConfig never mentioned storage at all.
-		{name: "storage settings added to an existing config", self: storage(map[string]any{"singleReplica": true}), old: map[string]any{"logLevel": "INFO"}, want: false},
-		{name: "wrong acknowledgement text", self: storage(map[string]any{"singleReplica": true, "recreateConfirmation": "yes"}), old: storage(map[string]any{"singleReplica": false}), want: false},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.old == nil {
-				// Deckhouse skips transition rules with no previous value; asserting
-				// that the rule mentions oldSelf is asserting that it is one.
-				if !usesOldSelf(expr) {
-					t.Fatal("the rule does not mention oldSelf, so it would also fire on create, " +
-						"where there is nothing to destroy")
-				}
-				return
-			}
-			out, _, err := prg.Eval(map[string]any{"self": tc.self, "oldSelf": tc.old})
-			if err != nil {
-				t.Fatalf("evaluate: %v", err)
-			}
-			got, ok := out.Value().(bool)
-			if !ok {
-				t.Fatalf("rule returned %T, want bool", out.Value())
-			}
-			if got != tc.want {
-				t.Errorf("allowed=%v, want %v", got, tc.want)
-			}
-		})
 	}
 }
 
@@ -257,4 +211,76 @@ func usesOldSelf(expr string) bool {
 		}
 	}
 	return false
+}
+
+// TestRenderedChartKeepsEveryRBACObject is a guard for a trap the chart fell into
+// once: a Helm comment closed with "-}}" ate the newline before the "---" that
+// follows it, merged two YAML documents into one, and silently dropped the
+// module's own ClusterRoleBinding. The module then came up with a controller that
+// could not list Secrets or SystemBuckets cluster-wide, and nothing in the
+// template looked wrong.
+//
+// It parses the *rendered* chart, so any future document-separator mistake fails
+// here rather than on a cluster. Rendering needs helm and the values the
+// addon-operator normally supplies, so the test skips when they are absent — a
+// skip says so, and CI has both.
+func TestRenderedChartKeepsEveryRBACObject(t *testing.T) {
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm is not installed; the rendered-chart guard needs it")
+	}
+
+	chart := filepath.Clean("../../..")
+	values := filepath.Join(chart, "hack", "helm-render-values.yaml")
+	if _, err := os.Stat(values); err != nil {
+		t.Skipf("no %s to render with: %v", values, err)
+	}
+
+	out, err := exec.Command(helm, "template", "system-s3", chart, "-f", values).Output()
+	if err != nil {
+		t.Fatalf("helm template: %v", err)
+	}
+
+	want := map[string]string{
+		// The controller's own permissions, and the binding that grants them.
+		"ClusterRole/d8:system-s3:controller":        "",
+		"ClusterRoleBinding/d8:system-s3:controller": "d8:system-s3:controller",
+		// What lets kube-rbac-proxy authenticate a metrics scrape.
+		"ClusterRoleBinding/d8:system-s3:controller:rbac-proxy": "d8:rbac-proxy",
+	}
+
+	found := map[string]string{}
+	dec := yaml.NewDecoder(bytes.NewReader(out))
+	for {
+		var doc map[string]any
+		err := dec.Decode(&doc)
+		if err != nil {
+			break
+		}
+		if doc == nil {
+			continue
+		}
+		kind, _ := doc["kind"].(string)
+		meta, _ := doc["metadata"].(map[string]any)
+		if meta == nil {
+			continue
+		}
+		name, _ := meta["name"].(string)
+		ref := ""
+		if rr, ok := doc["roleRef"].(map[string]any); ok {
+			ref, _ = rr["name"].(string)
+		}
+		found[kind+"/"+name] = ref
+	}
+
+	for key, wantRef := range want {
+		gotRef, ok := found[key]
+		if !ok {
+			t.Errorf("%s is missing from the rendered chart", key)
+			continue
+		}
+		if wantRef != "" && gotRef != wantRef {
+			t.Errorf("%s points at %q, want %q", key, gotRef, wantRef)
+		}
+	}
 }

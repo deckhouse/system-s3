@@ -166,3 +166,68 @@ func TestSystemBucketValidateNameCollision(t *testing.T) {
 		}
 	})
 }
+
+// terminating marks the object as being deleted, the way the API server does
+// once a delete has been issued on an object that still carries a finalizer.
+func terminating(u *unstructured.Unstructured) *unstructured.Unstructured {
+	out := u.DeepCopy()
+	meta, _, _ := unstructured.NestedMap(out.Object, "metadata")
+	if meta == nil {
+		meta = map[string]interface{}{}
+	}
+	meta["deletionTimestamp"] = "2026-09-02T17:12:06Z"
+	meta["finalizers"] = []interface{}{"storage.deckhouse.io/system-s3-controller"}
+	_ = unstructured.SetNestedMap(out.Object, meta, "metadata")
+	return out
+}
+
+// A SystemBucket the webhook would refuse must still be deletable.
+//
+// Deleting one does not remove the object: the controller holds a finalizer, and
+// removing that finalizer is an UPDATE that comes back through this webhook. So a
+// resource this webhook refuses — a bucket-name collision, or a namespace that
+// lost its heritage label — used to become immortal: the controller's finalizer
+// patch was rejected on every pass, and the object sat in Terminating for as long
+// as the module existed. An e2e run produced exactly that: hundreds of reconciles,
+// each logging "denied the request: bucket name ... is already used by".
+func TestSystemBucketValidateAdmitsTerminatingObjects(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a colliding name does not block the finalizer patch", func(t *testing.T) {
+		v := newFakeValidator(
+			platformNS("d8-monitoring"), platformNS("d8-logging"),
+			sbObj("d8-logging", "shared", "shared-bucket"),
+		)
+		res, err := v.SystemBucketValidate(ctx, nil, terminating(sbObj("d8-monitoring", "own", "shared-bucket")))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !res.Valid {
+			t.Errorf("a terminating SystemBucket was refused (%s); it can never be deleted then", res.Message)
+		}
+	})
+
+	t.Run("a namespace that is no longer a platform namespace does not block it either", func(t *testing.T) {
+		// The label can be removed after the resource was admitted, and then the
+		// namespace gate would trap the object the same way.
+		v := newFakeValidator(nsObj("tenant", nil))
+		res, err := v.SystemBucketValidate(ctx, nil, terminating(sbObj("tenant", "left-behind", "")))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !res.Valid {
+			t.Errorf("a terminating SystemBucket was refused (%s); it can never be deleted then", res.Message)
+		}
+	})
+
+	t.Run("the same object, not terminating, is still refused", func(t *testing.T) {
+		v := newFakeValidator(nsObj("tenant", nil))
+		res, err := v.SystemBucketValidate(ctx, nil, sbObj("tenant", "left-behind", ""))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.Valid {
+			t.Error("the exemption must apply to terminating objects only")
+		}
+	})
+}

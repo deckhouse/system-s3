@@ -385,3 +385,60 @@ func TestAnEmptySecretKeyForcesAFreshKey(t *testing.T) {
 		})
 	}
 }
+
+// The credentials Secret must never carry an id from one key and the secret half
+// of another.
+//
+// Garage returns a secret key once, so a reused key's secret can only come from
+// the Secret — and the id has to come from there too. The id the driver reports
+// on a reuse pass is the one the resource's *status* named, and the status can be
+// a pass behind the Secret: the reconcile that mints a key writes the Secret
+// first and the status second, and the Secret write triggers another reconcile in
+// between. Taking only the secret half from the Secret therefore paired a stale
+// id with a fresh secret, and the consumer was left holding credentials that
+// authenticate as nothing — "Insufficient permissions" on every request, from a
+// resource reporting Ready with a Secret that looks complete.
+func TestCredentialsSecretKeepsThePairWhole(t *testing.T) {
+	ctx := context.Background()
+	const ns = "d8-monitoring"
+
+	bucket := &v1alpha1.SystemBucket{
+		ObjectMeta: metav1.ObjectMeta{Name: "loki", Namespace: ns, UID: "u1"},
+	}
+
+	// What the Secret holds: the pair that was actually issued.
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: credentialsSecretName(bucket), Namespace: ns},
+		Data: map[string][]byte{
+			v1alpha1.SecretKeyAccessKeyID:     []byte("AK-current"),
+			v1alpha1.SecretKeySecretAccessKey: []byte("secret-of-AK-current"),
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(reconcilerScheme(t)).WithObjects(existing).Build()
+	r := &SystemBucketReconciler{Client: c, APIReader: c, Scheme: c.Scheme(), Log: testLogger(t)}
+
+	// The driver reports a reuse of the key the *status* named, which is one pass
+	// behind: an older key, and no secret half.
+	access := &backend.AccessState{Ready: true, AccessKeyID: "AK-stale", SecretAccessKey: ""}
+	state := &backend.StoreState{Ready: true, Endpoint: "http://garage:3900", Region: "garage"}
+
+	if _, err := r.ensureCredentialsSecret(ctx, bucket, state, access, "d8-monitoring-loki", existing); err != nil {
+		t.Fatalf("ensureCredentialsSecret: %v", err)
+	}
+
+	got := &corev1.Secret{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(existing), got); err != nil {
+		t.Fatalf("read the Secret back: %v", err)
+	}
+	id := string(got.Data[v1alpha1.SecretKeyAccessKeyID])
+	secret := string(got.Data[v1alpha1.SecretKeySecretAccessKey])
+
+	if id == "AK-stale" {
+		t.Errorf("the Secret was rewritten with the stale id %q while keeping the secret of another key: "+
+			"that pair authenticates as nothing", id)
+	}
+	if id != "AK-current" || secret != "secret-of-AK-current" {
+		t.Errorf("Secret holds (%s, %s), want the pair it already had (AK-current, secret-of-AK-current)", id, secret)
+	}
+}

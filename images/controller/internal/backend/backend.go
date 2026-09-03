@@ -40,6 +40,12 @@ import (
 // coupling the split was meant to remove.
 const StoreName = "system"
 
+// RecreateConfirmationValue is the exact string an operator has to put in
+// storage.recreateConfirmation to authorise a replica-count switch. It is spelled
+// out rather than parsed loosely on purpose: the point of the gesture is that it
+// cannot be made by accident, and it says what it does.
+const RecreateConfirmationValue = "i-understand-this-destroys-all-system-object-data"
+
 // The labels below name the cluster-scoped objects the driver owns. They live
 // here, next to StoreName, because two things far apart need the same strings:
 // the driver, which sets and selects on them, and the manager's cache
@@ -74,6 +80,19 @@ type Store struct {
 	// Garage cannot change its replication factor in place — which destroys the
 	// stored objects.
 	SingleReplica bool
+
+	// RecreateConfirmation is the acknowledgement an operator has to set in the
+	// same change that flips SingleReplica, because that change destroys every
+	// object in the store.
+	//
+	// The module also declares this as a CEL rule on its settings, which is the
+	// better place to refuse — the edit never lands. But that rule cannot be the
+	// guarantee: Deckhouse skips transition rules when there is no previous value
+	// to transition from, so a ModuleConfig that carried no settings at all until
+	// now (the common case: everything on defaults) gets the flip through
+	// unchecked, and the rule is not evaluated at all before DKP 1.77. The
+	// controller is where the teardown actually happens, so the last word is here.
+	RecreateConfirmation string
 
 	// SizePerNode is the capacity of the node-sticky local volume provisioned
 	// per replica.

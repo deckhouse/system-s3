@@ -43,6 +43,26 @@ func (v *Validator) SystemBucketValidate(ctx context.Context, _ *model.Admission
 		return reject("unexpected object type: not a SystemBucket"), nil
 	}
 
+	// An object on its way out is admitted whatever it says.
+	//
+	// Deleting a SystemBucket does not delete the object: the controller has a
+	// finalizer on it, and removing that finalizer is an UPDATE, which comes back
+	// through this webhook. So a resource this webhook refuses — a bucket-name
+	// collision, or a namespace that lost its heritage label — could be created
+	// (or become invalid later), and then never deleted: the controller's
+	// finalizer patch is rejected on every pass, and the object sits in
+	// Terminating for as long as the module exists. Measured: an e2e run produced
+	// a SystemBucket that survived hundreds of reconciles, each one logging
+	// "denied the request: bucket name ... is already used by".
+	//
+	// There is nothing to protect at this point either. The only updates a
+	// terminating object receives are finalizer and status writes, and the spec
+	// is immutable in the CRD, so admitting them cannot introduce the state the
+	// rules below are about.
+	if bucket.GetDeletionTimestamp() != nil {
+		return &kwhvalidating.ValidatorResult{Valid: true}, nil
+	}
+
 	platform, err := v.platformNamespace(ctx, bucket.GetNamespace())
 	if err != nil {
 		return nil, err

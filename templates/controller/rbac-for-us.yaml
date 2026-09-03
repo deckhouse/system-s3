@@ -60,3 +60,42 @@
   )
 }}
 {{ include "helm_lib_module_controller_rbac" (list . $rbacConfig) }}
+
+{{- /*
+  Note the trimming markers below: this comment opens with {{- and closes with }}
+  WITHOUT a dash. A closing -}} would eat the newline that follows it and glue the
+  "---" onto the last line of the document helm_lib_module_controller_rbac just
+  emitted, merging two YAML documents into one — which silently dropped the
+  module's own ClusterRoleBinding and left the controller unable to list Secrets
+  or SystemBuckets cluster-wide. Measured: the module came up and every watch
+  failed with "is forbidden ... at the cluster scope".
+
+  The kube-rbac-proxy in front of the controller's metrics needs to be able to
+  authenticate and authorise a scrape, and that means creating TokenReviews and
+  SubjectAccessReviews. Deckhouse ships one ClusterRole for exactly this
+  (d8:rbac-proxy) and every module with such a sidecar binds its ServiceAccount
+  to it; this module did not, so the proxy answered every scrape — Prometheus's
+  included — with 401 and logged
+
+    Failed to make webhook authenticator request: tokenreviews.authentication.k8s.io
+    is forbidden: User "system:serviceaccount:d8-system-s3:controller" cannot
+    create resource "tokenreviews"
+
+  Nothing in the module noticed: the metrics endpoint answers, the ServiceMonitor
+  exists, and the only symptom is a dashboard that stays empty. An e2e spec that
+  scrapes the endpoint the way Prometheus does is what surfaced it.
+*/}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: d8:{{ .Chart.Name }}:controller:rbac-proxy
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+subjects:
+  - kind: ServiceAccount
+    name: controller
+    namespace: d8-{{ .Chart.Name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: d8:rbac-proxy

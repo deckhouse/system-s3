@@ -1,40 +1,4 @@
 type: object
-# Flipping storage.singleReplica rebuilds the data plane and destroys everything
-# in it: Garage cannot change its replication factor in place. One boolean in a
-# ModuleConfig is too small a gesture for that, and the warning lives in
-# documentation the person editing the ModuleConfig may never have read.
-#
-# Three things about how this is written, each of which was a bug:
-#
-#   * x-deckhouse-validations, not x-kubernetes-validations. Module values are
-#     validated by Deckhouse, which reads this key and its `expression` field. The
-#     Kubernetes spelling is accepted by the YAML and evaluated by nobody.
-#
-#   * no has(oldSelf). CEL's has() takes a field selection, not an identifier, so
-#     has(oldSelf) does not compile -- and Deckhouse compiles every rule before it
-#     applies any values patch, so one uncompilable rule stops the module from
-#     configuring itself at all. The guard is unnecessary anyway: a rule that
-#     mentions oldSelf is a transition rule, and Deckhouse skips those when there
-#     is no previous value, which is exactly the create case.
-#
-#   * attached to the root, not to `storage`. A transition rule fires only where a
-#     previous value exists at the same level, so a rule on `storage` was silently
-#     skipped in the case that matters most: a running installation whose
-#     ModuleConfig never mentioned storage (three replicas, by default) having
-#     `storage.singleReplica: true` added to it. At the root the previous settings
-#     are always there, and the has()-guarded lookups read "absent" as the schema
-#     default, so removing the flag counts as flipping it back.
-x-deckhouse-validations:
-  - expression: |
-      ((has(self.storage) && has(self.storage.singleReplica)) ? self.storage.singleReplica : false) ==
-      ((has(oldSelf.storage) && has(oldSelf.storage.singleReplica)) ? oldSelf.storage.singleReplica : false) ||
-      (has(self.storage) && has(self.storage.recreateConfirmation) &&
-       self.storage.recreateConfirmation == 'i-understand-this-destroys-all-system-object-data')
-    message: >-
-      Changing storage.singleReplica recreates the data plane and destroys every object
-      stored in the system object storage. To proceed, set storage.recreateConfirmation to
-      'i-understand-this-destroys-all-system-object-data' in the same change.
-
 properties:
   storage:
     type: object
@@ -57,6 +21,12 @@ properties:
           Required in the same change that flips `singleReplica`, and ignored
           otherwise. Set it to
           `i-understand-this-destroys-all-system-object-data`.
+
+          Without it the controller refuses to touch the data plane: it keeps
+          running with the replica count it has, and every `SystemBucket` reports
+          the refusal in its `StorageReady` condition, naming this setting.
+          Nothing is destroyed and nothing is blocked — the edit itself is
+          accepted, it simply is not acted upon.
 
           Remove it once the change is applied: left in place it would
           authorise the next flip as well, and the point of it is to be a

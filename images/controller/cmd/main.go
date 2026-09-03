@@ -93,10 +93,11 @@ func main() {
 		os.Exit(1)
 	}
 	store := &backend.Store{
-		Name:          backend.StoreName,
-		SingleReplica: cfgParams.SingleReplica,
-		SizePerNode:   sizePerNode,
-		StorageClass:  cfgParams.StorageClass,
+		Name:                 backend.StoreName,
+		SingleReplica:        cfgParams.SingleReplica,
+		RecreateConfirmation: cfgParams.RecreateConfirmation,
+		SizePerNode:          sizePerNode,
+		StorageClass:         cfgParams.StorageClass,
 	}
 
 	kConfig, err := kubutils.KubernetesDefaultConfigCreate()

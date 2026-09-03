@@ -32,6 +32,7 @@
     (dict "name" "GARAGE_IMAGE" "value" (include "helm_lib_module_image" (list . "garage")))
     (dict "name" "CLUSTER_DOMAIN" "value" .Values.global.discovery.clusterDomain)
     (dict "name" "SINGLE_REPLICA" "value" (.Values.systemS3.storage.singleReplica | toString))
+    (dict "name" "RECREATE_CONFIRMATION" "value" (.Values.systemS3.storage.recreateConfirmation | default ""))
     (dict "name" "SIZE_PER_NODE" "value" .Values.systemS3.storage.sizePerNode)
     (dict "name" "STORAGE_CLASS" "value" "system-s3-local")
   )

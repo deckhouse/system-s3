@@ -35,9 +35,14 @@ const (
 	ReadyResyncIntervalEnv     = "READY_RESYNC_INTERVAL_SECONDS"
 	GarageImageEnv             = "GARAGE_IMAGE"
 	SingleReplicaEnv           = "SINGLE_REPLICA"
-	SizePerNodeEnv             = "SIZE_PER_NODE"
-	StorageClassEnv            = "STORAGE_CLASS"
-	ClusterDomainEnv           = "CLUSTER_DOMAIN"
+
+	// RecreateConfirmationEnv carries storage.recreateConfirmation. The driver
+	// refuses a replica-count switch without it, because the switch destroys every
+	// object in the store.
+	RecreateConfirmationEnv = "RECREATE_CONFIRMATION"
+	SizePerNodeEnv          = "SIZE_PER_NODE"
+	StorageClassEnv         = "STORAGE_CLASS"
+	ClusterDomainEnv        = "CLUSTER_DOMAIN"
 
 	DefaultControllerNamespace     = "d8-system-s3"
 	DefaultControllerName          = "system-s3-controller"
@@ -86,6 +91,10 @@ type Options struct {
 	// replication factor 1 instead of the default three, injected via
 	// SINGLE_REPLICA from the module settings.
 	SingleReplica bool
+
+	// RecreateConfirmation is the acknowledgement required for a replica-count
+	// switch (see RecreateConfirmationEnv).
+	RecreateConfirmation string
 	// SizePerNode is the capacity of the node-sticky local volume provisioned
 	// per replica, injected via SIZE_PER_NODE from the module settings.
 	SizePerNode string
@@ -135,6 +144,7 @@ func NewConfig() *Options {
 	opts.GarageImage = os.Getenv(GarageImageEnv)
 
 	opts.SingleReplica = boolFromEnv(SingleReplicaEnv, false)
+	opts.RecreateConfirmation = os.Getenv(RecreateConfirmationEnv)
 
 	opts.SizePerNode = os.Getenv(SizePerNodeEnv)
 	if opts.SizePerNode == "" {

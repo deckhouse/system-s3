@@ -1,0 +1,50 @@
+# Values for rendering this chart with plain `helm template`, for the
+# rendered-chart test in hooks/go/openapischema and for local inspection.
+#
+# The addon-operator supplies these at runtime; helm on its own does not, and
+# without them lib-helm fails on nil pointers rather than on anything to do with
+# this module. Everything here is a placeholder: image digests are fake, and the
+# discovery values describe a three-master cluster with VPA and Prometheus
+# enabled, which is the shape the templates branch on.
+global:
+  enabledModules: [vertical-pod-autoscaler-crd, prometheus]
+  modulesImages:
+    registry:
+      base: registry.example.com/deckhouse
+      dockercfg: e30=
+    digests:
+      common:
+        kubeRbacProxy: sha256:ddd
+        init: sha256:eee
+      systemS3:
+        controller: sha256:aaa
+        webhooks: sha256:bbb
+        garage: sha256:ccc
+  discovery:
+    kubernetesVersion: "1.31.0"
+    d8SpecificNodeCountByRole: {system: 0, master: 3}
+    clusterMasterCount: 3
+    clusterDomain: cluster.local
+  clusterConfiguration:
+    clusterDomain: cluster.local
+  deckhouseVersion: dev
+  clusterIsBootstrapped: true
+  modules:
+    placement:
+      customTolerationKeys: []
+    resourcesRequests:
+      internal:
+        milliCpuControlPlane: 1024
+        memoryControlPlane: 536870912
+systemS3:
+  logLevel: INFO
+  storage:
+    singleReplica: false
+    sizePerNode: 10Gi
+  internal:
+    controllerMetricsPort: 8080
+    controllerMetricsProxyPort: 8080
+    customWebhookCert:
+      ca: Zm9v
+      crt: Zm9v
+      key: Zm9v

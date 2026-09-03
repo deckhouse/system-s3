@@ -18,11 +18,14 @@ package garage
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
@@ -124,4 +127,111 @@ func TestIncarnationFromConfigMap(t *testing.T) {
 	if cm := buildConfigMap(sys, "d8-system-s3", 1, 3); cm.Data[incarnationKey] != "3" {
 		t.Errorf("ConfigMap incarnation=%q, want 3", cm.Data[incarnationKey])
 	}
+}
+
+// A replica-count switch without the acknowledgement must not tear anything down.
+//
+// The module declares the same rule on its settings, and that is the better place
+// to refuse — the edit never lands. But it cannot be the guarantee: Deckhouse
+// skips transition rules when there is no previous value to compare with, so a
+// ModuleConfig that carried no settings until now (everything on defaults) gets
+// the flip through unexamined, and the rule is not evaluated at all before DKP
+// 1.77. An e2e run flipped singleReplica on such a ModuleConfig and the API
+// server accepted it without a word. The teardown happens in the driver, so the
+// driver has the last word.
+func TestReplicaSwitchNeedsTheAcknowledgement(t *testing.T) {
+	// teardownScheme, not rfScheme: this exercises the recreate path, which
+	// touches the StatefulSet.
+	s := teardownScheme(t)
+	ns := "d8-system-s3"
+	ctx := context.Background()
+
+	// A store already pinned at 3, now asked for one replica.
+	pinnedAtThree := func() *corev1.ConfigMap {
+		return &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: configName(rfStore()), Namespace: ns},
+			Data: map[string]string{
+				configFileName: "replication_factor = 3\n",
+				incarnationKey: "1",
+			},
+		}
+	}
+	// The data plane that a recreate would destroy.
+	statefulSet := func() *appsv1.StatefulSet {
+		return &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+			Name: resourceName(rfStore()), Namespace: ns, Labels: commonLabels(rfStore()),
+		}}
+	}
+
+	t.Run("no acknowledgement: refused, and the data plane is untouched", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(s).WithObjects(pinnedAtThree(), statefulSet()).Build()
+		d := &Driver{client: c, apiReader: c, namespace: ns, image: "garage:test", log: testGarageLogger(t)}
+
+		store := singleReplicaStore()
+		store.RecreateConfirmation = ""
+
+		state, err := d.EnsureStore(ctx, store)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if state.Ready {
+			t.Error("Ready=true while refusing to converge")
+		}
+		if !strings.Contains(state.Message, "recreateConfirmation") {
+			t.Errorf("message %q does not say what to set", state.Message)
+		}
+
+		// The StatefulSet is what holds the data; a refusal that still deleted it
+		// would be the worst outcome of the three.
+		if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: resourceName(store)},
+			&appsv1.StatefulSet{}); err != nil {
+			t.Errorf("the data plane was torn down by a refused switch: %v", err)
+		}
+		// And the pinned factor is still the old one.
+		got, err := d.pinnedState(ctx, store)
+		if err != nil {
+			t.Fatalf("read pinned state: %v", err)
+		}
+		if got.rf != 3 {
+			t.Errorf("pinned replication factor is %d, want the original 3", got.rf)
+		}
+	})
+
+	t.Run("wrong acknowledgement text: still refused", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(s).WithObjects(pinnedAtThree(), statefulSet()).Build()
+		d := &Driver{client: c, apiReader: c, namespace: ns, image: "garage:test", log: testGarageLogger(t)}
+
+		store := singleReplicaStore()
+		store.RecreateConfirmation = "yes"
+
+		state, err := d.EnsureStore(ctx, store)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if state.Ready || !strings.Contains(state.Message, "recreateConfirmation") {
+			t.Errorf("state=%+v, want a refusal naming the setting", state)
+		}
+	})
+
+	t.Run("acknowledged: the teardown proceeds", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(s).WithObjects(pinnedAtThree(), statefulSet()).Build()
+		d := &Driver{client: c, apiReader: c, namespace: ns, image: "garage:test", log: testGarageLogger(t)}
+
+		store := singleReplicaStore()
+		store.RecreateConfirmation = backend.RecreateConfirmationValue
+
+		state, err := d.EnsureStore(ctx, store)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// The first pass issues the deletes and reports progress rather than
+		// finishing, which is the teardown's contract.
+		if state.Ready {
+			t.Error("Ready=true on the pass that started the teardown")
+		}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: resourceName(store)},
+			&appsv1.StatefulSet{}); err == nil {
+			t.Error("the StatefulSet survived an acknowledged recreate")
+		}
+	})
 }

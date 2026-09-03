@@ -41,6 +41,8 @@ One Garage cluster, deployed by the controller:
 
 {{< alert level="warning" >}}
 Toggling `storage.singleReplica` on a running installation **destroys everything stored in the system object storage**: Garage cannot change its replication factor in place, so the controller rebuilds the data plane empty. Buckets are recreated and access keys re-issued automatically; the objects are not.
+
+The switch is therefore refused unless the same change sets `storage.recreateConfirmation` to `i-understand-this-destroys-all-system-object-data`. The refusal comes from the controller: the edit itself is accepted, the data plane keeps running, and every `SystemBucket` reports the refusal in its `StorageReady` condition, naming the setting to add.
 {{< /alert >}}
 
 Garage is used as-is, through its standard admin API. It is AGPL-licensed, which is why it backs the platform's own storage only and is never offered as a service to users.

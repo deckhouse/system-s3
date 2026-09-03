@@ -132,6 +132,29 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (backend
 	// of this reconcile rebuild it empty at the next incarnation. This DESTROYS
 	// the stored objects — documented on the setting.
 	if want := initialReplicationFactor(store); pinned.exists && pinned.rf != want {
+		// And not before the operator has said so in the same change.
+		//
+		// The module declares this as a CEL rule on its settings too, which is the
+		// better place to refuse: the edit never lands. But that rule cannot be the
+		// guarantee. Deckhouse skips transition rules when there is no previous
+		// value to compare with, so a ModuleConfig that carried no settings until
+		// now — everything on defaults, the common case — gets the flip through
+		// unexamined; and the rule is not evaluated at all before DKP 1.77. An e2e
+		// run flipped singleReplica on such a ModuleConfig and the API server took
+		// it without a word.
+		//
+		// The teardown happens here, so the last word is here.
+		if store.RecreateConfirmation != backend.RecreateConfirmationValue {
+			state.Message = fmt.Sprintf(
+				"refusing to recreate the data plane: storage.singleReplica changed (replication factor %d -> %d), "+
+					"which destroys every object in the system object storage. Set storage.recreateConfirmation to %q "+
+					"in the same ModuleConfig to proceed, or put storage.singleReplica back",
+				pinned.rf, want, backend.RecreateConfirmationValue)
+			d.log.Error("refusing a replica-count switch with no acknowledgement",
+				"store", store.Name, "pinnedReplicationFactor", pinned.rf, "wantedReplicationFactor", want)
+			return state, nil
+		}
+
 		done, msg, err := d.teardownDataPlane(ctx, store)
 		if err != nil {
 			return state, fmt.Errorf("recreate data plane: %w", err)

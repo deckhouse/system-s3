@@ -402,11 +402,29 @@ func (r *SystemBucketReconciler) ensureCredentialsSecret(
 	accessKeyID := access.AccessKeyID
 	secretKey := access.SecretAccessKey
 	if secretKey == "" && existing != nil {
-		// Reused key: keep the secret key already stored. Garage cannot recover a
-		// secret key after creation, so the Secret is the only copy.
-		secretKey = string(existing.Data[v1alpha1.SecretKeySecretAccessKey])
-		if accessKeyID == "" {
-			accessKeyID = string(existing.Data[v1alpha1.SecretKeyAccessKeyID])
+		// Reused key: the stored pair is kept whole. Garage hands a secret key back
+		// once, so the Secret is the only copy — and the id and the secret half are
+		// one fact, not two.
+		//
+		// Taking only the secret half from here was a defect that corrupted
+		// credentials. The id came from the driver, which had been told what to
+		// reuse by the resource's status, and the status can be one pass behind the
+		// Secret: the reconcile that mints a key writes the Secret first and the
+		// status second, so a reconcile triggered in between (the Secret write
+		// itself triggers one) reads a status that still names the previous key.
+		// The old code then wrote that previous id next to the new secret half, and
+		// the consumer held a pair that authenticates as nothing —
+		// "Insufficient permissions" on every request, with a resource that reports
+		// Ready and a Secret that looks complete. Measured on a cluster twice
+		// before the diagnostics were good enough to name it.
+		//
+		// Both halves therefore come from the same object. If that pair is stale,
+		// the next pass finds out honestly: EnsureAccess checks the recorded key
+		// against the backend and mints a fresh one when it is gone.
+		storedID := string(existing.Data[v1alpha1.SecretKeyAccessKeyID])
+		storedSecret := string(existing.Data[v1alpha1.SecretKeySecretAccessKey])
+		if storedID != "" && storedSecret != "" {
+			accessKeyID, secretKey = storedID, storedSecret
 		}
 	}
 
@@ -537,6 +555,16 @@ func (r *SystemBucketReconciler) updateStatus(
 		// next pass retries — an orphan key on a platform bucket is not something
 		// to forget about.
 		if observed.supersededHandled {
+			latest.Status.SupersededAccessKeyID = ""
+		}
+		// And never left pointing at the key in use. revokeCandidate already
+		// refuses to revoke that one, so nothing acts on it, but the field is read
+		// by operators and by the e2e suite as "a key waiting to be revoked" — and
+		// a cluster produced exactly this state (superseded == accessKeyID) after a
+		// stale-status pass. Clearing it keeps the status honest instead of
+		// alarming.
+		if latest.Status.SupersededAccessKeyID != "" &&
+			latest.Status.SupersededAccessKeyID == latest.Status.AccessKeyID {
 			latest.Status.SupersededAccessKeyID = ""
 		}
 	})
