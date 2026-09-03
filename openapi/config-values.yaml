@@ -1,4 +1,40 @@
 type: object
+# Flipping storage.singleReplica rebuilds the data plane and destroys everything
+# in it: Garage cannot change its replication factor in place. One boolean in a
+# ModuleConfig is too small a gesture for that, and the warning lives in
+# documentation the person editing the ModuleConfig may never have read.
+#
+# Three things about how this is written, each of which was a bug:
+#
+#   * x-deckhouse-validations, not x-kubernetes-validations. Module values are
+#     validated by Deckhouse, which reads this key and its `expression` field. The
+#     Kubernetes spelling is accepted by the YAML and evaluated by nobody.
+#
+#   * no has(oldSelf). CEL's has() takes a field selection, not an identifier, so
+#     has(oldSelf) does not compile -- and Deckhouse compiles every rule before it
+#     applies any values patch, so one uncompilable rule stops the module from
+#     configuring itself at all. The guard is unnecessary anyway: a rule that
+#     mentions oldSelf is a transition rule, and Deckhouse skips those when there
+#     is no previous value, which is exactly the create case.
+#
+#   * attached to the root, not to `storage`. A transition rule fires only where a
+#     previous value exists at the same level, so a rule on `storage` was silently
+#     skipped in the case that matters most: a running installation whose
+#     ModuleConfig never mentioned storage (three replicas, by default) having
+#     `storage.singleReplica: true` added to it. At the root the previous settings
+#     are always there, and the has()-guarded lookups read "absent" as the schema
+#     default, so removing the flag counts as flipping it back.
+x-deckhouse-validations:
+  - expression: |
+      ((has(self.storage) && has(self.storage.singleReplica)) ? self.storage.singleReplica : false) ==
+      ((has(oldSelf.storage) && has(oldSelf.storage.singleReplica)) ? oldSelf.storage.singleReplica : false) ||
+      (has(self.storage) && has(self.storage.recreateConfirmation) &&
+       self.storage.recreateConfirmation == 'i-understand-this-destroys-all-system-object-data')
+    message: >-
+      Changing storage.singleReplica recreates the data plane and destroys every object
+      stored in the system object storage. To proceed, set storage.recreateConfirmation to
+      'i-understand-this-destroys-all-system-object-data' in the same change.
+
 properties:
   storage:
     type: object
@@ -11,23 +47,6 @@ properties:
       control-plane node count, unless `singleReplica` reduces it to one. There is
       no custom resource for it — the module runs exactly one data plane, and
       these are all its knobs.
-    x-deckhouse-validations:
-      # Flipping singleReplica rebuilds the data plane and destroys everything in
-      # it: Garage cannot change its replication factor in place. One boolean in a
-      # ModuleConfig is too small a gesture for that, and the warning is in
-      # documentation the person editing the ModuleConfig may never have read.
-      #
-      # x-deckhouse-validations, not x-kubernetes-validations: module values are
-      # validated by Deckhouse, and it reads this key with `expression`. The
-      # Kubernetes spelling would be accepted by the YAML and evaluated by nobody.
-      - expression: |
-          !has(oldSelf) || self.singleReplica == oldSelf.singleReplica ||
-          (has(self.recreateConfirmation) &&
-           self.recreateConfirmation == 'i-understand-this-destroys-all-system-object-data')
-        message: >-
-          Changing storage.singleReplica recreates the data plane and destroys every object
-          stored in the system object storage. To proceed, set storage.recreateConfirmation to
-          'i-understand-this-destroys-all-system-object-data' in the same change.
     properties:
       recreateConfirmation:
         type: string

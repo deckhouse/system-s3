@@ -401,18 +401,30 @@ func garageContainer(image string) corev1.Container {
 			{Name: "data", MountPath: dataMountPath},
 		},
 		ReadinessProbe: &corev1.Probe{
-			// /health on the admin port, not a TCP connect on the S3 one.
+			// A TCP connect, and it has to be: /health on the admin port deadlocks
+			// the bootstrap.
 			//
-			// Garage binds S3 at startup, long before it has joined the mesh or been
-			// given a role in the layout, so an open socket says the process is up
-			// and nothing about whether it can serve. A readiness probe that answers
-			// "yes" there is what lets the rollout gate above it count a pod as
-			// ready while it cannot take a request.
+			// Garage answers 200 on /health only once the node is connected to the
+			// mesh and holds a role in the layout. The layout is assigned by this
+			// controller, over the admin API, through the headless Service in front
+			// of these pods — and a Service only routes to READY endpoints. So
+			// gating readiness on /health means: no pod is ready until the layout is
+			// assigned, and the layout cannot be assigned until a pod is ready. A
+			// fresh installation sits at 0/3 ready forever, the controller gets
+			// "connection refused" from a Service with no endpoints, and the store
+			// reports "Garage StatefulSet rolling out" until someone looks.
+			//
+			// That was measured, not reasoned about: an e2e run spent 35 minutes in
+			// exactly that state.
+			//
+			// What the probe can honestly say is that the process is up and
+			// listening. Whether the store can serve is a cluster-level fact, and it
+			// is already checked where it can be: EnsureStore queries
+			// GetClusterHealth and only then reports StorageReady, so a pod that
+			// accepts connections while the cluster is degraded does not make any
+			// SystemBucket look Ready.
 			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/health",
-					Port: intstr.FromInt32(adminPort),
-				},
+				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(s3Port)},
 			},
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       10,

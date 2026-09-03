@@ -409,3 +409,45 @@ func TestPullSecretIsModuleScoped(t *testing.T) {
 		t.Errorf("imagePullSecrets=%v, want [%s]", secrets, want)
 	}
 }
+
+// The readiness probe must not depend on the cluster being healthy.
+//
+// Garage answers /health on the admin port only once the node is in the layout,
+// and the layout is assigned by this controller through the Service in front of
+// these pods — which only routes to ready endpoints. Gating readiness on /health
+// is therefore a deadlock: no pod becomes ready until the layout exists, and the
+// layout cannot be written until a pod is ready. A fresh installation sat at 0/3
+// ready for 35 minutes in an e2e run before this was understood.
+//
+// Whether the store can serve is checked where it can be — EnsureStore queries
+// GetClusterHealth before it reports StorageReady — so the probe only has to say
+// that the process is listening.
+func TestReadinessProbeDoesNotWaitForTheClusterItBootstraps(t *testing.T) {
+	sts := buildStatefulSet(systemStore(), "d8-system-s3", "garage:test", "cfghash")
+
+	var garage *corev1.Container
+	for i := range sts.Spec.Template.Spec.Containers {
+		if sts.Spec.Template.Spec.Containers[i].Name == "garage" {
+			garage = &sts.Spec.Template.Spec.Containers[i]
+		}
+	}
+	if garage == nil {
+		t.Fatal("no \"garage\" container in the data-plane pod")
+	}
+
+	probe := garage.ReadinessProbe
+	if probe == nil {
+		t.Fatal("the data plane has no readiness probe")
+	}
+	if probe.HTTPGet != nil {
+		t.Errorf("readiness is an HTTP GET on %v%s: an endpoint that reports cluster health cannot gate "+
+			"the readiness the cluster's bootstrap depends on",
+			probe.HTTPGet.Port, probe.HTTPGet.Path)
+	}
+	if probe.TCPSocket == nil {
+		t.Fatalf("readiness probe is %+v, want a TCP socket check", probe.ProbeHandler)
+	}
+	if got := probe.TCPSocket.Port.IntValue(); got != int(s3Port) {
+		t.Errorf("readiness probes port %d, want the S3 port %d (what a consumer connects to)", got, s3Port)
+	}
+}
