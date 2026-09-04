@@ -35,6 +35,3 @@ __pycache__/
 
 # dev
 base_images.yml
-
-# Build output of hack/generate_release_notes.go (built on demand by CI).
-hack/generate_release_notes
