@@ -92,3 +92,26 @@ kubectl -n d8-monitoring delete systembucket loki
 kubectl -n d8-system-s3 get pods,sts,pvc
 kubectl -n d8-system-s3 logs deploy/controller -c controller
 ```
+
+## Выключение модуля и снос кластера
+
+Выключение защищено: Deckhouse не примет `enabled: false`, пока на `ModuleConfig` нет подтверждения, — вместе с модулем уезжает data plane и всё, что в нём хранится.
+
+```shell
+kubectl annotate moduleconfig system-s3 modules.deckhouse.io/allow-disabling=true
+kubectl patch moduleconfig system-s3 --type merge -p '{"spec":{"enabled":false}}'
+```
+
+Что остаётся после выключения, а что нет:
+
+- ресурсы `SystemBucket` остаются — замороженными в последнем статусе, — и их CRD тоже: выключение модуля не удаляет ни то, ни другое. Свои финализаторы модуль при выгрузке снимает, поэтому такие ресурсы можно удалить руками;
+- пул локальных `PersistentVolume` удаляется: собрать его больше некому;
+- каталоги, на которые пул указывал, остаются на дисках control-plane узлов. Агента на узлах у модуля нет, и он их не стирает.
+
+{{< alert level="warning" >}}
+**Перед сносом кластера модуль нужно выключить.** `dhctl destroy` удаляет все `PersistentVolumeClaim` и ждёт их исчезновения, а `StatefulSet` data plane пересоздаёт свои claim'ы, пока существует, — шаг падает по таймауту, и кластер остаётся снесённым наполовину. Выключение модуля убирает `StatefulSet`, и снос проходит до конца.
+{{< /alert >}}
+
+{{< alert level="info" >}}
+Пока модуль находится на стадии `Experimental`, для повторного включения после выключения нужно разрешение платформы: добавьте `system-s3` в `spec.settings.allowedExperimentalModules` в `ModuleConfig` `deckhouse` (или включите `allowExperimentalModules: true`), и только затем ставьте `enabled: true`.
+{{< /alert >}}

@@ -92,3 +92,26 @@ To inspect the storage itself:
 kubectl -n d8-system-s3 get pods,sts,pvc
 kubectl -n d8-system-s3 logs deploy/controller -c controller
 ```
+
+## Disabling the module, and destroying the cluster
+
+Disabling the module is guarded: Deckhouse refuses `enabled: false` until the `ModuleConfig` carries the acknowledgement, because the data plane and every object stored in it go with it.
+
+```shell
+kubectl annotate moduleconfig system-s3 modules.deckhouse.io/allow-disabling=true
+kubectl patch moduleconfig system-s3 --type merge -p '{"spec":{"enabled":false}}'
+```
+
+What is left behind afterwards, and what is not:
+
+- the `SystemBucket` resources stay, frozen at their last status, and so do their CRDs — disabling a module does not delete either. The module's own finalizers are released on the way out, so they can be deleted by hand;
+- the local `PersistentVolume` pool is removed, since nothing else would ever collect it;
+- the directories the pool pointed at stay on the control-plane nodes' disks. The module has no node agent and never erases them.
+
+{{< alert level="warning" >}}
+**Destroying a cluster requires disabling the module first.** `dhctl destroy` deletes every `PersistentVolumeClaim` and waits for them to go; the data plane's `StatefulSet` re-creates its claims for as long as it exists, so the step times out and the cluster is left half-removed. Disabling the module takes the `StatefulSet` away, and the destroy then completes.
+{{< /alert >}}
+
+{{< alert level="info" >}}
+While the module is at the `Experimental` stage, enabling it again after a disable needs the platform's permission: add `system-s3` to `spec.settings.allowedExperimentalModules` in the `deckhouse` `ModuleConfig` (or set `allowExperimentalModules: true`) before setting `enabled: true`.
+{{< /alert >}}
