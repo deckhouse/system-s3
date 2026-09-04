@@ -21,12 +21,14 @@ import (
 	"log/slog"
 	"os"
 	goruntime "runtime"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/labels"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -57,10 +59,12 @@ var resourcesSchemeFuncs = []func(*apiruntime.Scheme) error{
 }
 
 func main() {
-	// SetupSignalHandler, not Background: without a cancellable context SIGTERM
-	// does not make the manager release the leader lease. The next pod then waits
-	// out LeaseDuration before it can start, and for that whole window nothing is
-	// converging the data plane — which for this module is the only one there is.
+	// SetupSignalHandler, not Background: a cancellable context is what lets
+	// SIGTERM stop the manager at all, and it is half of what makes the leader
+	// lease change hands quickly (LeaderElectionReleaseOnCancel below is the
+	// other half). Without both, the next pod waits out LeaseDuration before it
+	// can start, and for that whole window nothing is converging the data plane —
+	// which for this module is the only one there is.
 	ctx := ctrl.SetupSignalHandler()
 	cfgParams := config.NewConfig()
 
@@ -133,6 +137,34 @@ func main() {
 		LeaderElection:          true,
 		LeaderElectionNamespace: cfgParams.ControllerNamespace,
 		LeaderElectionID:        config.DefaultControllerName,
+
+		// Step down on the way out instead of letting the lease expire.
+		//
+		// The Deployment runs two replicas on an HA control plane, so on every
+		// rollout, eviction or node drain the leader is asked to stop while a
+		// standby is already up and polling the lease. client-go only writes the
+		// "no holder" record on shutdown when ReleaseOnCancel is set; with the
+		// default (false) the standby cannot take over until the lease expires —
+		// LeaseDuration, 15s by default — and until then nothing reconciles: no
+		// SystemBucket is served and the data plane's convergence loop is stopped.
+		//
+		// The setting is only safe if the process really ends once the manager
+		// stops, because a released lease means another replica may already be
+		// acting: main() returns straight after mgr.Start, and nothing runs after
+		// it.
+		LeaderElectionReleaseOnCancel: true,
+
+		// Stop the runnables in ten seconds, not thirty.
+		//
+		// The release above only happens after every runnable has stopped (or this
+		// timeout expires): controller-runtime cancels leader election in a defer
+		// that runs after runnables.StopAndWait. The default is 30s, exactly the
+		// Pod's default terminationGracePeriodSeconds, so a slow drain — the store
+		// loop sitting in a Garage HTTP call, say — would race SIGKILL and the lease
+		// would be left held after all. Ten seconds leaves the release a wide
+		// margin, and cutting a reconcile short costs nothing here: every pass is
+		// idempotent and the next leader starts it over.
+		GracefulShutdownTimeout: ptr.To(10 * time.Second),
 		Logger:                  baseLog.GetLogger(),
 		Cache: cache.Options{
 			ByObject: map[client.Object]cache.ByObject{
