@@ -30,3 +30,4 @@ LICENSE
 known_vulnerabilities.vex
 module.yaml
 oss.yaml
+base_images.yml
