@@ -1,7 +1,6 @@
 module github.com/deckhouse/system-s3/api
 
-go 1.27.0
-
+go 1.27.1
 require (
 	k8s.io/api v0.34.1
 	k8s.io/apimachinery v0.34.1
