@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -440,5 +441,86 @@ func TestCredentialsSecretKeepsThePairWhole(t *testing.T) {
 	}
 	if id != "AK-current" || secret != "secret-of-AK-current" {
 		t.Errorf("Secret holds (%s, %s), want the pair it already had (AK-current, secret-of-AK-current)", id, secret)
+	}
+}
+
+// The admission webhook refuses a derived bucket name S3 will not take, but a
+// webhook can be bypassed — the module re-checks the namespace gate for exactly
+// that reason, and this is the other guard that has to hold where the bucket is
+// actually created. Without it the backend answered instead, on the first
+// reconcile, and the operator got the refusal from Garage rather than from the
+// write that caused it.
+func TestADerivedBucketNameOverTheS3LimitIsRefusedBeforeTheBackend(t *testing.T) {
+	ns := "d8-" + strings.Repeat("n", 40)
+	name := strings.Repeat("b", 30)
+	drv := &fakeDriver{}
+	r, c := newReconciler(t, drv, platformNS(ns), bucketFor(ns, name))
+	ctx := context.Background()
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKey{Namespace: ns, Name: name}}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	for _, call := range drv.calls {
+		if strings.HasPrefix(call, "EnsureBucket") || strings.HasPrefix(call, "EnsureAccess") {
+			t.Fatalf("the backend was asked to create a bucket that cannot exist: %v", drv.calls)
+		}
+	}
+
+	got := &v1alpha1.SystemBucket{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, got); err != nil {
+		t.Fatalf("get SystemBucket: %v", err)
+	}
+	if got.Status == nil {
+		t.Fatal("no status was written")
+	}
+
+	// Terminal, so the phase has to say Error: nothing moves until the resource is
+	// given a spec.bucketName, and the resource cannot be renamed. A reason of its
+	// own would leave the phase at InProgress — the trap the namespace gate
+	// already fell into once.
+	if got.Status.Phase != v1alpha1.PhaseError {
+		t.Errorf("phase = %q, want %q: the refusal is terminal", got.Status.Phase, v1alpha1.PhaseError)
+	}
+
+	var bucketReady *metav1.Condition
+	for i := range got.Status.Conditions {
+		if got.Status.Conditions[i].Type == v1alpha1.SystemBucketConditionBucketReady {
+			bucketReady = &got.Status.Conditions[i]
+		}
+	}
+	if bucketReady == nil {
+		t.Fatalf("no %s condition", v1alpha1.SystemBucketConditionBucketReady)
+	}
+	if bucketReady.Status != metav1.ConditionFalse {
+		t.Errorf("%s = %s, want False", bucketReady.Type, bucketReady.Status)
+	}
+	if !strings.Contains(bucketReady.Message, "spec.bucketName") {
+		t.Errorf("the message should say what to set instead, got: %s", bucketReady.Message)
+	}
+}
+
+// The same resource with a name S3 accepts goes through, so the guard above is
+// keyed on the name rather than on the length of the namespace.
+func TestAnExplicitBucketNameGetsPastTheNameGuard(t *testing.T) {
+	ns := "d8-" + strings.Repeat("n", 40)
+	name := strings.Repeat("b", 30)
+	drv := &fakeDriver{mintedKeys: []string{"AK1"}}
+	bucket := bucketFor(ns, name)
+	bucket.Spec.BucketName = "loki"
+	r, _ := newReconciler(t, drv, platformNS(ns), bucket)
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKey{Namespace: ns, Name: name}}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	var created bool
+	for _, call := range drv.calls {
+		if strings.HasPrefix(call, "EnsureBucket") {
+			created = true
+		}
+	}
+	if !created {
+		t.Errorf("the bucket was not created despite a valid spec.bucketName: %v", drv.calls)
 	}
 }

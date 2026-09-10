@@ -30,13 +30,15 @@ import (
 // SystemBucketValidate admits a SystemBucket only when
 //
 //   - it lives in a namespace a Deckhouse module owns (label heritage: deckhouse),
-//     which is what keeps the platform's system storage out of tenant hands, and
-//   - the bucket name it maps to is not already claimed by another SystemBucket.
+//     which is what keeps the platform's system storage out of tenant hands,
+//   - the bucket name it maps to is one S3 accepts, and
+//   - that name is not already claimed by another SystemBucket.
 //
-// The name check exists because the backend bucket namespace is flat while
+// The last check exists because the backend bucket namespace is flat while
 // SystemBuckets are namespaced: two resources mapping to one bucket would share
 // storage silently, and the second one to be deleted would take the first one's
-// data with it.
+// data with it. The one before it exists because that mapping can produce a name
+// S3 will not take, and the schema cannot see it — see bucketNameProblem.
 func (v *Validator) SystemBucketValidate(ctx context.Context, _ *model.AdmissionReview, obj metav1.Object) (*kwhvalidating.ValidatorResult, error) {
 	bucket, ok := obj.(*unstructured.Unstructured)
 	if !ok {
@@ -75,6 +77,23 @@ func (v *Validator) SystemBucketValidate(ctx context.Context, _ *model.Admission
 	}
 
 	name := effectiveBucketName(bucket)
+	if problem := bucketNameProblem(name); problem != "" {
+		explicit, _, _ := unstructured.NestedString(bucket.Object, "spec", "bucketName")
+		if explicit != "" {
+			// The CRD checks spec.bucketName and schema validation runs before this
+			// webhook, so an explicit name should never arrive broken. Reported
+			// rather than assumed away: reaching this means the schema and the two
+			// copies of this rule have come apart, and a wrong refusal here is
+			// easier to understand than a bucket the backend rejects later.
+			return reject(fmt.Sprintf("spec.bucketName %q cannot be used: %s", name, problem)), nil
+		}
+		return reject(fmt.Sprintf(
+			"the bucket name this SystemBucket maps to, %q, cannot be used: %s. "+
+				"With spec.bucketName unset the name is derived as <namespace>-<name>, "+
+				"which here is %q; set spec.bucketName to something S3 accepts",
+			name, problem, bucket.GetNamespace()+"-"+bucket.GetName())), nil
+	}
+
 	existing, err := v.dyn.Resource(systemBucketGVR).Namespace("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list SystemBuckets: %w", err)

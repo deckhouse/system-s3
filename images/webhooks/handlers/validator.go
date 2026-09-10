@@ -17,16 +17,21 @@ limitations under the License.
 package handlers
 
 import (
+	"fmt"
+	"regexp"
+
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 )
 
 // Validator carries the cross-resource lookup client the admission validator
-// needs. Schema-level checks (shape, immutability, name pattern) are enforced by
-// the CRD and its CEL rules; what is left here are the checks CEL cannot express,
-// because they look at other resources: the namespace's labels and the other
-// SystemBuckets.
+// needs. Schema-level checks (shape, immutability, the pattern of an explicit
+// spec.bucketName) are enforced by the CRD and its CEL rules; what is left here
+// are the checks CEL cannot express, because they look at other resources — the
+// namespace's labels and the other SystemBuckets — or at a value the schema
+// cannot see, which is the bucket name derived from the resource's own
+// coordinates.
 type Validator struct {
 	dyn dynamic.Interface
 }
@@ -67,4 +72,39 @@ func effectiveBucketName(u *unstructured.Unstructured) string {
 		return name
 	}
 	return u.GetNamespace() + "-" + u.GetName()
+}
+
+// What a bucket name has to look like. Mirrors the schema of spec.bucketName in
+// crds/systembucket.yaml, deliberately: the point is that a derived name is held
+// to exactly what an explicit one is held to.
+const (
+	bucketNameMinLength = 3
+	bucketNameMaxLength = 63
+)
+
+var bucketNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+// bucketNameProblem says what is wrong with a bucket name, or returns the empty
+// string when nothing is.
+//
+// The schema checks spec.bucketName, and only spec.bucketName. Left unset the
+// name is derived from the resource's coordinates as <namespace>-<name>, and
+// nothing checked that: two labels of up to 63 characters each compose to as
+// much as 127, against an S3 limit of 63. The refusal then came from the backend
+// on the first reconcile, as BucketReady=False, rather than from admission on
+// the write that caused it.
+func bucketNameProblem(name string) string {
+	switch {
+	case len(name) < bucketNameMinLength:
+		return fmt.Sprintf("it is %d characters long, and S3 bucket names start at %d",
+			len(name), bucketNameMinLength)
+	case len(name) > bucketNameMaxLength:
+		return fmt.Sprintf("it is %d characters long, and S3 bucket names stop at %d",
+			len(name), bucketNameMaxLength)
+	case !bucketNamePattern.MatchString(name):
+		return "it is not a valid S3 bucket name: lower-case letters, digits and " +
+			"dashes only, starting and ending with a letter or a digit"
+	default:
+		return ""
+	}
 }

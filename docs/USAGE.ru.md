@@ -48,6 +48,19 @@ loki   d8-monitoring-loki     Ready   loki-s3-credentials  True    30s
 
 Отказ здесь не перестраховка: `SystemBucket` владеет своими данными безраздельно, политики reclaim нет, поэтому два владельца одного бакета — это две нагрузки, пишущие в одно хранилище, и удаление любой из них уносит объекты другой.
 
+Каким бы способом имя ни получилось, оно должно быть таким, какое принимает S3: от 3 до 63 символов, строчные латинские буквы, цифры и дефисы, начинается и заканчивается буквой или цифрой. Проблема возникает именно с выведенным именем, потому что его не набирают, а составляют: namespace и имя ресурса длиной до 63 символов каждое дают в сумме до 127. Если пара слишком длинная, задайте `spec.bucketName`:
+
+```console
+$ kubectl -n d8-observability-long-term-metrics apply -f systembucket.yaml
+Error from server: admission webhook denied the request: the bucket name this
+SystemBucket maps to,
+"d8-observability-long-term-metrics-prometheus-remote-write-backend", cannot be
+used: it is 66 characters long, and S3 bucket names stop at 63. With
+spec.bucketName unset the name is derived as <namespace>-<name> …
+```
+
+Контроллер отказывает по той же причине, поэтому ресурс, созданный при выключенном вебхуке, показывает `BucketReady=False` с указанием, что задать, а не оставляет ответ бэкенду.
+
 ## Ротация учётных данных
 
 Измените значение аннотации `storage.deckhouse.io/rotate`:

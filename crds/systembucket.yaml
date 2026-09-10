@@ -118,6 +118,8 @@ spec:
                     the S3 connection variables and credentials: `S3_ENDPOINT`,
                     `S3_REGION`, `S3_BUCKET`, `AWS_ACCESS_KEY_ID`,
                     `AWS_SECRET_ACCESS_KEY`.
+                  required:
+                    - name
                   properties:
                     name:
                       type: string

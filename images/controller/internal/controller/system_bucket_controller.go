@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"regexp"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -250,6 +251,22 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 	store := r.Store.Store()
 	name := effectiveBucketName(bucket)
 
+	// Re-check the bucket name the admission webhook already checked, for the
+	// reason the namespace gate is re-checked above: the webhook can be bypassed.
+	//
+	// This is a terminal refusal, so it carries the reason the phase derivation
+	// understands rather than one of its own — see the namespace gate for why.
+	// Nothing moves until the resource is given a spec.bucketName S3 accepts, and
+	// the resource cannot be renamed, so an operator reading InProgress here would
+	// be waiting for a reconcile that will keep making the same decision.
+	if problem := bucketNameProblem(name); problem != "" {
+		status.Set(v1alpha1.SystemBucketConditionBucketReady, metav1.ConditionFalse, conditions.ReasonReconcileFailed,
+			fmt.Sprintf("the bucket name %q cannot be used: %s. With spec.bucketName unset it is derived as <namespace>-<name>; set spec.bucketName to something S3 accepts",
+				name, problem))
+		status.GateAfter(v1alpha1.SystemBucketConditionBucketReady)
+		return r.finish(ctx, bucket, status, observed, nil)
+	}
+
 	bstate, err := r.Driver.EnsureBucket(ctx, store, name, bucketOwnerRef(bucket))
 	if bstate.BucketName != "" {
 		observed.bucketName = bstate.BucketName
@@ -351,6 +368,41 @@ func (r *SystemBucketReconciler) platformNamespace(ctx context.Context, name str
 // deciding whether a bucket may be handed to this resource.
 func bucketOwnerRef(bucket *v1alpha1.SystemBucket) string {
 	return bucket.Namespace + "/" + bucket.Name
+}
+
+// What a bucket name has to look like. Mirrors the schema of spec.bucketName in
+// crds/systembucket.yaml: the point of checking here is that a derived name is
+// held to exactly what an explicit one is held to.
+const (
+	bucketNameMinLength = 3
+	bucketNameMaxLength = 63
+)
+
+var bucketNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+// bucketNameProblem says what is wrong with a bucket name, or returns the empty
+// string when nothing is.
+//
+// The schema checks spec.bucketName, and only spec.bucketName. Left unset the
+// name is derived as <namespace>-<name>, and nothing checked that: two labels of
+// up to 63 characters each compose to as much as 127, against an S3 limit of 63.
+//
+// Mirrors bucketNameProblem in images/webhooks; the two must agree, for the same
+// reason the two copies of effectiveBucketName must.
+func bucketNameProblem(name string) string {
+	switch {
+	case len(name) < bucketNameMinLength:
+		return fmt.Sprintf("it is %d characters long, and S3 bucket names start at %d",
+			len(name), bucketNameMinLength)
+	case len(name) > bucketNameMaxLength:
+		return fmt.Sprintf("it is %d characters long, and S3 bucket names stop at %d",
+			len(name), bucketNameMaxLength)
+	case !bucketNamePattern.MatchString(name):
+		return "it is not a valid S3 bucket name: lower-case letters, digits and " +
+			"dashes only, starting and ending with a letter or a digit"
+	default:
+		return ""
+	}
 }
 
 // effectiveBucketName is spec.bucketName, or <namespace>-<name> when unset. The

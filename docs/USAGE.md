@@ -48,6 +48,19 @@ Set it explicitly only when something outside the cluster needs a specific name.
 
 The refusal is not caution for its own sake: a `SystemBucket` owns its data outright and there is no reclaim policy, so two owners of one bucket means both write to the same storage and deleting either one destroys the other's objects.
 
+Whichever way the name is arrived at, it has to be one S3 accepts: 3 to 63 characters, lower-case letters, digits and dashes, starting and ending with a letter or a digit. The derived form is where that bites, because it is composed rather than typed — a namespace and a resource name of up to 63 characters each add up to as much as 127. Set `spec.bucketName` when the pair is too long:
+
+```console
+$ kubectl -n d8-observability-long-term-metrics apply -f systembucket.yaml
+Error from server: admission webhook denied the request: the bucket name this
+SystemBucket maps to,
+"d8-observability-long-term-metrics-prometheus-remote-write-backend", cannot be
+used: it is 66 characters long, and S3 bucket names stop at 63. With
+spec.bucketName unset the name is derived as <namespace>-<name> …
+```
+
+The controller refuses the same name for the same reason, so a resource created while the webhook was down reports `BucketReady=False` saying what to set instead of leaving the backend to answer.
+
 ## Rotating credentials
 
 Change the value of the `storage.deckhouse.io/rotate` annotation:

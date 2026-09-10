@@ -49,8 +49,22 @@ import (
 // trigger issuance of a fresh key pair (the Secret is updated and the previous
 // key is revoked). status.observedRotation records the last processed value.
 //
+// The markers below are not rendered. crds/systembucket.yaml is written by
+// hand, and hack/generate_code.sh generates deepcopy only — so this is a record
+// of what the shipped manifest enforces, kept next to the fields it constrains,
+// and the manifest is the thing that has to be edited with them. They were
+// added because the type carried none of it: a reader of this package saw two
+// unconstrained strings and no immutability at all, which is a laxer resource
+// than the one a cluster actually has.
+//
 // +kubebuilder:resource:scope=Namespaced,shortName=sb
 // +kubebuilder:subresource:status
+// +kubebuilder:metadata:labels={"heritage=deckhouse","module=system-s3","backup.deckhouse.io/cluster-config=true"}
+// +kubebuilder:printcolumn:name="Bucket",type="string",JSONPath=`.status.bucketName`
+// +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Secret",type="string",JSONPath=`.status.secretRef.name`
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:object:root=true
 // +k8s:deepcopy-gen=true
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -72,18 +86,37 @@ type SystemBucketList struct {
 }
 
 // +k8s:deepcopy-gen=true
+// +kubebuilder:validation:XValidation:rule="oldSelf == null || !has(self.bucketName) && !has(oldSelf.bucketName) || has(self.bucketName) && has(oldSelf.bucketName) && self.bucketName == oldSelf.bucketName",message="spec.bucketName is immutable after creation."
+// +kubebuilder:validation:XValidation:rule="oldSelf == null || !has(self.credentialsSecretName) && !has(oldSelf.credentialsSecretName) || has(self.credentialsSecretName) && has(oldSelf.credentialsSecretName) && self.credentialsSecretName == oldSelf.credentialsSecretName",message="spec.credentialsSecretName is immutable after creation: renaming it would leave the old Secret behind — it is owned by this resource, so nothing else removes it while this one lives — and the new one starts empty, which the controller reads as a lost secret key and answers with a rotation. Delete the SystemBucket and create it with the name you want."
 type SystemBucketSpec struct {
 	// BucketName is the name of the bucket in S3. Defaults to
 	// <metadata.namespace>-<metadata.name> when omitted, because the backend
 	// bucket namespace is flat while SystemBuckets are namespaced. Immutable
 	// after creation.
+	//
+	// The schema bounds it the way S3 does — 3 to 63 characters, lower-case
+	// letters, digits and dashes, starting and ending with a letter or a digit.
+	// The derived form is bounded too, but not by the schema, which cannot see
+	// it: a namespace and a name compose to as much as 127 characters, so the
+	// admission webhook and the controller both refuse a name S3 would not take.
 	// +optional
+	// +kubebuilder:validation:MinLength=3
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	BucketName string `json:"bucketName,omitempty"`
 
 	// CredentialsSecretName overrides the name of the credentials Secret
 	// written in this bucket's namespace. Defaults to
 	// <metadata.name>-s3-credentials.
+	//
+	// Immutable after creation: the Secret is owned by this resource, so renaming
+	// it would leave the old one behind for as long as this resource lives, and
+	// the new name starts with no Secret at all — which the controller treats as
+	// a lost secret key and answers by rotating the access key. Delete the
+	// SystemBucket and create it with the name you want.
 	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	CredentialsSecretName string `json:"credentialsSecretName,omitempty"`
 }
 

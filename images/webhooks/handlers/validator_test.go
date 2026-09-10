@@ -18,6 +18,7 @@ package handlers
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -228,6 +229,84 @@ func TestSystemBucketValidateAdmitsTerminatingObjects(t *testing.T) {
 		}
 		if res.Valid {
 			t.Error("the exemption must apply to terminating objects only")
+		}
+	})
+}
+
+func TestBucketNameProblem(t *testing.T) {
+	// The bounds and the pattern are the schema's, so the cases are the schema's
+	// boundaries: what it accepts must be accepted here, or an explicit
+	// spec.bucketName would pass validation and then be refused by this webhook.
+	for _, tc := range []struct {
+		name    string
+		bucket  string
+		problem bool
+	}{
+		{name: "shortest accepted", bucket: "abc"},
+		{name: "longest accepted", bucket: strings.Repeat("a", 63)},
+		{name: "digits and dashes", bucket: "d8-monitoring-loki-0"},
+		{name: "two characters", bucket: "ab", problem: true},
+		{name: "one over the limit", bucket: strings.Repeat("a", 64), problem: true},
+		{name: "leading dash", bucket: "-loki", problem: true},
+		{name: "trailing dash", bucket: "loki-", problem: true},
+		{name: "upper case", bucket: "Loki", problem: true},
+		{name: "underscore", bucket: "d8_loki", problem: true},
+		{name: "empty", bucket: "", problem: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := bucketNameProblem(tc.bucket)
+			if tc.problem && got == "" {
+				t.Errorf("bucketNameProblem(%q) accepted a name it should refuse", tc.bucket)
+			}
+			if !tc.problem && got != "" {
+				t.Errorf("bucketNameProblem(%q) refused a valid name: %s", tc.bucket, got)
+			}
+		})
+	}
+}
+
+// The derived name is the one nothing used to check: the schema only ever sees
+// spec.bucketName, so a namespace and a name that compose past 63 characters
+// reached the backend and came back as BucketReady=False on the first reconcile.
+func TestSystemBucketValidateDerivedBucketName(t *testing.T) {
+	ctx := context.Background()
+	longNS := "d8-" + strings.Repeat("n", 40)
+
+	t.Run("derived name over the S3 limit is rejected", func(t *testing.T) {
+		v := newFakeValidator(platformNS(longNS))
+		res, err := v.SystemBucketValidate(ctx, nil, sbObj(longNS, strings.Repeat("b", 30), ""))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.Valid {
+			t.Fatalf("a derived bucket name of %d characters must be rejected", len(longNS)+1+30)
+		}
+		// The user did not type this name, so the message has to say where it came
+		// from and what to do instead.
+		if !strings.Contains(res.Message, "spec.bucketName") {
+			t.Errorf("the refusal should point at spec.bucketName, got: %s", res.Message)
+		}
+	})
+
+	t.Run("an explicit name rescues the same resource", func(t *testing.T) {
+		v := newFakeValidator(platformNS(longNS))
+		res, err := v.SystemBucketValidate(ctx, nil, sbObj(longNS, strings.Repeat("b", 30), "loki"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !res.Valid {
+			t.Errorf("an explicit spec.bucketName within the limits must be admitted: %s", res.Message)
+		}
+	})
+
+	t.Run("a short namespace and name are admitted", func(t *testing.T) {
+		v := newFakeValidator(platformNS("d8-monitoring"))
+		res, err := v.SystemBucketValidate(ctx, nil, sbObj("d8-monitoring", "loki", ""))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !res.Valid {
+			t.Errorf("d8-monitoring-loki must be admitted: %s", res.Message)
 		}
 	})
 }
