@@ -2,7 +2,7 @@
   "@context": "https://openvex.dev/ns/v0.2.0",
   "@id": "https://openvex.dev/docs/public/vex-system-s3-bundle",
   "author": "Deckhouse <contact@deckhouse.io>",
-  "version": 2,
+  "version": 3,
   "statements": [
     {
       "vulnerability": {
@@ -11,9 +11,6 @@
       "products": [
         {
           "@id": "pkg:golang/golang.org/x/crypto@v0.56.0"
-        },
-        {
-          "@id": "pkg:golang/golang.org/x/crypto@v0.53.0"
         }
       ],
       "status": "not_affected",
@@ -21,5 +18,5 @@
       "impact_statement": "Advisory covers the unmaintained golang.org/x/crypto/openpgp subpackage, which no release of golang.org/x/crypto drops, so the finding cannot be resolved by upgrading (v0.56.0, the version this module ships after fixing CVE-2026-56854, still carries it). Neither binary in this image compiles that subpackage in: golang.org/x/crypto reaches the controller only through github.com/minio/minio-go/v7/pkg/encrypt -> golang.org/x/crypto/argon2, and the go-hooks binary only through github.com/deckhouse/module-sdk/common-hooks/tls-certificate -> github.com/cloudflare/cfssl/helpers -> golang.org/x/crypto/ocsp (plus cryptobyte, ed25519 and pkcs12 alongside it). In both modules `go mod why golang.org/x/crypto/openpgp` reports that the main module does not need the openpgp package, so the vulnerable code is not in the execution path."
     }
   ],
-  "timestamp": "2026-09-04T00:00:00Z"
+  "timestamp": "2026-09-16T00:00:00Z"
 }

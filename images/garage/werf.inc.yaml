@@ -48,7 +48,13 @@ shell:
   install:
     # rust/cargo + a C toolchain (Garage bundles sqlite/lmdb and links ring,
     # all of which compile C sources via cc during the build).
-    - pm install rust cargo gnu-gcc gnu-gcc-devel binutils make pkgconf protobuf linux-headers
+    #
+    # `curl` is here for cargo itself, not for the build: the cargo binary that
+    # base-images v3.0.2 ships is linked against libcurl.so.4 (`readelf -d`),
+    # where the v2.1.17 one had curl compiled in statically. The `cargo` package
+    # carries only /usr/bin/cargo, so without `curl` in the image every cargo
+    # invocation dies with "error while loading shared libraries: libcurl.so.4".
+    - pm install rust cargo curl gnu-gcc gnu-gcc-devel binutils make pkgconf protobuf linux-headers
     # The container-base `rust` package defaults to `clang` as the linker, which
     # is not installed; force the GNU toolchain (gnu-gcc, pulls gnu-glibc) via
     # RUSTFLAGS (rustc command line — outranks any baked-in default/config).
