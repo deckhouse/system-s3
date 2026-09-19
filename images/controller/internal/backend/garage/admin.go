@@ -271,6 +271,21 @@ func (c *adminClient) createKey(ctx context.Context, name string) (*keyInfo, err
 	return &out, nil
 }
 
+// keyListItem is one entry of GET /v2/ListKeys.
+type keyListItem struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// listKeys returns every access key in the cluster.
+func (c *adminClient) listKeys(ctx context.Context) ([]keyListItem, error) {
+	var out []keyListItem
+	if err := c.do(ctx, http.MethodGet, "/v2/ListKeys", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // keyExists reports whether an access key with the given id exists.
 func (c *adminClient) keyExists(ctx context.Context, accessKeyID string) (bool, error) {
 	err := c.do(ctx, http.MethodGet, "/v2/GetKeyInfo?id="+url.QueryEscape(accessKeyID), nil, nil)

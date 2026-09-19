@@ -22,6 +22,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 )
 
@@ -73,6 +74,25 @@ func (d *Driver) EnsureAccess(ctx context.Context, store *backend.Store, bucketN
 		}
 		accessKey, secretKey = key.AccessKeyID, key.SecretAccessKey
 		minted = true
+
+		// Collect the keys of rotations past.
+		//
+		// The resource records ONE superseded key, so two rotations in quick
+		// succession overwrite that record and the first replaced key is left in the
+		// backend for good: a live read-write credential on a platform bucket that
+		// nothing names and nothing will ever revoke. An e2e run found three of them
+		// on one bucket after two rotations.
+		//
+		// Every key this module mints for a bucket carries the same display name
+		// (<namespace>.<systembucket>), so the keys under that name are exactly this
+		// bucket's history. The one just minted and the one being replaced stay; the
+		// rest are ancestors, and this is the moment their number is known to be
+		// growing. Failure is logged and not returned: the rotation itself has
+		// succeeded, and a leftover key must not cost the consumer its credentials.
+		if err := d.collectAncestorKeys(ctx, svc, keyName, accessKey, prevKeyID); err != nil {
+			d.log.Error("unable to collect the access keys replaced by earlier rotations",
+				logger.Err(err), "keyName", keyName)
+		}
 	}
 
 	if err := svc.allow(ctx, b.ID, accessKey, permissions{Read: true, Write: true}); err != nil {
@@ -105,6 +125,26 @@ func (d *Driver) EnsureAccess(ctx context.Context, store *backend.Store, bucketN
 		AccessKeyID:     accessKey,
 		SecretAccessKey: secretKey,
 	}, nil
+}
+
+// collectAncestorKeys deletes every key with this display name except the one in
+// use and the one being retired.
+func (d *Driver) collectAncestorKeys(ctx context.Context, svc *adminClient, keyName, inUse, retiring string) error {
+	keys, err := svc.listKeys(ctx)
+	if err != nil {
+		return fmt.Errorf("list access keys: %w", err)
+	}
+	for _, k := range keys {
+		if k.Name != keyName || k.ID == inUse || (retiring != "" && k.ID == retiring) {
+			continue
+		}
+		if err := svc.deleteKey(ctx, k.ID); err != nil {
+			return fmt.Errorf("delete the orphaned access key %s: %w", k.ID, err)
+		}
+		d.log.Info("deleted an access key left by an earlier rotation",
+			"keyName", keyName, "accessKeyID", k.ID)
+	}
+	return nil
 }
 
 // DeleteAccess revokes the given access key. Idempotent and tolerant of a data

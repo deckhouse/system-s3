@@ -17,8 +17,10 @@ limitations under the License.
 package garage
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -42,5 +44,27 @@ func TestIsNotFound(t *testing.T) {
 	}
 	if isNotFound(nil) {
 		t.Errorf("isNotFound(nil)=true, want false")
+	}
+}
+
+// The keys of a bucket are identified by their display name, so a change to how
+// that is parsed out of ListKeys silently stops the collector from collecting.
+func TestListKeysDecodesNameAndID(t *testing.T) {
+	const body = `[{"id":"GK1","name":"d8-monitoring.loki"},{"id":"GK2","name":"d8-other.backups"}]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/ListKeys" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	keys, err := newAdminClient(srv.URL, "token").listKeys(context.Background())
+	if err != nil {
+		t.Fatalf("listKeys: %v", err)
+	}
+	if len(keys) != 2 || keys[0].ID != "GK1" || keys[0].Name != "d8-monitoring.loki" {
+		t.Fatalf("decoded %+v", keys)
 	}
 }
