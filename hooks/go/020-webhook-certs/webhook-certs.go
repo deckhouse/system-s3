@@ -24,7 +24,22 @@ import (
 	consts "github.com/deckhouse/system-s3/hooks/go/consts"
 )
 
+// The CA is kept in values of its own, and that is not a detail.
+//
+// Without CommonCAValuesPath the SDK generates the CA with the CERTIFICATE's
+// common name, so the CA and the certificate it signs both end up as
+// "CN=webhooks". Go's verifier tolerates that — it matches an issuer by name and
+// key id — and the API server's webhook client is a Go verifier, so the webhook
+// worked and nothing said otherwise. OpenSSL does not: it sees a certificate
+// whose issuer name equals its own subject name, concludes it is self-issued,
+// and stops at depth 0 with "self-signed certificate". Every consumer that
+// verifies the credentials endpoint with curl, Python or Java — which is every
+// consumer not written in Go — cannot reach it.
+//
+// With the path set, the CA is generated once under CommonCACanonicalName,
+// distinct from the certificate's CN, and the chain verifies everywhere.
 var _ = tlscertificate.RegisterInternalTLSHookEM(tlscertificate.GenSelfSignedTLSHookConf{
+	CommonCAValuesPath:    fmt.Sprintf("%s.internal.customWebhookCA", consts.ModuleName),
 	CommonCACanonicalName: fmt.Sprintf("%s-%s", consts.ModulePluralName, consts.WebhookCertCn),
 	CN:                    consts.WebhookCertCn,
 	TLSSecretName:         fmt.Sprintf("%s-https-certs", consts.WebhookCertCn),
@@ -35,6 +50,16 @@ var _ = tlscertificate.RegisterInternalTLSHookEM(tlscertificate.GenSelfSignedTLS
 		fmt.Sprintf("%s.%s.svc", consts.WebhookCertCn, consts.ModuleNamespace),
 		// %CLUSTER_DOMAIN%:// is a special value to generate SAN like 'svc_name.svc_namespace.svc.cluster.local'
 		fmt.Sprintf("%%CLUSTER_DOMAIN%%://%s.%s.svc", consts.WebhookCertCn, consts.ModuleNamespace),
+
+		// The credentials endpoint is served by the controller container in the same
+		// Pod, behind a Service of its own, and it presents this same certificate.
+		// Its names have to be in here: a consumer that cannot verify the endpoint
+		// is a consumer that either refuses to fetch credentials or fetches them
+		// from whatever answered.
+		consts.STSServiceName,
+		fmt.Sprintf("%s.%s", consts.STSServiceName, consts.ModuleNamespace),
+		fmt.Sprintf("%s.%s.svc", consts.STSServiceName, consts.ModuleNamespace),
+		fmt.Sprintf("%%CLUSTER_DOMAIN%%://%s.%s.svc", consts.STSServiceName, consts.ModuleNamespace),
 	}),
 	FullValuesPathPrefix: fmt.Sprintf("%s.internal.customWebhookCert", consts.ModuleName),
 })

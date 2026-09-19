@@ -1,0 +1,379 @@
+/*
+Copyright 2026 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package garage
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/deckhouse/system-s3/images/controller/internal/backend"
+)
+
+// migrationPhase is where a move between two Garage clusters has got to.
+//
+// The phases are the states of the machine in design/rework-storageclass-ha-jwt.ru.md
+// (§7). Each is idempotent: a controller that restarts mid-phase re-enters it and
+// carries on, which is the only way an operation measured in hours survives a
+// process whose reconcile budget is measured in minutes.
+type migrationPhase string
+
+const (
+	// phaseConverged: one data plane, and it is the one the settings ask for.
+	// This is the state of an installation that has never migrated.
+	phaseConverged migrationPhase = "Converged"
+	// phaseProvisioning: the incoming plane is being built and brought up
+	// healthy, with its buckets created and its quotas set. Nothing is copied yet
+	// and nothing is at stake: the serving plane is untouched.
+	phaseProvisioning migrationPhase = "Provisioning"
+	// phaseCopying: the bulk copy is running. Consumers keep reading and writing
+	// the serving plane, so the copy is behind by whatever was written while it
+	// ran; that is what the delta pass in Cutover is for.
+	phaseCopying migrationPhase = "Copying"
+	// phaseVerifying: the two clusters are compared bucket by bucket. A mismatch
+	// goes back to Copying rather than forward.
+	phaseVerifying migrationPhase = "Verifying"
+	// phaseCutover: the only window in which writes are refused. Write access is
+	// revoked on the serving plane, the delta is copied, the consumers' keys are
+	// imported into the incoming plane and the endpoint is switched to it.
+	phaseCutover migrationPhase = "Cutover"
+	// phaseDraining: the incoming plane serves; the old one is kept read-only as
+	// the way back, for drainPeriod.
+	phaseDraining migrationPhase = "Draining"
+	// phaseDecommission: the plane that no longer serves is being torn down. It
+	// is also where an aborted migration ends up — "tear down the plane that is
+	// not serving" is the same work whether the migration finished or was called
+	// off.
+	phaseDecommission migrationPhase = "Decommission"
+)
+
+// There is deliberately no failed phase.
+//
+// Nothing a migration runs into is terminal: a class that binds nothing, a
+// cluster with no room, a copy that cannot get through are all conditions that
+// clear on their own or when an operator acts, and the phase that hit one
+// re-enters it on the next pass and says how long it has been waiting. A failed
+// state would be a second way to spell "still in Provisioning" that an operator
+// would then have to get out of by hand.
+
+// drainPeriod is how long the migrated-from cluster is kept after cutover.
+//
+// It is the way back from a migration whose damage shows up after the switch,
+// and it costs the space of the old cluster for a day. The old cluster is
+// read-only for the whole period: it cannot diverge from the new one, it can only
+// be read back from.
+const drainPeriod = 24 * time.Hour
+
+// migrationStateKey names the keys of the ConfigMap the phase is kept in.
+const (
+	migrationKeyServing    = "serving"
+	migrationKeyOther      = "other-plane"
+	migrationKeyPhase      = "phase"
+	migrationKeyOtherHA    = "other-high-availability"
+	migrationKeyOtherClass = "other-storage-class"
+	migrationKeyStartedAt  = "started-at"
+	migrationKeyFrozenAt   = "frozen-at"
+	migrationKeyCutoverAt  = "cutover-at"
+)
+
+// migrationStateName is the ConfigMap the phase lives in. It belongs to the
+// store, not to either plane (see stableName): it is the one object that
+// outlives both.
+func migrationStateName(store *backend.Store) string {
+	return stableName(store) + "-migration"
+}
+
+// migrationState is which plane serves, which one is being built, and how far
+// the move between them has got.
+//
+// The target shape (ha, storageClass) is recorded rather than re-read from the
+// settings on every pass. A migration takes hours, the settings can be edited
+// while it runs, and a plane that changed shape underneath a copy would have to
+// be thrown away and rebuilt — so the shape is fixed when the migration starts,
+// and an edit made mid-flight is picked up by the NEXT migration, once this one
+// has converged.
+type migrationState struct {
+	// serving is the plane behind the endpoint Service: the one consumers reach.
+	serving int32
+	// other is the plane that is not serving, or 0 when there is only one. Which
+	// one that is changes at the cutover and nowhere else: before it, the plane
+	// being filled; after it, the plane being retired. The two swap places in a
+	// single write, which is also the write that moves the endpoint — so there is
+	// no moment where the state says one thing and the Service another.
+	other int32
+	phase migrationPhase
+	// ha and storageClass are the shape the incoming plane is built for.
+	ha           bool
+	storageClass string
+	startedAt    time.Time
+	// frozenAt is when writes were refused, i.e. when the cutover began. It is
+	// what bounds the freeze: a cutover that cannot finish gives the writes back
+	// rather than holding them until somebody notices.
+	frozenAt time.Time
+	// cutoverAt is when the endpoint moved, which starts the clock on keeping the
+	// cluster it moved away from.
+	cutoverAt time.Time
+	// recorded reports whether the state was read from an object that exists,
+	// i.e. whether this store has ever had a second data plane. It is not part of
+	// the state and is never written: it is how the endpoint's selector knows
+	// whether it may stay as wide as an installation that has never migrated left
+	// it (see endpointSelector).
+	recorded bool
+}
+
+// migrating reports whether the store has two data planes: a move is in flight,
+// or one has just finished and the old cluster is still there.
+func (s migrationState) migrating() bool {
+	return s.phase != phaseConverged && s.other != 0
+}
+
+// loadMigrationState reads the phase, or reports the converged state of an
+// installation that has never migrated.
+//
+// When the ConfigMap is absent the serving plane is read from the endpoint
+// Service's own selector instead of assumed to be the first. The Service is the
+// definition of "what serves" rather than a record of it — whatever it selects is
+// what consumers reach — so a lost ConfigMap cannot point the module at a plane
+// that is not the one answering.
+func (d *Driver) loadMigrationState(ctx context.Context, store *backend.Store) (migrationState, error) {
+	cm := &corev1.ConfigMap{}
+	err := d.apiReader.Get(ctx, client.ObjectKey{Namespace: d.namespace, Name: migrationStateName(store)}, cm)
+	switch {
+	case apierrors.IsNotFound(err):
+		serving, named, err := d.servingFromEndpoint(ctx, store)
+		if err != nil {
+			return migrationState{}, err
+		}
+		// A Service whose selector already names a plane says this store has
+		// migrated before, whatever happened to the ConfigMap. Reading that as "it
+		// never did" would widen the selector again, and a namespace that still
+		// holds a second cluster would have both of them behind one endpoint.
+		return migrationState{serving: serving, phase: phaseConverged, recorded: named}, nil
+	case err != nil:
+		return migrationState{}, err
+	}
+	state := parseMigrationState(cm.Data)
+	state.recorded = true
+	return state, nil
+}
+
+// servingFromEndpoint reads which plane the endpoint Service selects. A Service
+// that does not exist yet, or one whose selector predates the incarnation label,
+// is the first plane — that is the installation this label was added to.
+func (d *Driver) servingFromEndpoint(ctx context.Context, store *backend.Store) (serving int32, named bool, err error) {
+	svc := &corev1.Service{}
+	err = d.apiReader.Get(ctx, client.ObjectKey{Namespace: d.namespace, Name: s3SvcName(store)}, svc)
+	switch {
+	case apierrors.IsNotFound(err):
+		return firstIncarnation, false, nil
+	case err != nil:
+		return 0, false, err
+	}
+	value, named := svc.Spec.Selector[incarnationLabel]
+	return parseIncarnation(value), named, nil
+}
+
+// parseIncarnation reads an incarnation written as a label or a ConfigMap value,
+// with anything absent or unreadable meaning the first one.
+func parseIncarnation(value string) int32 {
+	n, err := strconv.Atoi(value)
+	if err != nil || n < int(firstIncarnation) {
+		return firstIncarnation
+	}
+	return int32(n)
+}
+
+// parseMigrationState reads the state out of the ConfigMap data. Anything
+// missing or unreadable reads as the converged state of the first plane: a
+// half-written ConfigMap must not start a migration by accident, and the phases
+// re-derive whether a move is needed from the settings on the next pass anyway.
+func parseMigrationState(data map[string]string) migrationState {
+	state := migrationState{
+		serving:      parseIncarnation(data[migrationKeyServing]),
+		phase:        migrationPhase(data[migrationKeyPhase]),
+		ha:           data[migrationKeyOtherHA] == "true",
+		storageClass: data[migrationKeyOtherClass],
+		startedAt:    parseTime(data[migrationKeyStartedAt]),
+		frozenAt:     parseTime(data[migrationKeyFrozenAt]),
+		cutoverAt:    parseTime(data[migrationKeyCutoverAt]),
+	}
+	// Any real plane, the first one included. It is the first one exactly half the
+	// time: before a cutover the other plane is the one being built, after it the
+	// one being retired, and a store on its first migration retires plane 1.
+	//
+	// Reading 1 as "no other plane" is what a first version of this did, and it
+	// cost the whole drain: the state written by the cutover read back as
+	// converged, the phase never reached the decommission, and the cluster that
+	// was supposed to be kept for a day and then removed was kept forever.
+	if n, err := strconv.Atoi(data[migrationKeyOther]); err == nil && n >= int(firstIncarnation) {
+		state.other = int32(n)
+	}
+	if !knownPhase(state.phase) {
+		state.phase = phaseConverged
+	}
+	if state.other == state.serving {
+		// "The other plane is this plane" is not a state, it is a corruption. Acting
+		// on it would have a phase provision, copy into, or decommission the cluster
+		// that is serving.
+		state.other = 0
+	}
+	if state.phase != phaseConverged && state.other == 0 {
+		// A phase with no plane to move to is not a phase. Reading it as converged
+		// leaves the serving plane serving and lets the next pass start the
+		// migration properly, rather than driving a machine over a plane that was
+		// never named.
+		state.phase = phaseConverged
+	}
+	return state
+}
+
+// knownPhase guards against a value written by a newer release (a downgrade) or
+// by hand.
+func knownPhase(p migrationPhase) bool {
+	switch p {
+	case phaseConverged, phaseProvisioning, phaseCopying, phaseVerifying,
+		phaseCutover, phaseDraining, phaseDecommission:
+		return true
+	}
+	return false
+}
+
+func parseTime(value string) time.Time {
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// saveMigrationState writes the state back. It is a full write rather than a
+// patch: the state is one small document with a single writer (the controller
+// holds the leader lease), and a phase that moved must not leave a key of the
+// previous one behind.
+func (d *Driver) saveMigrationState(ctx context.Context, store *backend.Store, state migrationState) error {
+	data := map[string]string{
+		migrationKeyServing: strconv.FormatInt(int64(state.serving), 10),
+		migrationKeyPhase:   string(state.phase),
+	}
+	if state.other != 0 {
+		data[migrationKeyOther] = strconv.FormatInt(int64(state.other), 10)
+		data[migrationKeyOtherHA] = strconv.FormatBool(state.ha)
+		data[migrationKeyOtherClass] = state.storageClass
+	}
+	if s := formatTime(state.startedAt); s != "" {
+		data[migrationKeyStartedAt] = s
+	}
+	if s := formatTime(state.frozenAt); s != "" {
+		data[migrationKeyFrozenAt] = s
+	}
+	if s := formatTime(state.cutoverAt); s != "" {
+		data[migrationKeyCutoverAt] = s
+	}
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      migrationStateName(store),
+			Namespace: d.namespace,
+			Labels:    commonLabels(store),
+		},
+		Data: data,
+	}
+	if err := d.apply(ctx, cm); err != nil {
+		return fmt.Errorf("write the migration state: %w", err)
+	}
+	return nil
+}
+
+// planeOf returns the store description of one of its data planes: the same
+// store, at that incarnation and in that plane's shape.
+//
+// Every builder in this package takes a store and reads the plane out of it, so
+// reconciling the incoming plane is the same code as reconciling the serving one,
+// called with a different description.
+func planeOf(store *backend.Store, incarnation int32, ha bool, storageClass string) *backend.Store {
+	plane := *store
+	plane.Incarnation = incarnation
+	plane.HighAvailability = ha
+	plane.StorageClass = storageClass
+	return &plane
+}
+
+// endpointSelector is what the endpoint Service points at.
+//
+// A store that has never migrated keeps the selector it already has: the store's
+// labels, with no plane in them. That is not laziness — it is what is on the
+// Service of every installation upgraded into this code, and narrowing a live
+// selector to a label the pods only grow as they roll would empty the endpoint
+// for the length of a rollout, on an upgrade that changes nothing else.
+//
+// From the first migration on it names a plane, and it keeps naming one
+// afterwards. The obvious alternative — widen it again once the migration has
+// converged — has a hole in it: the pods of the cluster being torn down still
+// carry the store's labels while they terminate, so a wide selector would send
+// reads to a cluster that is on its way out, for as long as it takes them to go.
+func endpointSelector(store *backend.Store, state migrationState) map[string]string {
+	if !state.recorded {
+		return commonLabels(store)
+	}
+	return planeLabels(planeOf(store, state.serving, store.HighAvailability, store.StorageClass))
+}
+
+// servingPlane resolves a store description that does not say which data plane
+// it means into the one that is serving.
+//
+// Every entry point of the driver starts here. The store the controller holds is
+// built from the module settings and names no incarnation, because the settings
+// do not have one: which Garage cluster a bucket is created on, a key is issued
+// on or an object is deleted from is a fact about the cluster, not about the
+// settings, and for the hours of a migration the two planes answer differently.
+//
+// The read is uncached on purpose. It costs one GET per call and it is what
+// stands between the cutover and a pass that acts on the cluster that stopped
+// serving a second ago.
+func (d *Driver) servingPlane(ctx context.Context, store *backend.Store) (*backend.Store, migrationState, error) {
+	state, err := d.loadMigrationState(ctx, store)
+	if err != nil {
+		return nil, migrationState{}, fmt.Errorf("read the migration state: %w", err)
+	}
+	return planeOf(store, state.serving, store.HighAvailability, store.StorageClass), state, nil
+}
+
+// reportedMigration is the migration as the outside should see it: the phase and
+// when it started, or nothing at all when the store has one data plane.
+//
+// The state read at the START of the pass is what is reported, not the one the
+// pass produced. What a metric should say is where the store was while this pass
+// was working on it; a phase that changed in the last second of the pass is the
+// next pass's news.
+func reportedMigration(state migrationState) (string, time.Time) {
+	if !state.migrating() {
+		return "", time.Time{}
+	}
+	return string(state.phase), state.startedAt
+}

@@ -24,6 +24,7 @@ global:
     kubernetesVersion: "1.31.0"
     d8SpecificNodeCountByRole: {system: 0, master: 3}
     clusterMasterCount: 3
+    clusterControlPlaneIsHighlyAvailable: true
     clusterDomain: cluster.local
   clusterConfiguration:
     clusterDomain: cluster.local
@@ -38,10 +39,10 @@ global:
         memoryControlPlane: 536870912
 systemS3:
   logLevel: INFO
-  storage:
-    singleReplica: false
-    sizePerNode: 10Gi
   internal:
+    effectiveStorageClass: ceph-csi-rbd
+    stsServiceName: system-s3-sts
+    stsPort: 8444
     controllerMetricsPort: 8080
     controllerMetricsProxyPort: 8080
     customWebhookCert:

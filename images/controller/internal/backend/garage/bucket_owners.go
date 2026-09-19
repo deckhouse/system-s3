@@ -48,8 +48,11 @@ import (
 // because Garage has no place to put an arbitrary tag on a bucket, and
 // read-modify-write on it is safe — the controller runs under leader election, so
 // there is one writer, and the write is retried on conflict regardless.
+// It belongs to the store and not to the data plane running it (see
+// stableName): which SystemBucket a bucket was made for is the same answer
+// before and after a migration moves the data to another Garage cluster.
 func bucketOwnersName(store *backend.Store) string {
-	return resourceName(store) + "-bucket-owners"
+	return stableName(store) + "-bucket-owners"
 }
 
 // claimBucket records owner as the owner of name and returns "". When the bucket

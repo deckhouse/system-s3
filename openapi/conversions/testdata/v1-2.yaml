@@ -1,0 +1,8 @@
+# The default installation: the section existed but said nothing that has to be
+# carried over. singleReplica: false is deliberately NOT turned into
+# highAvailability: true — the mode has to keep being derived from the cluster,
+# and a conversion that pinned it would decide for every installation that never
+# chose.
+storage:
+  singleReplica: false
+  sizePerNode: 10Gi

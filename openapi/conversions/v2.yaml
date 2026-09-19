@@ -1,0 +1,6 @@
+version: 2
+conversions:
+  - if .storage.singleReplica == true then .highAvailability = false end | del(.storage.singleReplica, .storage.recreateConfirmation) | if .storage == {} then del(.storage) end
+description:
+  ru: "Замените `storage.singleReplica: true` на `highAvailability: false` и удалите `storage.singleReplica` и `storage.recreateConfirmation`. Число реплик теперь следует режиму отказоустойчивости платформы, а подтверждение пересоздания больше не нужно: смена режима выполняется миграцией между двумя кластерами Garage и данных не теряет."
+  en: "Replace `storage.singleReplica: true` with `highAvailability: false` and delete `storage.singleReplica` and `storage.recreateConfirmation`. The replica count now follows the platform's high-availability mode, and the recreate acknowledgement is gone: switching the mode is a migration between two Garage clusters and loses no data."

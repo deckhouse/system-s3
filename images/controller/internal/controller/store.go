@@ -34,6 +34,18 @@ import (
 // admin endpoint behind it; *garage.Driver is the only implementation.
 type storeDriver interface {
 	EnsureStore(ctx context.Context, store *backend.Store) (backend.StoreState, error)
+
+	// SweepExpiredTemporaryAccess removes the key records the credentials
+	// endpoint left behind. It is here rather than on a timer of its own because
+	// this loop is already the module's "every so often, on one replica" place,
+	// and a second one would be a second thing to reason about.
+	SweepExpiredTemporaryAccess(ctx context.Context, store *backend.Store) (int, error)
+
+	// SweepIncompleteUploads removes the parts of multipart uploads that were
+	// started and never finished. Garage keeps them for good otherwise, and they
+	// occupy the volume without appearing in any listing or counting against any
+	// quota.
+	SweepIncompleteUploads(ctx context.Context, store *backend.Store) (int, error)
 }
 
 // StoreManager owns the module's single system data plane.
@@ -93,6 +105,10 @@ type StoreManager struct {
 	// message changes, and otherwise at most once per notReadyLogInterval.
 	lastNotReadyMsg string
 	lastNotReadyAt  time.Time
+
+	// lastSweep is when the expired temporary keys were last cleaned up. Touched
+	// only from Start's goroutine.
+	lastSweep time.Time
 
 	// now is time.Now, replaced in tests.
 	now func() time.Time
@@ -189,6 +205,7 @@ func (m *StoreManager) ensureOnce(ctx context.Context) (backend.StoreState, erro
 // assigned layout; before this it was calculated on every pass and dropped.
 func (m *StoreManager) publish(state backend.StoreState) {
 	monitoring.StoreReady(m.store.Name, state.Ready)
+	monitoring.Migration(m.store.Name, state.MigrationPhase, state.MigrationStartedAt)
 
 	var capacity *int64
 	if state.TotalCapacity != nil {
@@ -196,6 +213,40 @@ func (m *StoreManager) publish(state backend.StoreState) {
 		capacity = &v
 	}
 	monitoring.StoreCapacityBytes(m.store.Name, capacity)
+}
+
+// sweepInterval is how often the expired temporary keys are cleaned up. They are
+// already powerless — Garage stopped honouring them on its own clock — so this is
+// housekeeping, and doing it on every 30-second tick would be a ListKeys per tick
+// for nothing.
+const sweepInterval = 10 * time.Minute
+
+// sweep removes the expired temporary keys, no more often than sweepInterval.
+func (m *StoreManager) sweep(ctx context.Context) {
+	now := m.clock()
+	if !m.lastSweep.IsZero() && now.Sub(m.lastSweep) < sweepInterval {
+		return
+	}
+	m.lastSweep = now
+
+	swept, err := m.driver.SweepExpiredTemporaryAccess(ctx, m.store)
+	if err != nil {
+		m.log.Error("unable to sweep expired temporary access keys", logger.Err(err))
+	} else if swept > 0 {
+		m.log.Info("removed expired temporary access keys", "count", swept)
+	}
+
+	// Not gated on the first sweep succeeding: the two clean up different things,
+	// and an admin API that failed to list keys is no reason to leave a day's worth
+	// of abandoned upload parts on the volume.
+	uploads, err := m.driver.SweepIncompleteUploads(ctx, m.store)
+	if err != nil {
+		m.log.Error("unable to sweep unfinished uploads", logger.Err(err))
+		return
+	}
+	if uploads > 0 {
+		m.log.Info("removed unfinished multipart uploads", "count", uploads)
+	}
 }
 
 // State returns the last observed state without touching the backend.
@@ -219,6 +270,7 @@ func (m *StoreManager) Start(ctx context.Context) error {
 			// over a transient backend failure.
 			m.log.Error("unable to reconcile the system object storage", logger.Err(err))
 		}
+		m.sweep(ctx)
 		select {
 		case <-ctx.Done():
 			return nil

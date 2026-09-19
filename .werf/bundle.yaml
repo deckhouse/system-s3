@@ -35,11 +35,32 @@ shell:
     {{- include "auth for private go modules" $ | nindent 4 }}
     - cd /
     - mkdir -p /docs
+    # A module that has never been released has no notes to render, and the
+    # generator treats that as an error — rightly, for a module that has. Here it
+    # would mean the module cannot be built at all until somebody writes a
+    # changelog for a version that does not exist, which is how the last one came
+    # to describe an architecture the module no longer had.
+    #
+    # The test is for release FILES, not for the directory: .release-notes/ also
+    # holds the scaffold the first release will be written from, and a directory
+    # that exists is not the same as a release that happened.
+    #
+    # The page is still produced, saying so, from the two files next to the
+    # scaffold — in files rather than inline because one of them is in Russian and
+    # the module's linter does not allow Cyrillic in a build definition.
+    #
+    # The first release renames the scaffold to its version and the generator
+    # takes over.
     - |
-      GOPROXY="$(cat /run/secrets/GOPROXY)" go run {{ $.ReleaseNotesTool }} \
-        --root / \
-        --out-en /docs/RELEASE_NOTES.md \
-        --out-ru /docs/RELEASE_NOTES.ru.md
+      if ls /.release-notes/v*.yaml >/dev/null 2>&1 || ls /CHANGELOG/* >/dev/null 2>&1; then
+        GOPROXY="$(cat /run/secrets/GOPROXY)" go run {{ $.ReleaseNotesTool }} \
+          --root / \
+          --out-en /docs/RELEASE_NOTES.md \
+          --out-ru /docs/RELEASE_NOTES.ru.md
+      else
+        cp /.release-notes/placeholder.md /docs/RELEASE_NOTES.md
+        cp /.release-notes/placeholder.ru.md /docs/RELEASE_NOTES.ru.md
+      fi
     - rm -rf .release-notes CHANGELOG
     - cat /docs/RELEASE_NOTES.md
     - cat /docs/RELEASE_NOTES.ru.md

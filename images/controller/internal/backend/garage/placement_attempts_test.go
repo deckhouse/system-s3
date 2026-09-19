@@ -243,10 +243,7 @@ func TestPlacementGivesUpAfterRepeatedIdenticalMoves(t *testing.T) {
 		Name:   "m0",
 		Labels: map[string]string{controlPlaneNodeLabel: "", hostnameTopologyKey: "m0"},
 	}}
-	pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{
-		Name:   "pool-pv",
-		Labels: map[string]string{storeLabel: store.Name, labelSystemLocalNode: "gone"},
-	}}
+	pv := pinnedPV("replica-pv", "gone")
 	cfg := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: configName(store), Namespace: ns},
 		Data:       map[string]string{configFileName: "replication_factor = 3\n"},

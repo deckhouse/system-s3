@@ -29,8 +29,9 @@ import (
 )
 
 // EnsureBucket creates the named bucket in Garage on behalf of owner
-// ("namespace/name" of the SystemBucket). Idempotent: a bucket this owner already
-// holds is reused.
+// ("namespace/name" of the SystemBucket), applies quota as the bucket's quota and
+// reports what the bucket holds. Idempotent: a bucket this owner already holds is
+// reused.
 //
 // A bucket another SystemBucket holds is not: the call reports not-ready with the
 // current owner and touches nothing. See bucket_owners.go for why this is decided
@@ -38,36 +39,67 @@ import (
 //
 // Credentials are not issued here — EnsureAccess mints the key pair the
 // SystemBucket hands to its consumer.
-func (d *Driver) EnsureBucket(ctx context.Context, store *backend.Store, name, owner string) (backend.BucketState, error) {
+func (d *Driver) EnsureBucket(ctx context.Context, store *backend.Store, name, owner string, quota int64) (backend.BucketState, backend.BucketUsage, error) {
+	store, _, err := d.servingPlane(ctx, store)
+	if err != nil {
+		return backend.BucketState{}, backend.BucketUsage{}, err
+	}
+
 	// The claim comes before anything reaches Garage: nothing about this bucket
 	// should be created for an owner that is not going to be given it.
 	if other, err := d.claimBucket(ctx, store, name, owner); err != nil {
-		return backend.BucketState{}, fmt.Errorf("claim bucket %q for %s: %w", name, owner, err)
+		return backend.BucketState{}, backend.BucketUsage{}, fmt.Errorf("claim bucket %q for %s: %w", name, owner, err)
 	} else if other != "" {
-		return backend.BucketState{Message: bucketTakenMessage(name, other)}, nil
+		return backend.BucketState{Message: bucketTakenMessage(name, other)}, backend.BucketUsage{}, nil
 	}
 
 	svc, ready, err := d.adminClientFor(ctx, store)
 	if err != nil {
-		return backend.BucketState{}, err
+		return backend.BucketState{}, backend.BucketUsage{}, err
 	}
 	if !ready {
-		return backend.BucketState{Message: "Garage admin token is not provisioned yet"}, nil
+		return backend.BucketState{Message: "Garage admin token is not provisioned yet"}, backend.BucketUsage{}, nil
 	}
 
-	if _, found, err := svc.getBucketByAlias(ctx, name); err != nil {
-		return backend.BucketState{}, fmt.Errorf("look up bucket %q: %w", name, err)
-	} else if !found {
-		if _, err := svc.createBucket(ctx, name); err != nil {
-			return backend.BucketState{}, fmt.Errorf("create bucket %q: %w", name, err)
+	b, found, err := svc.getBucketByAlias(ctx, name)
+	if err != nil {
+		return backend.BucketState{}, backend.BucketUsage{}, fmt.Errorf("look up bucket %q: %w", name, err)
+	}
+	if !found {
+		created, err := svc.createBucket(ctx, name)
+		if err != nil {
+			return backend.BucketState{}, backend.BucketUsage{}, fmt.Errorf("create bucket %q: %w", name, err)
 		}
+		b = created
+	}
+
+	// The quota is applied on every pass, not only at creation. It is the one
+	// piece of the bucket an operator can change on a live resource, and a quota
+	// that only followed spec.quota at creation would mean raising it did nothing
+	// until somebody deleted the bucket.
+	if quota > 0 && (b.Quotas.MaxSize == nil || *b.Quotas.MaxSize != quota) {
+		if err := svc.setBucketQuota(ctx, b.ID, quota); err != nil {
+			return backend.BucketState{}, backend.BucketUsage{}, fmt.Errorf("set the quota of bucket %q: %w", name, err)
+		}
+		// Re-read rather than assume: what the status publishes has to be what the
+		// backend holds, and this is the call that just changed it.
+		if refreshed, ok, err := svc.getBucketByAlias(ctx, name); err != nil {
+			return backend.BucketState{}, backend.BucketUsage{}, fmt.Errorf("read back the quota of bucket %q: %w", name, err)
+		} else if ok {
+			b = refreshed
+		}
+	}
+
+	usage := backend.BucketUsage{UsedBytes: b.Bytes, Objects: b.Objects}
+	if b.Quotas.MaxSize != nil {
+		usage.QuotaBytes = *b.Quotas.MaxSize
 	}
 
 	return backend.BucketState{
 		Ready:      true,
 		Message:    "bucket provisioned",
 		BucketName: name,
-	}, nil
+	}, usage, nil
 }
 
 // DeleteBucket removes the named bucket and everything in it. It is idempotent
@@ -82,6 +114,11 @@ func (d *Driver) EnsureBucket(ctx context.Context, store *backend.Store, name, o
 // going away never held that bucket (it was refused credentials for it), so its
 // finalizer must be released without destroying the actual owner's data.
 func (d *Driver) DeleteBucket(ctx context.Context, store *backend.Store, name, owner string) error {
+	store, _, err := d.servingPlane(ctx, store)
+	if err != nil {
+		return err
+	}
+
 	recorded, err := d.bucketOwner(ctx, store, name)
 	if err != nil {
 		return fmt.Errorf("read the owner of bucket %q: %w", name, err)
@@ -172,7 +209,7 @@ func (d *Driver) emptyBucket(ctx context.Context, store *backend.Store, svc *adm
 	if err := svc.allow(ctx, bucketID, key.AccessKeyID, permissions{Read: true, Write: true, Owner: true}); err != nil {
 		return fmt.Errorf("grant temporary key on bucket %q: %w", name, err)
 	}
-	mc, err := s3util.NewClient(s3HostPort(store, d.namespace, d.clusterDomain), key.AccessKeyID, key.SecretAccessKey)
+	mc, err := s3util.NewClient(planeS3HostPort(store, d.namespace, d.clusterDomain), key.AccessKeyID, key.SecretAccessKey)
 	if err != nil {
 		return fmt.Errorf("build S3 client to empty bucket %q: %w", name, err)
 	}

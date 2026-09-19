@@ -1,0 +1,41 @@
+{{- /*
+  Service for the credentials endpoint (see internal/sts in the controller).
+
+  Its own Service rather than another port on the webhook one: the name is what a
+  consumer configures and what the certificate is checked against, and
+  "webhooks.d8-system-s3.svc" tells a reader the wrong thing about what they are
+  talking to. The selector is the controller Pod either way — the endpoint runs in
+  the controller container.
+
+  Its own FILE, too, and that is not cosmetic. It first lived at the end of
+  controller.yaml, right after the include that renders the controller workload,
+  and the `---` in front of it was glued onto the last line of that workload
+  (the helper's output ends without a newline). Helm parsed the result as a
+  Deployment whose secretName was "webhooks-https-certs---"; Deckhouse's renderer
+  dropped the document altogether, so the release simply had no controller
+  Deployment and the module came up with no controller at all — while reporting
+  itself Ready. A separate file cannot do that to its neighbour.
+*/ -}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.systemS3.internal.stsServiceName | quote }}
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "system-s3-sts")) | nindent 2 }}
+spec:
+  type: ClusterIP
+  # app: controller, and nothing else. helm_lib_module_labels puts module and
+  # heritage on the OBJECTS it labels, not on the pod template, so a selector
+  # carrying them matches no pod at all: the Service exists, resolves, and has no
+  # endpoints, which reads to a caller as a connection refused from an endpoint
+  # that is supposed to be up. The webhook Service lib-helm renders for this same
+  # pod selects on app alone for the same reason, and the namespace is what keeps
+  # the label unambiguous.
+  selector:
+    app: controller
+  ports:
+    - name: https
+      port: 443
+      targetPort: {{ int .Values.systemS3.internal.stsPort }}
+      protocol: TCP

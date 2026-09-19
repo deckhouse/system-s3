@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -49,10 +50,13 @@ type placementAction struct {
 // Topology rules (the 2-master state is intentionally left untouched — a
 // mid-shrink transient we neither spread across nor consolidate from):
 //   - control-plane nodes >= replicas: SPREAD — one replica per master. A
-//     replica that is co-located (shares its node) or pinned to a node that is
-//     no longer a control-plane node is relocated onto an empty master. Gated on
+//     replica that is co-located (shares its node) or sits on a node that is no
+//     longer a control-plane node is relocated onto an empty master. Gated on
 //     Garage being healthy so the other replicas have re-replicated before the
 //     next move (re-replication only completes once the StatefulSet is whole).
+//     The gate is kept even where the volume follows the pod and no
+//     re-replication is needed: a move is still one replica down, and taking a
+//     second one down while the cluster is degraded is what the gate prevents.
 //   - exactly one control-plane node: CONSOLIDATE — every replica onto that
 //     node. Replicas not already pinned there (Pending because their master was
 //     removed, or on a wrong node) are relocated; the surviving replica on the
@@ -63,7 +67,7 @@ type placementAction struct {
 //
 // It returns at most one action; the caller performs it and requeues, so the
 // rebalance advances one replica per reconcile.
-func nextPlacementAction(cpNodes []string, replicaNode map[int32]string, replicas int32, healthy bool) placementAction {
+func nextPlacementAction(cpNodes []string, spots map[int32]replicaSpot, replicas int32, healthy bool) placementAction {
 	cpSet := make(map[string]struct{}, len(cpNodes))
 	for _, n := range cpNodes {
 		cpSet[n] = struct{}{}
@@ -75,13 +79,13 @@ func nextPlacementAction(cpNodes []string, replicaNode map[int32]string, replica
 			return placementAction{} // wait: let the previous move re-replicate
 		}
 		perNode := map[string]int{}
-		for _, n := range replicaNode {
-			if _, ok := cpSet[n]; ok {
-				perNode[n]++
+		for _, spot := range spots {
+			if _, ok := cpSet[spot.node]; ok {
+				perNode[spot.node]++
 			}
 		}
 		for ord := int32(0); ord < replicas; ord++ {
-			n := replicaNode[ord]
+			n := spots[ord].node
 			if n == "" {
 				continue // PVC still binding — let it settle, do not disturb
 			}
@@ -97,7 +101,7 @@ func nextPlacementAction(cpNodes []string, replicaNode map[int32]string, replica
 	case len(cpNodes) == 1: // CONSOLIDATE
 		target := cpNodes[0]
 		for ord := int32(0); ord < replicas; ord++ {
-			n := replicaNode[ord]
+			n := spots[ord].node
 			if n == "" {
 				continue // PVC still binding (e.g. initial bring-up) — leave it
 			}
@@ -125,33 +129,34 @@ func nextPlacementAction(cpNodes []string, replicaNode map[int32]string, replica
 // caller surfaces the message so an operator sees why the placement is wrong
 // instead of watching one replica rebuild itself forever.
 func (d *Driver) reconcilePlacement(ctx context.Context, store *backend.Store) (acted bool, msg string, err error) {
-	// A single-replica store never migrates. A relocation recycles the replica's
-	// PVC and lets it re-replicate from the surviving copies — with one replica
-	// there are none, so the move would silently discard the whole store. The
-	// replica therefore stays on the master its local PV bound to, and goes
-	// Pending (data intact on that node's disk) if the master is removed: bringing
-	// it back or recreating the store empty is an operator decision.
-	if store.SingleReplica {
+	// A store outside the high-availability mode never migrates. A relocation
+	// recycles the replica's PVC and lets it re-replicate from the surviving
+	// copies — with one replica there are none, so the move would silently discard
+	// the whole store. The replica therefore stays on the master its local PV bound
+	// to, and goes Pending (data intact on that node's disk) if the master is
+	// removed: bringing it back or recreating the store empty is an operator
+	// decision.
+	if !store.HighAvailability {
 		return false, "", nil
 	}
 
-	cpNodes, err := d.controlPlaneHostnames(ctx)
+	candidates, err := d.candidateHostnames(ctx)
 	if err != nil {
-		return false, "", fmt.Errorf("list control-plane nodes: %w", err)
+		return false, "", fmt.Errorf("list the nodes the data plane may run on: %w", err)
 	}
-	replicaNode, err := d.systemReplicaNodes(ctx, store)
+	spots, err := d.replicaPlacement(ctx, store)
 	if err != nil {
-		return false, "", fmt.Errorf("read replica PV placement: %w", err)
+		return false, "", fmt.Errorf("read replica placement: %w", err)
 	}
 
 	// The health gate only matters for SPREAD; querying it is skipped otherwise.
 	replicas := desiredReplicas(store)
 	healthy := false
-	if int32(len(cpNodes)) >= replicas {
+	if int32(len(candidates)) >= replicas {
 		healthy = d.garageHealthy(ctx, store)
 	}
 
-	action := nextPlacementAction(cpNodes, replicaNode, replicas, healthy)
+	action := nextPlacementAction(candidates, spots, replicas, healthy)
 	if !action.act {
 		// Converged (or nothing to do): forget the bookkeeping, so a later,
 		// legitimate migration starts from a clean count.
@@ -181,10 +186,18 @@ func (d *Driver) reconcilePlacement(ctx context.Context, store *backend.Store) (
 		return false, "", fmt.Errorf("record placement attempt: %w", err)
 	}
 
-	if err := d.recycleReplica(ctx, store, action.ordinal); err != nil {
-		return false, "", fmt.Errorf("recycle replica %d (%s): %w", action.ordinal, action.reason, err)
+	nodePinned := spots[action.ordinal].nodePinned
+	if err := d.moveReplica(ctx, store, action.ordinal, nodePinned); err != nil {
+		return false, "", fmt.Errorf("move replica %d (%s): %w", action.ordinal, action.reason, err)
 	}
-	return true, fmt.Sprintf("rebalancing System placement: recycling %s-%d (%s)", resourceName(store), action.ordinal, action.reason), nil
+	how := "rescheduling"
+	if nodePinned {
+		// Worth spelling out on the object: this one throws the replica's copy away
+		// and rebuilds it, which is minutes of re-replication and not a restart.
+		how = "recycling the node-pinned volume of"
+	}
+	return true, fmt.Sprintf("rebalancing System placement: %s %s-%d (%s)",
+		how, resourceName(store), action.ordinal, action.reason), nil
 }
 
 // placementAttempt reads the recorded migration target and how many times it has
@@ -266,80 +279,185 @@ func (d *Driver) mutatePlacementAttempt(ctx context.Context, store *backend.Stor
 	})
 }
 
-// systemReplicaNodes maps each replica ordinal to the control-plane node its
-// data PVC is bound to (via the bound local PV's node label), or "" when the PVC
-// is unbound / the PV is missing (e.g. the replica is Pending because its master
-// was removed).
-func (d *Driver) systemReplicaNodes(ctx context.Context, store *backend.Store) (map[int32]string, error) {
+// replicaSpot is where one replica currently sits, and whether its volume can
+// follow it elsewhere.
+type replicaSpot struct {
+	// node is the node the replica occupies, or "" when it is still settling (no
+	// PVC yet, a claim being deleted, an unbound claim, or a pod with no node).
+	node string
+	// nodePinned reports that the replica's volume is tied to that node — the
+	// bound PersistentVolume carries a nodeAffinity, which is what a local
+	// StorageClass produces. It decides what "move this replica" means: with a
+	// pinned volume the move discards the replica's copy of the data and Garage
+	// rebuilds it from the others; without one the volume follows the pod and the
+	// move costs a restart.
+	nodePinned bool
+}
+
+// replicaPlacement maps each replica ordinal to its spot.
+//
+// The node comes from the pod, not from the volume: with a class whose volumes
+// follow the pod the volume has no node of its own to read. The volume is still
+// consulted, for two things — whether it is pinned, and, when the pod has no node
+// (Pending, because the node it was pinned to is gone), which node it is pinned
+// to. That second case is the one that has to keep working: a replica left
+// Pending after its master was removed must read back as that removed node, or
+// nothing would ever move it.
+func (d *Driver) replicaPlacement(ctx context.Context, store *backend.Store) (map[int32]replicaSpot, error) {
 	replicas := desiredReplicas(store)
-	out := make(map[int32]string, replicas)
+	out := make(map[int32]replicaSpot, replicas)
 	for ord := int32(0); ord < replicas; ord++ {
+		name := fmt.Sprintf("%s-%d", resourceName(store), ord)
+
 		pvc := &corev1.PersistentVolumeClaim{}
-		key := client.ObjectKey{Namespace: d.namespace, Name: fmt.Sprintf("data-%s-%d", resourceName(store), ord)}
-		if err := d.apiReader.Get(ctx, key, pvc); err != nil {
-			if apierrors.IsNotFound(err) {
-				out[ord] = ""
-				continue
-			}
+		err := d.apiReader.Get(ctx, client.ObjectKey{Namespace: d.namespace, Name: "data-" + name}, pvc)
+		switch {
+		case apierrors.IsNotFound(err):
+			out[ord] = replicaSpot{}
+			continue
+		case err != nil:
 			return nil, err
 		}
 		if pvc.DeletionTimestamp != nil {
 			// A move is already under way: the PVC is waiting for pvc-protection to
-			// let go. Reading it as "still on the wrong node" is what turns one
-			// recycle into a loop — nextPlacementAction would ask for the same move,
-			// recycleReplica would delete the pod again, and the pod is the consumer
-			// keeping the finalizer on. Reported as unplaced instead, which asks for
-			// nothing.
-			out[ord] = ""
+			// let go. Reading it as "still on the wrong node" is what turns one move
+			// into a loop — nextPlacementAction would ask for the same move, the move
+			// would delete the pod again, and the pod is the consumer keeping the
+			// finalizer on. Reported as unplaced instead, which asks for nothing.
+			out[ord] = replicaSpot{}
 			continue
 		}
 		if pvc.Spec.VolumeName == "" {
-			out[ord] = ""
+			out[ord] = replicaSpot{}
 			continue
 		}
+
 		pv := &corev1.PersistentVolume{}
 		if err := d.apiReader.Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, pv); err != nil {
 			if apierrors.IsNotFound(err) {
-				out[ord] = ""
+				out[ord] = replicaSpot{}
 				continue
 			}
 			return nil, err
 		}
-		out[ord] = pv.Labels[labelSystemLocalNode]
+		spot := replicaSpot{nodePinned: pv.Spec.NodeAffinity != nil}
+
+		pod := &corev1.Pod{}
+		err = d.apiReader.Get(ctx, client.ObjectKey{Namespace: d.namespace, Name: name}, pod)
+		switch {
+		case err == nil && pod.Spec.NodeName != "":
+			spot.node = pod.Spec.NodeName
+		case err == nil || apierrors.IsNotFound(err):
+			// No pod, or a pod the scheduler has not placed. A pinned volume still
+			// says where the replica belongs; a volume that follows the pod says
+			// nothing, and the replica is reported as settling.
+			spot.node = pvNodeName(pv)
+		default:
+			return nil, err
+		}
+		out[ord] = spot
 	}
 	return out, nil
 }
 
-// recycleReplica relocates one replica by deleting its pod and PVC: the
-// StatefulSet then recreates both, and the fresh PVC (WaitForFirstConsumer)
-// binds a pool PV on the master the scheduler picks — an empty master (soft
-// anti-affinity) when spreading, or the sole survivor when consolidating. The
-// replica boots empty and Garage re-replicates once the cluster is whole again.
-// Retain means the old PV is left Released for gcLocalPVs to reap.
-func (d *Driver) recycleReplica(ctx context.Context, store *backend.Store, ordinal int32) error {
-	name := fmt.Sprintf("%s-%d", resourceName(store), ordinal)
-	pvcName := "data-" + name
+// pvNodeName reads the single node a volume is pinned to, or "" when it is not
+// pinned to exactly one.
+//
+// Anything more elaborate than one term with one "in" expression naming one
+// value is not a volume tied to a node — it is a topology constraint (a zone, a
+// set of racks), and the placement reconcile has nothing to say about it.
+//
+// Which key names the node is not fixed. kubernetes.io/hostname is the one a
+// cluster always has, but a CSI driver publishes its own per-node topology and
+// pins its volumes with that: sds-local-volume uses
+// topology.sds-local-volume-csi/node, and reading only the hostname made its
+// volumes look unpinned — on the one class where being pinned is the whole
+// point. So a key ending in /node counts too, which is the convention those
+// drivers follow and is narrow enough to exclude a zone.
+func pvNodeName(pv *corev1.PersistentVolume) string {
+	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
+		return ""
+	}
+	terms := pv.Spec.NodeAffinity.Required.NodeSelectorTerms
+	if len(terms) != 1 {
+		return ""
+	}
+	for _, expr := range terms[0].MatchExpressions {
+		if !namesANode(expr.Key) || expr.Operator != corev1.NodeSelectorOpIn || len(expr.Values) != 1 {
+			continue
+		}
+		return expr.Values[0]
+	}
+	return ""
+}
 
-	// The pod first, the PVC second, and the order is the whole difference.
-	//
-	// Deleting the PVC while its pod still mounts it only stamps a
-	// deletionTimestamp: pvc-protection holds the object as long as a consumer
-	// exists. Then the pod goes, and the StatefulSet controller immediately
-	// recreates it under the same name with the same claim — so whether this
-	// works comes down to a race between pvc-protection dropping the finalizer
-	// and the new pod appearing. Lose that race and the new pod references a
-	// terminating PVC, stays Pending on "persistentvolumeclaim is being deleted",
-	// and by existing it keeps the finalizer from ever being dropped.
-	//
-	// Removing the pod first means that when the PVC delete lands there is no
-	// consumer to hold it, so the finalizer goes immediately and the claim is
-	// gone before the StatefulSet has recreated anything.
+// namesANode reports whether a topology key identifies a node rather than a
+// wider failure domain.
+func namesANode(key string) bool {
+	return key == hostnameTopologyKey || strings.HasSuffix(key, "/node")
+}
+
+// candidateHostnames lists the nodes the data plane may run on — the masters —
+// and returns their names.
+//
+// This is the set the replicas are spread across, and it has to be the same set
+// the scheduler is given in dataPlanePlacement. A placement reconcile that
+// counted nodes the pods may not have would keep moving a replica towards a node
+// the scheduler will never give it, recycling a replica's data on every attempt
+// until the attempt cap stops it.
+//
+// Uncached, on a path that runs every 30 seconds and only for a store in the
+// highly available mode: a cached Node informer would have to hold every Node in
+// the cluster to answer one filtered question.
+func (d *Driver) candidateHostnames(ctx context.Context) ([]string, error) {
+	nodes := &corev1.NodeList{}
+	if err := d.apiReader.List(ctx, nodes, client.HasLabels{controlPlaneNodeLabel}); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(nodes.Items))
+	for i := range nodes.Items {
+		out = append(out, nodes.Items[i].Name)
+	}
+	return out, nil
+}
+
+// moveReplica relocates one replica, and what it deletes depends on whether the
+// replica's volume can travel.
+//
+//   - A volume that follows the pod: only the pod is deleted. The StatefulSet
+//     recreates it, the scheduler places it elsewhere (soft anti-affinity), and
+//     the same volume is attached there. No data is lost and nothing has to be
+//     re-replicated — the move is a restart.
+//   - A volume pinned to a node: the pod AND the claim are deleted, because the
+//     claim is what holds the replica to the node it must leave. The replacement
+//     claim binds a volume on the node the scheduler picks, the replica boots
+//     empty, and Garage re-replicates into it once the cluster is whole. That is
+//     the expensive path, and it is the one the health gate and the attempt cap
+//     exist for.
+//
+// The order matters in the second case. Deleting the claim while its pod still
+// mounts it only stamps a deletionTimestamp: pvc-protection holds the object as
+// long as a consumer exists. Then the pod goes, and the StatefulSet controller
+// immediately recreates it under the same name with the same claim — so whether
+// this works comes down to a race between pvc-protection dropping the finalizer
+// and the new pod appearing. Lose that race and the new pod references a
+// terminating claim, stays Pending on "persistentvolumeclaim is being deleted",
+// and by existing it keeps the finalizer from ever being dropped. Removing the
+// pod first means that when the delete lands there is no consumer to hold it.
+func (d *Driver) moveReplica(ctx context.Context, store *backend.Store, ordinal int32, nodePinned bool) error {
+	name := fmt.Sprintf("%s-%d", resourceName(store), ordinal)
+
 	pod := &corev1.Pod{}
 	pod.Namespace, pod.Name = d.namespace, name
 	if err := d.client.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete pod %s: %w", name, err)
 	}
 
+	if !nodePinned {
+		return nil
+	}
+
+	pvcName := "data-" + name
 	pvc := &corev1.PersistentVolumeClaim{}
 	pvc.Namespace, pvc.Name = d.namespace, pvcName
 	if err := d.client.Delete(ctx, pvc); err != nil && !apierrors.IsNotFound(err) {

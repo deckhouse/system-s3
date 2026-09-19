@@ -1,0 +1,63 @@
+- name: d8.system-s3.migration
+  rules:
+    # Both series exist only while a store is being moved to a second Garage
+    # cluster, so these rules are silent on every cluster that is not migrating.
+
+    - alert: D8SystemS3MigrationStalled
+      # Six hours is not a deadline for a migration — copying a terabyte can take
+      # longer. It is the point at which nobody should still be unaware that one
+      # is running, because it costs a second data plane's worth of storage for
+      # as long as it lasts.
+      expr: |
+        (time() - system_s3_migration_started_seconds) > 6 * 3600
+      for: 15m
+      labels:
+        severity_level: "5"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        summary: A system object storage migration has been running for hours.
+        description: |
+          The move of `{{ $labels.store }}` to a second Garage cluster has been going for more
+          than six hours.
+
+          That is not a failure by itself: the copy takes as long as the data takes. What it
+          does mean is that two data planes are running side by side, and the storage the
+          second one holds is storage the cluster cannot use for anything else until this
+          finishes.
+
+          Where it is stuck is on every `SystemBucket`'s `StorageReady` condition, and the
+          phase is in the store's own state:
+
+          ```
+          d8 k -n d8-system-s3 get cm system-garage-migration -o jsonpath='{.data}'
+          d8 k -n d8-system-s3 get job -l storage.deckhouse.io/system-store=system
+          ```
+
+          A copy that cannot get through leaves its Job's pod behind with the reason in its
+          log.
+
+    - alert: D8SystemS3WritesFrozen
+      # The cutover refuses writes and is supposed to last minutes. The controller
+      # gives up on it after thirty and gives the writes back on its own, so ten
+      # minutes of it is worth saying and not yet worth waking anyone.
+      expr: system_s3_migration_phase{phase="Cutover"} == 1
+      for: 10m
+      labels:
+        severity_level: "4"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        summary: The system object storage is refusing writes while it switches clusters.
+        description: |
+          `{{ $labels.store }}` has been in the cutover of a migration for ten minutes.
+
+          For the length of this phase every system bucket refuses writes with 403 while
+          reads keep working — it is the window in which the last objects are copied and the
+          two clusters are compared. It is supposed to last minutes.
+
+          The controller stands down by itself after thirty minutes and gives the writes back,
+          returning to copying. If it has not, the reason is on every `SystemBucket`'s
+          `StorageReady` condition.

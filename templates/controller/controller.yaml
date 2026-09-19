@@ -12,8 +12,47 @@
   CONTROLLER_NAMESPACE (valueFrom fieldRef metadata.namespace).
 
   The data plane has no custom resource, so its settings reach the controller as
-  environment: SINGLE_REPLICA, SIZE_PER_NODE and STORAGE_CLASS are what the
-  ObjectStore CR used to carry in the user-facing module.
+  environment: HIGH_AVAILABILITY and STORAGE_CLASS are what the ObjectStore CR
+  used to carry in the user-facing module. How big the store is does not appear
+  here at all: it is the sum of the SystemBucket sizes, which the controller reads
+  from the cluster.
+
+  HIGH_AVAILABILITY is resolved here rather than in the controller, because the
+  chain it comes from is a platform convention and lib-helm already owns it:
+  the module setting, then global.highAvailability, then whether the control
+  plane itself is highly available. The controller sees the answer, not the
+  chain.
+
+  HIGH_AVAILABILITY_EXPLICIT is the one thing about that chain the controller
+  does have to know: whether the answer was WRITTEN by somebody or DERIVED from
+  the shape of the control plane. The derived value changes on its own when
+  masters are lost, and "the cluster is down to one master" must not be read as
+  "please move the system storage to a single replica" — that is a loss of
+  redundancy nobody asked for, performed at the worst possible moment. The
+  controller refuses that direction unless the setting is explicit; the other
+  direction (masters came back, the mode reads as highly available again) is
+  safe and runs on its own.
+
+  STORAGE_CLASS is the same shape for the same reason, resolved by the
+  storage-class hook (module setting, then global.modules.storageClass, then the
+  cluster default) into internal.effectiveStorageClass. It can legitimately be
+  empty — a cluster with no StorageClass at all — and the chart renders it empty
+  rather than failing: the controller is what reports the missing class, on every
+  SystemBucket, and a Helm error would take the module down instead of saying
+  what to set.
+
+  CONTROLLER_IMAGE is this same image. The object copier of a migration between
+  two Garage clusters is this binary with a different argument, run as a Job, and
+  a running pod cannot find out the reference it was pulled from — so the chart,
+  which does know, says it.
+
+  The credentials endpoint (STS_*) is served by the controller container itself,
+  because it needs what the controller already has: the Garage driver, the
+  Kubernetes clients, and the store description. It reuses the module's webhook
+  certificate — mounted here into the controller container as well — since that
+  certificate is issued for names in this namespace and the hook adds the
+  endpoint's Service name to its SANs. A second PKI for a second listener in the
+  same Pod would be two things to rotate instead of one.
 
   controllerMetricsPort is the loopback port the manager serves /metrics on; the
   port that is actually published belongs to the kube-rbac-proxy sidecar
@@ -30,11 +69,19 @@
   "controllerMetricsProxyPort" (int .Values.systemS3.internal.controllerMetricsProxyPort)
   "additionalControllerEnvs" (list
     (dict "name" "GARAGE_IMAGE" "value" (include "helm_lib_module_image" (list . "garage")))
+    (dict "name" "CONTROLLER_IMAGE" "value" (include "helm_lib_module_image" (list . "controller")))
     (dict "name" "CLUSTER_DOMAIN" "value" .Values.global.discovery.clusterDomain)
-    (dict "name" "SINGLE_REPLICA" "value" (.Values.systemS3.storage.singleReplica | toString))
-    (dict "name" "RECREATE_CONFIRMATION" "value" (.Values.systemS3.storage.recreateConfirmation | default ""))
-    (dict "name" "SIZE_PER_NODE" "value" .Values.systemS3.storage.sizePerNode)
-    (dict "name" "STORAGE_CLASS" "value" "system-s3-local")
+    (dict "name" "HIGH_AVAILABILITY" "value" (include "helm_lib_is_ha_to_value" (list . "true" "false")))
+    (dict "name" "HIGH_AVAILABILITY_EXPLICIT" "value" (ternary "true" "false" (or (hasKey .Values.systemS3 "highAvailability") (hasKey .Values.global "highAvailability"))))
+    (dict "name" "STORAGE_CLASS" "value" (.Values.systemS3.internal.effectiveStorageClass | default ""))
+    (dict "name" "STS_BIND_ADDRESS" "value" (printf ":%d" (int .Values.systemS3.internal.stsPort)))
+    (dict "name" "STS_TLS_CERT_FILE" "value" "/etc/sts-certs/tls.crt")
+    (dict "name" "STS_TLS_KEY_FILE" "value" "/etc/sts-certs/tls.key")
+    (dict "name" "STS_ENDPOINT" "value" (printf "https://%s.d8-%s.svc.%s" .Values.systemS3.internal.stsServiceName .Chart.Name .Values.global.discovery.clusterDomain))
+    (dict "name" "STS_CERT_SECRET" "value" "webhooks-https-certs")
+  )
+  "additionalControllerVolumeMounts" (list
+    (dict "name" "webhook-certs" "mountPath" "/etc/sts-certs" "readOnly" true)
   )
 }}
 {{ include "helm_lib_module_controller_manifests" (list . $config) }}

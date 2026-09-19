@@ -3,4 +3,9 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: d8-{{ .Chart.Name }}
-  {{- include "helm_lib_module_labels" (list .) | nindent 2 }}
+  {{- /*
+    The rules-watcher label is what makes Prometheus read this namespace's
+    PrometheusRules at all. Without it the module's alerts render into the
+    cluster and nobody watches them, which looks exactly like having alerts.
+  */ -}}
+  {{- include "helm_lib_module_labels" (list . (dict "prometheus.deckhouse.io/rules-watcher-enabled" "true")) | nindent 2 }}

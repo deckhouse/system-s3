@@ -48,6 +48,7 @@ func (w *testWriter) Write(p []byte) (int, error) {
 // countingDriver converges slowly and counts how many convergences were started.
 type countingDriver struct {
 	started atomic.Int32
+	swept   atomic.Int32
 
 	// release blocks the convergence until the test lets it finish, so every
 	// caller in the test arrives while the first one is still inside.
@@ -56,6 +57,17 @@ type countingDriver struct {
 	// entered is closed once the first convergence is inside EnsureStore.
 	entered   chan struct{}
 	enterOnce sync.Once
+}
+
+// The sweeps are not what this test is about; they are here because the manager
+// takes one interface.
+func (d *countingDriver) SweepExpiredTemporaryAccess(_ context.Context, _ *backend.Store) (int, error) {
+	d.swept.Add(1)
+	return 0, nil
+}
+
+func (d *countingDriver) SweepIncompleteUploads(_ context.Context, _ *backend.Store) (int, error) {
+	return 0, nil
 }
 
 func (d *countingDriver) EnsureStore(_ context.Context, _ *backend.Store) (backend.StoreState, error) {

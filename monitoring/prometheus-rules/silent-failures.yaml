@@ -1,0 +1,109 @@
+- name: d8.system-s3.silent-failures
+  rules:
+    # What this module does without anybody asking: it provisions a consumer's
+    # bucket, it grows its own volumes to fit the sum of the bucket sizes, and it
+    # hands out credentials to whoever RBAC allows. All of it is silent when it
+    # works — and was silent when it did not. These rules are the sound it makes
+    # when it stops.
+
+    - alert: D8SystemS3BucketNotReady
+      # Fifteen minutes: creating a bucket and issuing its key is seconds of work
+      # once the data plane serves, and the resync is half a minute, so anything
+      # longer is a bucket that is stuck rather than one that is starting.
+      #
+      # Deliberately not gated on the store: a bucket that is not Ready while the
+      # store is fine is the interesting case — a name that collides with another
+      # consumer's, a size the schema let through, a key the backend refused.
+      expr: system_s3_bucket_ready == 0
+      for: 15m
+      labels:
+        severity_level: "5"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "namespace,name"
+        summary: A system bucket is not provisioned.
+        description: |
+          `SystemBucket` `{{ $labels.namespace }}/{{ $labels.name }}` has not reached
+          `Ready` for fifteen minutes. The component that asked for it has no working
+          credentials, and nothing else in the cluster notices.
+
+          The resource says which stage stopped and why:
+
+          ```
+          d8 k -n {{ $labels.namespace }} get systembucket {{ $labels.name }} \
+            -o jsonpath='{range .status.conditions[*]}{.type}{"\t"}{.status}{"\t"}{.message}{"\n"}{end}'
+          ```
+
+          `BucketReady=False` is usually a bucket name that another `SystemBucket` already
+          owns or one S3 will not accept; `ConnectionReady=False` is a ConfigMap that could
+          not be written.
+
+    - alert: D8SystemS3StoreCannotGrow
+      # The store follows the sum of the SystemBucket sizes on its own, so the
+      # failure to follow it is invisible by construction: nothing in the cluster
+      # asked for the growth, so nothing is waiting for it to finish.
+      #
+      # Thirty minutes, because a legitimate growth is not instant: the claims are
+      # patched, the StatefulSet is re-created for the new template, and the CSI
+      # driver resizes the volumes behind them.
+      expr: |
+        system_s3_store_volume_desired_bytes > system_s3_store_volume_capacity_bytes
+      for: 30m
+      labels:
+        severity_level: "5"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        summary: The system object storage cannot grow to the size its buckets ask for.
+        description: |
+          The volumes of `{{ $labels.store }}` have been smaller than the sum of the
+          `SystemBucket` quotas for half an hour. Until this clears, a bucket that fills up
+          is a bucket that stops accepting writes, and no amount of raising `spec.quota`
+          will help.
+
+          Which half of it is stuck is the difference between two series:
+
+          ```
+          # the claims could not even be patched — a class without allowVolumeExpansion
+          system_s3_store_volume_desired_bytes > system_s3_store_volume_requested_bytes
+
+          # the claims were patched and the volumes did not follow — ask the CSI driver
+          system_s3_store_volume_requested_bytes > system_s3_store_volume_capacity_bytes
+          ```
+
+          The reason is also on every `SystemBucket`, in the `StorageReady` message.
+
+    - alert: D8SystemS3TemporaryCredentialsRefused
+      # The endpoint refuses for ordinary reasons too — a component asking for a
+      # bucket it was never granted is a refusal working as intended — so this
+      # fires on a sustained rate rather than on a single answer, and only for the
+      # two codes that mean something is wrong rather than something is forbidden.
+      expr: |
+        sum(rate(system_s3_sts_requests_total{result=~"LimitExceeded|InternalFailure"}[15m])) > 0
+      for: 15m
+      labels:
+        severity_level: "6"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        summary: Temporary S3 credentials are being refused.
+        description: |
+          The temporary-credentials endpoint has been refusing requests for fifteen minutes
+          with `LimitExceeded` or `InternalFailure`. Components that ask for credentials with
+          their ServiceAccount token are not getting them, and to them it looks like the
+          storage is down.
+
+          `LimitExceeded` is a bucket at its ceiling of 50 unexpired temporary keys, and it
+          means a client is asking for credentials far more often than it should — every
+          request mints a key that then lives out its hour whether the client wants it or
+          not. Find it by what it is asking for:
+
+          ```
+          d8 k -n d8-system-s3 logs deploy/controller -c controller | grep -i "temporary"
+          ```
+
+          A well-behaved client holds one key and renews it near the end of its lifetime.

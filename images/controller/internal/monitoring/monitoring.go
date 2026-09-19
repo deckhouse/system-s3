@@ -25,6 +25,8 @@ limitations under the License.
 package monitoring
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
@@ -43,19 +45,176 @@ var (
 
 	// storeCapacityBytes is the capacity the backend reports for its assigned
 	// layout — the sum of the per-replica capacities Garage actually accepted, not
-	// the sizePerNode setting multiplied out. The difference is the point: a
-	// replica missing from the layout shows up here as capacity that never
-	// arrived.
+	// the size the controller asked for. The difference is the point: a replica
+	// missing from the layout shows up here as capacity that never arrived.
 	storeCapacityBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "store_capacity_bytes",
 		Help:      "Total capacity assigned in the data plane's layout, in bytes.",
 	}, []string{"store"})
+
+	// bucketUsedBytes and bucketQuotaBytes are per bucket, and they are the only
+	// warning a platform component gets before its writes start failing: a bucket
+	// at its quota refuses PUTs, and the component that owns it has no other way
+	// to see that coming. Labelled by the SystemBucket rather than by the backend
+	// bucket name, because the resource is what an operator would edit to fix it.
+	bucketUsedBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "bucket_used_bytes",
+		Help:      "Bytes stored in a system bucket, as the backend counts them.",
+	}, []string{"namespace", "name", "bucket"})
+
+	bucketQuotaBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "bucket_quota_bytes",
+		Help:      "Size quota in force on a system bucket, in bytes (0 when none is applied).",
+	}, []string{"namespace", "name", "bucket"})
+
+	// migrationPhase and migrationStartedSeconds describe the module's only
+	// operation measured in hours: moving a store to a second Garage cluster.
+	//
+	// The phase is a label rather than a number because the phases are not on a
+	// scale — Cutover is not "more" than Copying, it is the one where consumers
+	// cannot write. An alert that has to distinguish them wants to name one, and a
+	// number would make it guess.
+	//
+	// Both series exist only while a migration is in flight. A store with one data
+	// plane publishes neither, so a dashboard showing them shows a store that is
+	// moving, and nothing else.
+	migrationPhase = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "migration_phase",
+		Help:      "1 for the phase a migration between two Garage clusters is currently in.",
+	}, []string{"store", "phase"})
+
+	migrationStartedSeconds = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "migration_started_seconds",
+		Help:      "Unix time the migration in flight began, so its age can be alerted on.",
+	}, []string{"store"})
+
+	// bucketReady is one consumer's whole answer to "is my storage working".
+	//
+	// store_ready says the data plane serves; it says nothing about a bucket that
+	// the data plane refuses to provision — a name that collides with another
+	// consumer's, a size that does not parse, a key that cannot be issued. Those
+	// live only in the resource's conditions, which nothing watches.
+	bucketReady = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "bucket_ready",
+		Help:      "Whether a system bucket is fully provisioned (1) or not (0).",
+	}, []string{"namespace", "name"})
+
+	// The three sizes of one replica's volume, which are equal on a healthy store
+	// and diverge in two different ways when growth is stuck:
+	//
+	//   - desired > requested: the claims could not even be patched, which is what
+	//     a StorageClass without allowVolumeExpansion looks like;
+	//   - requested > capacity: the claims were patched and the CSI driver has not
+	//     finished (or cannot) resize the volumes behind them.
+	//
+	// Growth is automatic and silent by design — the store follows the sum of the
+	// bucket sizes without anyone asking — so the failure is silent too. It went
+	// unnoticed here for months: the controller had no permission to patch a claim
+	// at all, and nothing said so.
+	storeVolumeDesiredBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "store_volume_desired_bytes",
+		Help:      "Size one replica's volume should have, from the sum of the SystemBucket sizes.",
+	}, []string{"store"})
+
+	storeVolumeRequestedBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "store_volume_requested_bytes",
+		Help:      "Smallest size any replica's claim asks for, in bytes.",
+	}, []string{"store"})
+
+	storeVolumeCapacityBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "store_volume_capacity_bytes",
+		Help:      "Smallest size any replica's volume actually has, in bytes.",
+	}, []string{"store"})
+
+	// stsRequestsTotal counts what the temporary-credentials endpoint answered.
+	//
+	// "Granted" and the refusal codes in one series: a consumer that starts being
+	// refused — a RoleBinding removed, a client asking for a key on every request
+	// and hitting the per-bucket cap — is invisible from the outside otherwise.
+	// The error code is the label because it is what the client is told.
+	stsRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "sts_requests_total",
+		Help:      "Temporary-credentials requests by outcome (Granted, AccessDenied, LimitExceeded, ...).",
+	}, []string{"result"})
 )
+
+// BucketReady records whether a bucket is fully provisioned.
+func BucketReady(namespace, name string, ready bool) {
+	v := 0.0
+	if ready {
+		v = 1
+	}
+	bucketReady.WithLabelValues(namespace, name).Set(v)
+}
+
+// StoreVolumes records the three sizes of a replica's volume: what it should be,
+// what the claims ask for, and what they have.
+func StoreVolumes(store string, desired, requested, capacity int64) {
+	storeVolumeDesiredBytes.WithLabelValues(store).Set(float64(desired))
+	storeVolumeRequestedBytes.WithLabelValues(store).Set(float64(requested))
+	storeVolumeCapacityBytes.WithLabelValues(store).Set(float64(capacity))
+}
+
+// STSRequest counts one answer of the temporary-credentials endpoint.
+func STSRequest(result string) {
+	stsRequestsTotal.WithLabelValues(result).Inc()
+}
+
+// Migration records the phase a store's migration is in, or that there is none.
+//
+// The previous phase's series is dropped rather than set to zero: a phase that
+// ended is not a phase at zero, and an alert written as
+// migration_phase{phase="Cutover"} == 1 should stop matching when the cutover is
+// over, not keep matching a series that says zero.
+func Migration(store, phase string, startedAt time.Time) {
+	migrationPhase.DeletePartialMatch(prometheus.Labels{"store": store})
+	if phase == "" {
+		migrationStartedSeconds.DeleteLabelValues(store)
+		return
+	}
+	migrationPhase.WithLabelValues(store, phase).Set(1)
+	migrationStartedSeconds.WithLabelValues(store).Set(float64(startedAt.Unix()))
+}
+
+// BucketUsage records what one bucket holds and what it is allowed to hold.
+func BucketUsage(namespace, name, bucket string, used, quota int64) {
+	bucketUsedBytes.WithLabelValues(namespace, name, bucket).Set(float64(used))
+	bucketQuotaBytes.WithLabelValues(namespace, name, bucket).Set(float64(quota))
+}
+
+// ForgetBucket drops a bucket's series.
+//
+// Without it a deleted SystemBucket keeps publishing its last usage forever, and
+// an alert on "bucket nearly full" would fire about a bucket that does not exist
+// — the kind of alert that teaches people to ignore alerts.
+func ForgetBucket(namespace, name, bucket string) {
+	bucketUsedBytes.DeleteLabelValues(namespace, name, bucket)
+	bucketQuotaBytes.DeleteLabelValues(namespace, name, bucket)
+	bucketReady.DeleteLabelValues(namespace, name)
+}
 
 func init() {
 	metrics.Registry.MustRegister(storeReady)
 	metrics.Registry.MustRegister(storeCapacityBytes)
+	metrics.Registry.MustRegister(migrationPhase)
+	metrics.Registry.MustRegister(migrationStartedSeconds)
+	metrics.Registry.MustRegister(bucketUsedBytes)
+	metrics.Registry.MustRegister(bucketQuotaBytes)
+	metrics.Registry.MustRegister(bucketReady)
+	metrics.Registry.MustRegister(storeVolumeDesiredBytes)
+	metrics.Registry.MustRegister(storeVolumeRequestedBytes)
+	metrics.Registry.MustRegister(storeVolumeCapacityBytes)
+	metrics.Registry.MustRegister(stsRequestsTotal)
 }
 
 // StoreReady records the readiness of the named store.

@@ -17,7 +17,6 @@ limitations under the License.
 package garage
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
@@ -28,24 +27,31 @@ import (
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 )
 
+// testVolumeSize is the volume size the fixtures build a StatefulSet with; the
+// real one is computed from the sum of the SystemBucket sizes (see capacity.go),
+// which is not what these tests are about.
+var testVolumeSize = resource.MustParse("10Gi")
+
 // localSC is the managed local StorageClass the module ships; the fixtures name
 // it explicitly so a rename in config defaults cannot silently pass these tests.
 const localSC = "system-s3-local"
 
-// systemStore is the store as the module builds it from its default settings.
+// systemStore is the store as the module builds it from its default settings:
+// the high-availability mode, which is what a cluster with a highly available
+// control plane gets without anyone setting anything.
 func systemStore() *backend.Store {
 	return &backend.Store{
-		Name:         "system",
-		SizePerNode:  resource.MustParse("10Gi"),
-		StorageClass: localSC,
+		Name:             "system",
+		HighAvailability: true,
+		StorageClass:     localSC,
 	}
 }
 
-// singleReplicaStore is the store as the module builds it when the
-// singleReplica setting is on.
-func singleReplicaStore() *backend.Store {
+// nonHAStore is the store outside the high-availability mode: one replica,
+// replication factor 1.
+func nonHAStore() *backend.Store {
 	s := systemStore()
-	s.SingleReplica = true
+	s.HighAvailability = false
 	return s
 }
 
@@ -53,8 +59,8 @@ func TestReplicationFactor(t *testing.T) {
 	if got := replicationFactor(systemStore()); got != 3 {
 		t.Errorf("replicationFactor(default)=%d, want 3", got)
 	}
-	if got := replicationFactor(singleReplicaStore()); got != 1 {
-		t.Errorf("replicationFactor(singleReplica)=%d, want 1", got)
+	if got := replicationFactor(nonHAStore()); got != 1 {
+		t.Errorf("replicationFactor(nonHA)=%d, want 1", got)
 	}
 }
 
@@ -91,7 +97,7 @@ func TestClampRF(t *testing.T) {
 }
 
 func TestReplicationFactorFromConfigMap(t *testing.T) {
-	cm := buildConfigMap(systemStore(), "d8-system-s3", 2, firstIncarnation)
+	cm := buildConfigMap(systemStore(), "d8-system-s3", 2)
 	if got := replicationFactorFromConfigMap(cm); got != 2 {
 		t.Errorf("replicationFactorFromConfigMap=%d, want 2", got)
 	}
@@ -111,7 +117,9 @@ func TestNamesAndEndpoints(t *testing.T) {
 	if got := s3Endpoint(c, "d8-system-s3", "internal.store.local"); got != "http://system-garage.d8-system-s3.svc.internal.store.local:3900" {
 		t.Errorf("s3Endpoint=%q", got)
 	}
-	if got := adminEndpoint(c, "d8-system-s3", "store.local"); got != "http://system-garage.d8-system-s3.svc.store.local:3903" {
+	// The admin API is reached at the PLANE's Service, never at the endpoint: an
+	// admin call is always made to a particular Garage cluster.
+	if got := adminEndpoint(c, "d8-system-s3", "store.local"); got != "http://system-garage-api.d8-system-s3.svc.store.local:3903" {
 		t.Errorf("adminEndpoint=%q", got)
 	}
 	if l := commonLabels(c); l["storage.deckhouse.io/system-store"] != "system" {
@@ -131,7 +139,7 @@ func TestInitialReplicationFactorSystem(t *testing.T) {
 	}
 	// Single replica pins factor 1: a higher factor could never be satisfied by one
 	// Garage node, so the store would stay read-only forever.
-	if got := initialReplicationFactor(singleReplicaStore()); got != 1 {
+	if got := initialReplicationFactor(nonHAStore()); got != 1 {
 		t.Errorf("initialReplicationFactor(System single)=%d, want 1", got)
 	}
 }
@@ -140,13 +148,13 @@ func TestDesiredReplicas(t *testing.T) {
 	if got := desiredReplicas(systemStore()); got != replicasHA {
 		t.Errorf("desiredReplicas(default)=%d, want %d (fixed, master-count independent)", got, replicasHA)
 	}
-	if got := desiredReplicas(singleReplicaStore()); got != replicasSingle {
-		t.Errorf("desiredReplicas(singleReplica)=%d, want %d", got, replicasSingle)
+	if got := desiredReplicas(nonHAStore()); got != replicasNonHA {
+		t.Errorf("desiredReplicas(nonHA)=%d, want %d", got, replicasNonHA)
 	}
 }
 
 func TestBuildSystemStatefulSet(t *testing.T) {
-	sts := buildStatefulSet(systemStore(), "d8-system-s3", "garage:v1", "hash")
+	sts := buildStatefulSet(systemStore(), "d8-system-s3", "garage:v1", "hash", testVolumeSize)
 
 	if sts.Spec.Replicas == nil || *sts.Spec.Replicas != replicasHA {
 		t.Fatalf("replicas=%v, want %d (fixed, independent of master count)", sts.Spec.Replicas, replicasHA)
@@ -178,13 +186,12 @@ func TestBuildSystemStatefulSet(t *testing.T) {
 		}
 	}
 
-	// Forced onto control-plane, tolerating master taints.
-	if _, ok := spec.NodeSelector[controlPlaneNodeLabel]; !ok {
-		t.Errorf("nodeSelector missing %q: %v", controlPlaneNodeLabel, spec.NodeSelector)
+	// System nodes if there are any, masters otherwise — and never a plain
+	// worker. A nodeSelector would be one or the other, so there must not be one.
+	if spec.NodeSelector != nil {
+		t.Errorf("nodeSelector=%v: a selector cannot express a preference, so there must not be one", spec.NodeSelector)
 	}
-	if len(spec.Tolerations) == 0 {
-		t.Errorf("expected control-plane tolerations")
-	}
+	assertDataPlanePlacement(t, spec)
 
 	// Soft (preferred, not required) anti-affinity so all replicas still run on a
 	// single master.
@@ -259,124 +266,20 @@ func TestPodOrdinal(t *testing.T) {
 	}
 }
 
-func TestBuildSingleReplicaSystemStatefulSet(t *testing.T) {
-	sts := buildStatefulSet(singleReplicaStore(), "d8-system-s3", "garage:v1", "hash")
+func TestBuildNonHASystemStatefulSet(t *testing.T) {
+	sts := buildStatefulSet(nonHAStore(), "d8-system-s3", "garage:v1", "hash", testVolumeSize)
 
-	if sts.Spec.Replicas == nil || *sts.Spec.Replicas != replicasSingle {
-		t.Fatalf("replicas=%v, want %d", sts.Spec.Replicas, replicasSingle)
+	if sts.Spec.Replicas == nil || *sts.Spec.Replicas != replicasNonHA {
+		t.Fatalf("replicas=%v, want %d", sts.Spec.Replicas, replicasNonHA)
 	}
-	// Everything else is the System profile as usual: control-plane placement and
-	// node-sticky storage on the managed local StorageClass.
+	// Everything else is as usual: the same placement and one claim per replica
+	// from the configured StorageClass.
 	spec := sts.Spec.Template.Spec
-	if _, ok := spec.NodeSelector[controlPlaneNodeLabel]; !ok {
-		t.Errorf("nodeSelector missing %q: %v", controlPlaneNodeLabel, spec.NodeSelector)
-	}
+	assertDataPlanePlacement(t, spec)
 	if len(sts.Spec.VolumeClaimTemplates) != 1 ||
 		sts.Spec.VolumeClaimTemplates[0].Spec.StorageClassName == nil ||
 		*sts.Spec.VolumeClaimTemplates[0].Spec.StorageClassName != localSC {
 		t.Errorf("volumeClaimTemplates=%+v, want one PVC on %q", sts.Spec.VolumeClaimTemplates, localSC)
-	}
-}
-
-func TestSystemLocalPVIncarnation(t *testing.T) {
-	c := systemStore()
-
-	// A never-recreated cluster keeps the original names and directories, so
-	// upgrading a running store moves nothing.
-	legacyName := localPVName(c, "master-0", firstIncarnation, 2)
-	legacyPath := localPVPath(c, "master-0", firstIncarnation, 2)
-	if want := fmt.Sprintf("%s-local-%s-2", resourceName(c), shortHash("master-0")); legacyName != want {
-		t.Errorf("legacy PV name=%q, want %q", legacyName, want)
-	}
-	if want := fmt.Sprintf("%s/%s/%s-2", hostPathBase, c.Name, shortHash("master-0")); legacyPath != want {
-		t.Errorf("legacy PV path=%q, want %q", legacyPath, want)
-	}
-
-	// A recreated cluster gets both a distinct PV name (so it cannot bind a
-	// leftover PV of the previous incarnation) and a distinct directory (so it
-	// starts from empty storage rather than incompatible Garage metadata).
-	name := localPVName(c, "master-0", 2, 2)
-	path := localPVPath(c, "master-0", 2, 2)
-	if name == legacyName {
-		t.Errorf("incarnation 2 PV name must differ from %q", legacyName)
-	}
-	if path == legacyPath {
-		t.Errorf("incarnation 2 PV path must differ from %q", legacyPath)
-	}
-	if !strings.HasPrefix(path, fmt.Sprintf("%s/%s/", hostPathBase, c.Name)) {
-		t.Errorf("PV path=%q, want it under the store's hostPath base", path)
-	}
-	if pv := buildLocalPV(c, "master-0", 2, 2); pv.Name != name || pv.Spec.HostPath.Path != path {
-		t.Errorf("buildLocalPV=(%q,%q), want (%q,%q)", pv.Name, pv.Spec.HostPath.Path, name, path)
-	}
-}
-
-func TestBuildSystemLocalPV(t *testing.T) {
-	pv := buildLocalPV(systemStore(), "master-0", firstIncarnation, 2)
-
-	if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain {
-		t.Errorf("reclaimPolicy=%q, want Retain (never wipe data)", pv.Spec.PersistentVolumeReclaimPolicy)
-	}
-	if pv.Spec.StorageClassName != localSC {
-		t.Errorf("storageClass=%q, want %q", pv.Spec.StorageClassName, localSC)
-	}
-	if pv.Spec.HostPath == nil || pv.Spec.HostPath.Type == nil || *pv.Spec.HostPath.Type != corev1.HostPathDirectoryOrCreate {
-		t.Fatalf("expected hostPath source with DirectoryOrCreate: %+v", pv.Spec.HostPath)
-	}
-	if pv.Labels[labelSystemLocalNode] != "master-0" {
-		t.Errorf("node label=%q, want master-0", pv.Labels[labelSystemLocalNode])
-	}
-
-	// nodeAffinity pins the PV (hence the replica) to its node.
-	na := pv.Spec.NodeAffinity
-	if na == nil || na.Required == nil || len(na.Required.NodeSelectorTerms) != 1 {
-		t.Fatalf("expected required nodeAffinity: %+v", na)
-	}
-	me := na.Required.NodeSelectorTerms[0].MatchExpressions
-	if len(me) != 1 || me[0].Key != hostnameTopologyKey || me[0].Operator != corev1.NodeSelectorOpIn ||
-		len(me[0].Values) != 1 || me[0].Values[0] != "master-0" {
-		t.Errorf("nodeAffinity term=%+v, want %s In [master-0]", me, hostnameTopologyKey)
-	}
-}
-
-func TestDesiredSystemLocalPVs(t *testing.T) {
-	hostnames := []string{"master-0", "master-1", "master-2"}
-	pvs := desiredLocalPVs(systemStore(), hostnames, firstIncarnation)
-
-	want := len(hostnames) * int(replicasHA)
-	if len(pvs) != want {
-		t.Fatalf("pool size=%d, want %d (systemReplicas per node)", len(pvs), want)
-	}
-	// Names are unique and deterministic.
-	names := map[string]struct{}{}
-	for _, pv := range pvs {
-		if _, dup := names[pv.Name]; dup {
-			t.Errorf("duplicate PV name %q", pv.Name)
-		}
-		names[pv.Name] = struct{}{}
-	}
-	// Every node carries systemReplicas PVs.
-	perNode := map[string]int{}
-	for _, pv := range pvs {
-		perNode[pv.Labels[labelSystemLocalNode]]++
-	}
-	for _, h := range hostnames {
-		if perNode[h] != int(replicasHA) {
-			t.Errorf("node %q has %d PVs, want %d", h, perNode[h], replicasHA)
-		}
-	}
-
-	// Single-replica mode still stocks one PV per master, so the scheduler can
-	// place the sole replica on any of them (once bound, nodeAffinity keeps it
-	// there for good).
-	single := desiredLocalPVs(singleReplicaStore(), hostnames, firstIncarnation)
-	if len(single) != len(hostnames) {
-		t.Fatalf("single-replica pool size=%d, want %d (one per master)", len(single), len(hostnames))
-	}
-	for _, pv := range single {
-		if !strings.HasSuffix(pv.Name, "-0") {
-			t.Errorf("single-replica pool PV %q must be the ordinal-0 slot", pv.Name)
-		}
 	}
 }
 
@@ -403,7 +306,7 @@ func TestLayoutTotalCapacity(t *testing.T) {
 func TestPullSecretIsModuleScoped(t *testing.T) {
 	const want = "system-s3-module-registry"
 
-	sts := buildStatefulSet(systemStore(), "d8-system-s3", "garage:v1", "hash")
+	sts := buildStatefulSet(systemStore(), "d8-system-s3", "garage:v1", "hash", testVolumeSize)
 	secrets := sts.Spec.Template.Spec.ImagePullSecrets
 	if len(secrets) != 1 || secrets[0].Name != want {
 		t.Errorf("imagePullSecrets=%v, want [%s]", secrets, want)
@@ -418,12 +321,20 @@ func TestPullSecretIsModuleScoped(t *testing.T) {
 // is therefore a deadlock: no pod becomes ready until the layout exists, and the
 // layout cannot be written until a pod is ready. A fresh installation sat at 0/3
 // ready for 35 minutes in an e2e run before this was understood.
+
+// The readiness probe says "this node is in the cluster and can serve", and that
+// is what the disruption budget rests on: a budget counting processes rather than
+// members would let a second eviction through the moment the replacement pod
+// accepted a connection, which is well before it has anything to serve.
 //
-// Whether the store can serve is checked where it can be — EnsureStore queries
-// GetClusterHealth before it reports StorageReady — so the probe only has to say
-// that the process is listening.
-func TestReadinessProbeDoesNotWaitForTheClusterItBootstraps(t *testing.T) {
-	sts := buildStatefulSet(systemStore(), "d8-system-s3", "garage:test", "cfghash")
+// It used to be a TCP connect, because /health deadlocked the bootstrap: the
+// layout was assigned through a Service, a Service routes to ready endpoints
+// only, and no pod became ready until the layout was assigned (an e2e run sat at
+// 0/3 for 35 minutes). The layout is now assigned at a pod's own address, so the
+// deadlock is gone — and this test is what keeps the two halves of that from
+// drifting apart again.
+func TestReadinessProbeReportsClusterMembership(t *testing.T) {
+	sts := buildStatefulSet(systemStore(), "d8-system-s3", "garage:test", "cfghash", testVolumeSize)
 
 	var garage *corev1.Container
 	for i := range sts.Spec.Template.Spec.Containers {
@@ -439,15 +350,228 @@ func TestReadinessProbeDoesNotWaitForTheClusterItBootstraps(t *testing.T) {
 	if probe == nil {
 		t.Fatal("the data plane has no readiness probe")
 	}
-	if probe.HTTPGet != nil {
-		t.Errorf("readiness is an HTTP GET on %v%s: an endpoint that reports cluster health cannot gate "+
-			"the readiness the cluster's bootstrap depends on",
-			probe.HTTPGet.Port, probe.HTTPGet.Path)
+	if probe.HTTPGet == nil {
+		t.Fatalf("readiness probe is %+v, want an HTTP check on /health", probe.ProbeHandler)
 	}
-	if probe.TCPSocket == nil {
-		t.Fatalf("readiness probe is %+v, want a TCP socket check", probe.ProbeHandler)
+	if probe.HTTPGet.Path != "/health" {
+		t.Errorf("readiness probes %q, want /health", probe.HTTPGet.Path)
 	}
-	if got := probe.TCPSocket.Port.IntValue(); got != int(s3Port) {
-		t.Errorf("readiness probes port %d, want the S3 port %d (what a consumer connects to)", got, s3Port)
+	if got := probe.HTTPGet.Port.IntValue(); got != int(adminPort) {
+		t.Errorf("readiness probes port %d, want the admin port %d", got, adminPort)
+	}
+	// Becoming ready waits on the controller's next pass rather than on this
+	// process, so the probe has to allow for it instead of restarting.
+	if probe.FailureThreshold < 10 {
+		t.Errorf("failureThreshold=%d: a pod that is waiting for the layout would be given up on",
+			probe.FailureThreshold)
+	}
+}
+
+// TestSecondIncarnationRenamesEverythingButTheEndpoint is the naming contract a
+// migration rests on: the two data planes share a namespace, so every object of
+// the incoming one is named apart from the serving one — except the Service the
+// consumers hold, which is the same object throughout and merely changes which
+// pods it selects.
+func TestSecondIncarnationRenamesEverythingButTheEndpoint(t *testing.T) {
+	first := systemStore()
+	second := systemStore()
+	second.Incarnation = 2
+
+	if got := resourceName(second); got != "system-garage-i2" {
+		t.Errorf("resourceName(incarnation 2)=%q, want system-garage-i2", got)
+	}
+	if got := configName(second); got != "system-garage-i2-config" {
+		t.Errorf("configName(incarnation 2)=%q", got)
+	}
+	if got := secretName(second); got != "system-garage-i2-secrets" {
+		t.Errorf("secretName(incarnation 2)=%q", got)
+	}
+	if got := rpcSvcName(second); got != "system-garage-i2-rpc" {
+		t.Errorf("rpcSvcName(incarnation 2)=%q", got)
+	}
+	if got, want := s3SvcName(second), s3SvcName(first); got != want {
+		t.Errorf("s3SvcName(incarnation 2)=%q, want the endpoint to stay %q", got, want)
+	}
+	if got := s3Endpoint(second, "d8-system-s3", "store.local"); got != s3Endpoint(first, "d8-system-s3", "store.local") {
+		t.Errorf("s3Endpoint moved with the incarnation: %q", got)
+	}
+	// The module's own way in does move with it, which is the point: the two
+	// planes are reached separately for as long as both exist.
+	if got := planeSvcName(second); got != "system-garage-i2-api" {
+		t.Errorf("planeSvcName(incarnation 2)=%q", got)
+	}
+	if planeSvcName(second) == planeSvcName(first) {
+		t.Errorf("both planes answer at the same Service %q", planeSvcName(first))
+	}
+}
+
+// TestUnsetIncarnationIsTheFirst covers the store description that predates
+// migrations: it names the objects an existing installation already runs, rather
+// than a plane that does not exist.
+func TestUnsetIncarnationIsTheFirst(t *testing.T) {
+	zero := systemStore() // Incarnation left at its zero value
+	if got := resourceName(zero); got != "system-garage" {
+		t.Errorf("resourceName(unset incarnation)=%q, want system-garage", got)
+	}
+	if got := planeLabels(zero)[incarnationLabel]; got != "1" {
+		t.Errorf("planeLabels(unset incarnation)[%s]=%q, want 1", incarnationLabel, got)
+	}
+	first := systemStore()
+	first.Incarnation = firstIncarnation
+	if got := resourceName(first); got != resourceName(zero) {
+		t.Errorf("resourceName(1)=%q differs from resourceName(unset)=%q", got, resourceName(zero))
+	}
+}
+
+// TestIncarnationOfPod: a pod carrying no incarnation label belongs to the first
+// plane. The rolling update that first adds the label must not make the pass lose
+// sight of the replicas it has not rolled yet.
+func TestIncarnationOfPod(t *testing.T) {
+	cases := []struct {
+		name   string
+		labels map[string]string
+		want   int32
+	}{
+		{"no label at all", nil, firstIncarnation},
+		{"the label of the first plane", map[string]string{incarnationLabel: "1"}, 1},
+		{"the label of the second plane", map[string]string{incarnationLabel: "2"}, 2},
+		{"an unparseable label", map[string]string{incarnationLabel: "later"}, firstIncarnation},
+		{"a label below the first", map[string]string{incarnationLabel: "0"}, firstIncarnation},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := &corev1.Pod{}
+			pod.Labels = tc.labels
+			if got := incarnationOfPod(pod); got != tc.want {
+				t.Errorf("incarnationOfPod=%d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStatefulSetSelectorStaysWideAndPodsCarryThePlane pins the asymmetry that
+// makes the rename possible on a cluster that already runs: the immutable
+// selector is untouched, and the labels that tell the planes apart are on the
+// pods.
+func TestStatefulSetSelectorStaysWideAndPodsCarryThePlane(t *testing.T) {
+	store := systemStore()
+	store.Incarnation = 2
+	sts := buildStatefulSet(store, "d8-system-s3", "garage:v2", "hash", testVolumeSize)
+
+	if _, found := sts.Spec.Selector.MatchLabels[incarnationLabel]; found {
+		t.Errorf("the StatefulSet selector carries the incarnation; it is immutable and must not: %v", sts.Spec.Selector.MatchLabels)
+	}
+	if got := sts.Spec.Template.Labels[incarnationLabel]; got != "2" {
+		t.Errorf("pod template label %s=%q, want 2", incarnationLabel, got)
+	}
+	if got := sts.Spec.VolumeClaimTemplates[0].Labels[incarnationLabel]; got != "2" {
+		t.Errorf("claim template label %s=%q, want 2", incarnationLabel, got)
+	}
+	term := sts.Spec.Template.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution[0]
+	if got := term.PodAffinityTerm.LabelSelector.MatchLabels[incarnationLabel]; got != "2" {
+		t.Errorf("the anti-affinity spreads against the other plane too: %v", term.PodAffinityTerm.LabelSelector.MatchLabels)
+	}
+}
+
+// TestEachPlaneSpreadsOnlyAgainstItself: both spreading rules select on the
+// plane, not on the store.
+//
+// A migration runs two Garage clusters on the same masters until the copy is
+// done. A rule that selected on the store alone would have the second plane read
+// every master as taken — it would pile onto one node, and with a hard rule it
+// would not schedule at all, so the module could never replace a data plane. The
+// counterpart is that the rules stay soft: a one-master cluster runs three
+// replicas on that master rather than leaving two Pending.
+func TestEachPlaneSpreadsOnlyAgainstItself(t *testing.T) {
+	store := systemStore()
+	store.Incarnation = 2
+	sts := buildStatefulSet(store, "d8-system-s3", "garage:v2", "hash", testVolumeSize)
+	spec := sts.Spec.Template.Spec
+
+	anti := spec.Affinity.PodAntiAffinity
+	if anti == nil || len(anti.PreferredDuringSchedulingIgnoredDuringExecution) != 1 {
+		t.Fatalf("pod anti-affinity=%+v, want one preferred term", anti)
+	}
+	if len(anti.RequiredDuringSchedulingIgnoredDuringExecution) != 0 {
+		t.Errorf("the anti-affinity is required: a cluster with one master could not run the store at all")
+	}
+	if got := anti.PreferredDuringSchedulingIgnoredDuringExecution[0].PodAffinityTerm.TopologyKey; got != hostnameTopologyKey {
+		t.Errorf("anti-affinity topology key=%q, want %q", got, hostnameTopologyKey)
+	}
+
+	if len(spec.TopologySpreadConstraints) != 1 {
+		t.Fatalf("topology spread constraints=%+v, want one", spec.TopologySpreadConstraints)
+	}
+	tsc := spec.TopologySpreadConstraints[0]
+	if tsc.MaxSkew != 1 || tsc.TopologyKey != hostnameTopologyKey {
+		t.Errorf("spread constraint=%+v, want maxSkew 1 over %q", tsc, hostnameTopologyKey)
+	}
+	if tsc.WhenUnsatisfiable != corev1.ScheduleAnyway {
+		t.Errorf("spread constraint is %q: a cluster with fewer masters than replicas would leave replicas Pending", tsc.WhenUnsatisfiable)
+	}
+	if got := tsc.LabelSelector.MatchLabels[incarnationLabel]; got != "2" {
+		t.Errorf("the spread constraint counts the other plane's replicas too: %v", tsc.LabelSelector.MatchLabels)
+	}
+	// Without these the skew is measured over every node in the cluster, which
+	// makes the constraint satisfied by workers the data plane may never have.
+	if tsc.NodeAffinityPolicy == nil || *tsc.NodeAffinityPolicy != corev1.NodeInclusionPolicyHonor {
+		t.Errorf("nodeAffinityPolicy=%v, want Honor", tsc.NodeAffinityPolicy)
+	}
+	if tsc.NodeTaintsPolicy == nil || *tsc.NodeTaintsPolicy != corev1.NodeInclusionPolicyHonor {
+		t.Errorf("nodeTaintsPolicy=%v, want Honor", tsc.NodeTaintsPolicy)
+	}
+}
+
+// assertDataPlanePlacement pins the placement policy: the data plane runs on the
+// masters, on nothing else, and tolerates what a master is tainted with.
+//
+// One required term and no preferred one. The store holds the data a cluster
+// needs while it is being repaired, so it lives where the cluster's own
+// availability lives; a system node belongs to a NodeGroup that grows, shrinks
+// and replaces its members, and a replica that follows one rebuilds itself every
+// time that happens.
+func assertDataPlanePlacement(t *testing.T, spec corev1.PodSpec) {
+	t.Helper()
+
+	if spec.Affinity == nil || spec.Affinity.NodeAffinity == nil {
+		t.Fatalf("no node affinity: the data plane would schedule on any node at all")
+	}
+	na := spec.Affinity.NodeAffinity
+
+	required := na.RequiredDuringSchedulingIgnoredDuringExecution
+	if required == nil || len(required.NodeSelectorTerms) != 1 {
+		t.Fatalf("required node affinity=%+v, want one term (control-plane)", required)
+	}
+	term := required.NodeSelectorTerms[0]
+	if len(term.MatchExpressions) != 1 {
+		t.Fatalf("term=%+v, want one expression", term)
+	}
+	expr := term.MatchExpressions[0]
+	if expr.Key != controlPlaneNodeLabel {
+		t.Errorf("the data plane may run on %q, which is not a master", expr.Key)
+	}
+	if expr.Operator != corev1.NodeSelectorOpExists {
+		t.Errorf("term for %q uses %q, want Exists: the label carries no value", expr.Key, expr.Operator)
+	}
+
+	if preferred := na.PreferredDuringSchedulingIgnoredDuringExecution; len(preferred) != 0 {
+		t.Errorf("preferred node affinity=%+v, want none: there is one kind of node to have", preferred)
+	}
+
+	tolerated := map[string]bool{}
+	for _, tol := range spec.Tolerations {
+		tolerated[tol.Key+"="+tol.Value] = true
+	}
+	for _, want := range []string{
+		"node-role.kubernetes.io/control-plane=",
+		"node-role.kubernetes.io/master=",
+		"dedicated.deckhouse.io=system-s3",
+	} {
+		if !tolerated[want] {
+			t.Errorf("taint %q is not tolerated: %+v", want, spec.Tolerations)
+		}
+	}
+	if tolerated["dedicated.deckhouse.io=system"] {
+		t.Errorf("the system-node taint is tolerated: the data plane does not run there, and tolerating it reads as if it might: %+v", spec.Tolerations)
 	}
 }

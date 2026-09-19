@@ -1,0 +1,90 @@
+- name: d8.system-s3.store-health
+  rules:
+    # The module publishes one series per store and only for a store that exists,
+    # so a cluster without the module has nothing here and these rules stay
+    # silent. None of them carries an absent() arm for that reason.
+
+    - alert: D8SystemS3StoreNotReady
+      # Ten minutes, because the honest causes of a short gap are ordinary: a
+      # rolling restart of the data plane, a replica rescheduled onto another
+      # node, a layout being assigned on a fresh installation. What is not
+      # ordinary is a store that is still not serving after a coffee.
+      expr: system_s3_store_ready == 0
+      for: 10m
+      labels:
+        severity_level: "4"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        summary: The system object storage is not serving.
+        description: |
+          The data plane of `{{ $labels.store }}` has not been ready for ten minutes.
+
+          Every platform component holding a `SystemBucket` is affected: reads and writes to
+          its bucket fail for as long as this lasts. The buckets themselves are not lost —
+          this is a data plane that is down, not one that is gone.
+
+          What it is waiting for is written on every `SystemBucket`, in full sentences:
+
+          ```
+          d8 k get systembucket -A -o custom-columns=\
+          NS:.metadata.namespace,NAME:.metadata.name,\
+          MESSAGE:'.status.conditions[?(@.type=="StorageReady")].message'
+          ```
+
+          The usual answers are a `StorageClass` that binds nothing, a volume that cannot be
+          grown, and replicas that cannot schedule.
+
+    - alert: D8SystemS3BucketAlmostFull
+      # The quota is a hard ceiling in the backend: a bucket at it refuses writes,
+      # and the component that owns it has no other warning. Thirty minutes so a
+      # burst that drains itself does not page anyone.
+      expr: |
+        system_s3_bucket_quota_bytes > 0
+        and
+        system_s3_bucket_used_bytes / system_s3_bucket_quota_bytes > 0.85
+      for: 30m
+      labels:
+        severity_level: "5"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        summary: A system bucket is nearly full.
+        description: |
+          `{{ $labels.namespace }}/{{ $labels.name }}` is using more than 85% of its quota.
+
+          At 100% the backend refuses writes. Nothing in the platform reclaims space here —
+          a system bucket belongs to one component and only that component knows what in it
+          can go.
+
+          Raising the quota is one field, and the data plane's volumes follow it:
+
+          ```
+          d8 k -n {{ $labels.namespace }} patch systembucket {{ $labels.name }} \
+            --type=merge -p '{"spec":{"quota":"<new quota>"}}'
+          ```
+
+          The volumes grow only if the `StorageClass` allows expansion; if it does not, the
+          bucket's `StorageReady` condition says so.
+
+    - alert: D8SystemS3BucketFull
+      expr: |
+        system_s3_bucket_quota_bytes > 0
+        and
+        system_s3_bucket_used_bytes >= system_s3_bucket_quota_bytes
+      for: 5m
+      labels:
+        severity_level: "4"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        summary: A system bucket is full and refusing writes.
+        description: |
+          `{{ $labels.namespace }}/{{ $labels.name }}` has reached its quota, and the backend
+          is refusing writes to it with `QuotaExceeded`.
+
+          Whatever component owns this bucket is losing whatever it was trying to store.
+          Raise `spec.quota` on the `SystemBucket`, or free space in the bucket.

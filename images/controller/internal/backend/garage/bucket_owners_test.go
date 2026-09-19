@@ -137,7 +137,7 @@ func TestBucketOwnership(t *testing.T) {
 			Data:       map[string]string{"loki": "d8-monitoring/loki"},
 		})
 
-		state, err := d.EnsureBucket(ctx, store, "loki", "d8-other/logs")
+		state, _, err := d.EnsureBucket(ctx, store, "loki", "d8-other/logs", 1<<30)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

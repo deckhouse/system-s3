@@ -17,14 +17,14 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	goruntime "runtime"
+	"strings"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/labels"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -42,6 +42,8 @@ import (
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend/garage"
 	"github.com/deckhouse/system-s3/images/controller/internal/controller"
+	"github.com/deckhouse/system-s3/images/controller/internal/migrator"
+	"github.com/deckhouse/system-s3/images/controller/internal/sts"
 	"github.com/deckhouse/system-s3/images/controller/pkg/config"
 	"github.com/deckhouse/system-s3/images/controller/pkg/kubutils"
 )
@@ -75,6 +77,17 @@ func main() {
 	}
 	log := baseLog.Named("main")
 
+	// The same binary, started by the migration Job to copy objects between two
+	// Garage clusters. It is here rather than in an image of its own because it
+	// needs exactly what the controller already carries — the S3 client — and an
+	// image built from a second copy of this repository would be a second thing to
+	// keep in step. It talks to no Kubernetes API and returns instead of starting
+	// a manager.
+	if len(os.Args) > 1 && os.Args[1] == migrator.Command {
+		runCopier(ctx, baseLog.Named("copier"))
+		return
+	}
+
 	log.Info("starting system-s3-controller",
 		"version", version, "commit", commit, "buildDate", buildDate,
 		"goVersion", goruntime.Version(), "os", goruntime.GOOS, "arch", goruntime.GOARCH)
@@ -84,24 +97,19 @@ func main() {
 		// A Duration renders as a nanosecond integer in JSON; the string is what an
 		// operator reading the start-up line wants.
 		"requeueInterval", cfgParams.RequeueInterval.String(),
-		"singleReplica", cfgParams.SingleReplica,
-		"sizePerNode", cfgParams.SizePerNode,
+		"highAvailability", cfgParams.HighAvailability,
 		"storageClass", cfgParams.StorageClass)
 
 	// The store description is built once at startup: it is what the module
 	// settings say the data plane should be, and it replaces the custom resource
-	// the System profile used to carry (see internal/backend).
-	sizePerNode, err := resource.ParseQuantity(cfgParams.SizePerNode)
-	if err != nil {
-		log.Error("SIZE_PER_NODE is not a Kubernetes quantity", logger.Err(err), slog.String("sizePerNode", cfgParams.SizePerNode))
-		os.Exit(1)
-	}
+	// the System profile used to carry (see internal/backend). How big it is is
+	// not in it — that is the sum of the SystemBucket sizes, which changes while
+	// the controller runs and is recomputed on every convergence.
 	store := &backend.Store{
-		Name:                 backend.StoreName,
-		SingleReplica:        cfgParams.SingleReplica,
-		RecreateConfirmation: cfgParams.RecreateConfirmation,
-		SizePerNode:          sizePerNode,
-		StorageClass:         cfgParams.StorageClass,
+		Name:                     backend.StoreName,
+		HighAvailability:         cfgParams.HighAvailability,
+		HighAvailabilityExplicit: cfgParams.HighAvailabilityExplicit,
+		StorageClass:             cfgParams.StorageClass,
 	}
 
 	kConfig, err := kubutils.KubernetesDefaultConfigCreate()
@@ -121,14 +129,6 @@ func main() {
 	// Configured, not yet serving: the listener is opened by the manager below, and a
 	// port already in use is reported from mgr.Start.
 	log.Info("metrics endpoint configured", "address", cfgParams.MetricsBindAddress+monitoring.MetricsPath)
-
-	// "the label exists", whatever its value: control-plane nodes carry
-	// node-role.kubernetes.io/control-plane with an empty value.
-	controlPlaneSelector, err := labels.Parse(backend.ControlPlaneNodeLabel)
-	if err != nil {
-		log.Error("unable to build the control-plane node selector", logger.Err(err))
-		os.Exit(1)
-	}
 
 	managerOpts := manager.Options{
 		Scheme:                  scheme,
@@ -188,28 +188,32 @@ func main() {
 					}),
 				},
 
-				// The local-PV pool, and nothing else.
-				//
-				// EnsureStore runs on a 30-second ticker and on every SystemBucket
-				// reconcile, and it needs the pool on every pass. Read through the
-				// APIReader that was a quorum read of every PersistentVolume in the
-				// cluster each time: on a DKP running sds-local-volume and
-				// sds-replicated-volume that is a few thousand objects listed from etcd
-				// twice a minute, by a controller that owns nine of them.
-				&v1.PersistentVolume{}: {
+				// ConfigMaps for the same reason, and with more force: the module
+				// writes one next to every consumer's SystemBucket (the connection
+				// parameters), and a cluster has thousands of ConfigMaps that are
+				// none of its business. Everything this module creates carries the
+				// label.
+				&v1.ConfigMap{}: {
 					Label: labels.SelectorFromSet(labels.Set{
-						backend.StoreLabel: backend.StoreName,
+						v1alpha1.ManagedByLabel: v1alpha1.ManagedByValue,
 					}),
 				},
 
-				// Control-plane nodes, the only ones the data plane is placed on.
+				// Nodes are deliberately NOT cached, and neither are
+				// PersistentVolumes.
 				//
-				// The driver reads them on every pass to build the pool and the
-				// nodeAffinity that pins it. Membership changes on the timescale of a
-				// cluster edit, so a watch is both cheaper and fresher than re-listing.
-				&v1.Node{}: {
-					Label: controlPlaneSelector,
-				},
+				// The nodes the data plane may run on are the control-plane nodes,
+				// and they are read on one path: the placement reconcile, every 30
+				// seconds and only for a store in the highly available mode. One
+				// filtered list there costs less than a watch kept warm for it (see
+				// candidateHostnames).
+				//
+				// PersistentVolumes for the same kind of reason: the module creates
+				// none, and the one thing it reads them for — whether a bound volume is
+				// tied to a node — is a handful of gets per pass through the APIReader.
+				// An informer would be a watch over every PersistentVolume in a cluster
+				// that may run sds-local-volume and sds-replicated-volume, which is
+				// thousands of objects for three reads.
 			},
 		},
 	}
@@ -222,7 +226,7 @@ func main() {
 	log.Info("kubernetes manager created")
 
 	driver := garage.New(mgr.GetClient(), mgr.GetAPIReader(), mgr.GetConfig(), baseLog,
-		cfgParams.ControllerNamespace, cfgParams.GarageImage, cfgParams.ClusterDomain)
+		cfgParams.ControllerNamespace, cfgParams.GarageImage, cfgParams.ControllerImage, cfgParams.ClusterDomain)
 
 	// The data plane converges from the background loop as well as from every
 	// SystemBucket reconcile, so a cluster with no consumer yet still gets its
@@ -231,6 +235,34 @@ func main() {
 	if err := mgr.Add(storeManager); err != nil {
 		log.Error("unable to register the store manager", logger.Err(err))
 		os.Exit(1)
+	}
+
+	// The credentials endpoint: temporary keys for callers that present a
+	// ServiceAccount token and pass a SubjectAccessReview. It is registered only
+	// when the chart gave it a certificate — it hands out secret keys, and serving
+	// that over plaintext because a mount was missing is not a fallback worth
+	// having. The module logs the refusal rather than failing to start: the
+	// reconcilers are what the cluster's buckets depend on.
+	if cfgParams.STSCertFile != "" && cfgParams.STSKeyFile != "" {
+		if err := mgr.Add(&sts.Runnable{
+			Addr:     cfgParams.STSBindAddress,
+			CertFile: cfgParams.STSCertFile,
+			KeyFile:  cfgParams.STSKeyFile,
+			Log:      baseLog.Named("sts"),
+			Server: &sts.Server{
+				Reader:     mgr.GetAPIReader(),
+				Issuer:     driver,
+				Authorizer: &sts.KubeAuthorizer{Client: mgr.GetClient()},
+				Store:      store,
+				Log:        baseLog.Named("sts"),
+			},
+		}); err != nil {
+			log.Error("unable to register the credentials endpoint", logger.Err(err))
+			os.Exit(1)
+		}
+	} else {
+		log.Warn("the credentials endpoint is not served: no TLS certificate was configured",
+			"certFile", cfgParams.STSCertFile, "keyFile", cfgParams.STSKeyFile)
 	}
 
 	if err := controller.AddSystemBucketReconcilerToManager(mgr, cfgParams, baseLog, storeManager, driver); err != nil {
@@ -252,4 +284,25 @@ func main() {
 		log.Error("the manager exited with an error", logger.Err(err))
 		os.Exit(1)
 	}
+}
+
+// runCopier runs one pass of the object copy and exits: a Job that finishes is
+// the signal the migration phases wait for, and an exit code is the only part of
+// it they read. Everything else goes to the log, where an operator can watch an
+// hours-long copy make progress.
+func runCopier(ctx context.Context, log logger.Logger) {
+	cfg, err := migrator.ConfigFromEnv()
+	if err != nil {
+		log.Error("the copier cannot start", logger.Err(err))
+		os.Exit(1)
+	}
+	log.Info("copying objects between two Garage clusters",
+		"sourceEndpoint", cfg.Source.Endpoint, "targetEndpoint", cfg.Target.Endpoint,
+		"buckets", strings.Join(cfg.Buckets, ","), "workers", cfg.Workers)
+
+	if err := migrator.Run(ctx, cfg, log); err != nil {
+		log.Error("the copy did not finish", logger.Err(err))
+		os.Exit(1)
+	}
+	log.Info("every bucket is copied")
 }

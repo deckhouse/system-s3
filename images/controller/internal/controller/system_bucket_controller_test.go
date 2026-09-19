@@ -59,46 +59,21 @@ func (f *fakeConverger) Ensure(context.Context) (backend.StoreState, error) {
 type fakeDriver struct {
 	calls []string
 
-	// mintedKeys is handed out in order, one per EnsureAccess that mints.
-	mintedKeys []string
-	minted     int
-
-	deletedKeys []string
-	ensureErr   error
+	// quotas records the quota each EnsureBucket was asked for, so a spec.quota
+	// that never reaches the backend fails a test rather than a cluster.
+	quotas []int64
+	// usage is what the driver reports back about the bucket.
+	usage backend.BucketUsage
 }
 
-func (f *fakeDriver) EnsureBucket(_ context.Context, _ *backend.Store, name, owner string) (backend.BucketState, error) {
+func (f *fakeDriver) EnsureBucket(_ context.Context, _ *backend.Store, name, owner string, quota int64) (backend.BucketState, backend.BucketUsage, error) {
 	f.calls = append(f.calls, "EnsureBucket:"+name+":"+owner)
-	return backend.BucketState{Ready: true, BucketName: name}, nil
+	f.quotas = append(f.quotas, quota)
+	return backend.BucketState{Ready: true, BucketName: name}, f.usage, nil
 }
 
 func (f *fakeDriver) DeleteBucket(_ context.Context, _ *backend.Store, name, owner string) error {
 	f.calls = append(f.calls, "DeleteBucket:"+name+":"+owner)
-	return nil
-}
-
-func (f *fakeDriver) EnsureAccess(
-	_ context.Context, _ *backend.Store, _, _, prevKeyID string, mintFresh bool,
-) (backend.AccessState, error) {
-	if f.ensureErr != nil {
-		return backend.AccessState{}, f.ensureErr
-	}
-	if !mintFresh && prevKeyID != "" {
-		f.calls = append(f.calls, "EnsureAccess:reuse:"+prevKeyID)
-		return backend.AccessState{Ready: true, AccessKeyID: prevKeyID}, nil
-	}
-	key := "AK-minted"
-	if f.minted < len(f.mintedKeys) {
-		key = f.mintedKeys[f.minted]
-	}
-	f.minted++
-	f.calls = append(f.calls, "EnsureAccess:mint:"+key)
-	return backend.AccessState{Ready: true, AccessKeyID: key, SecretAccessKey: "secret-of-" + key}, nil
-}
-
-func (f *fakeDriver) DeleteAccess(_ context.Context, _ *backend.Store, keyID string) error {
-	f.calls = append(f.calls, "DeleteAccess:"+keyID)
-	f.deletedKeys = append(f.deletedKeys, keyID)
 	return nil
 }
 
@@ -136,7 +111,11 @@ func newReconciler(t *testing.T, drv Driver, objs ...client.Object) (*SystemBuck
 		APIReader: c,
 		Scheme:    s,
 		Log:       logger.NewNop(),
-		Cfg:       &config.Options{ReconcileTimeout: time.Minute, RequeueInterval: time.Second, ReadyResyncInterval: time.Minute},
+		Cfg: &config.Options{
+			ReconcileTimeout:    time.Minute,
+			RequeueInterval:     time.Second,
+			ReadyResyncInterval: time.Minute,
+		},
 		Store: &fakeConverger{
 			store: &backend.Store{Name: "system"},
 			state: backend.StoreState{Ready: true, Endpoint: "http://system-garage:3900", Region: "garage"},
@@ -151,71 +130,7 @@ func bucketFor(ns, name string) *v1alpha1.SystemBucket {
 	}}
 }
 
-// The rotation contract across two passes, which is what !5 changed and could not
-// assert: the replaced key is revoked on a later pass, never in the one that
-// minted its replacement.
-func TestRotationRevokesTheOldKeyOnlyOnTheNextPass(t *testing.T) {
-	const ns, name = "d8-monitoring", "loki"
-	drv := &fakeDriver{mintedKeys: []string{"AK1", "AK2"}}
-	bucket := bucketFor(ns, name)
-	r, c := newReconciler(t, drv, platformNS(ns), bucket)
-	ctx := context.Background()
-	req := ctrl.Request{NamespacedName: client.ObjectKey{Namespace: ns, Name: name}}
-
-	// First pass: nothing recorded yet, so a key is minted and nothing revoked.
-	if _, err := r.Reconcile(ctx, req); err != nil {
-		t.Fatalf("first reconcile: %v", err)
-	}
-	if len(drv.deletedKeys) != 0 {
-		t.Fatalf("first pass revoked %v; there was nothing to revoke", drv.deletedKeys)
-	}
-
-	// Ask for a rotation.
-	live := &v1alpha1.SystemBucket{}
-	if err := c.Get(ctx, req.NamespacedName, live); err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	live.Annotations = map[string]string{v1alpha1.RotateAnnotation: "2"}
-	if err := c.Update(ctx, live); err != nil {
-		t.Fatalf("annotate: %v", err)
-	}
-
-	// Second pass: mints the replacement and must NOT revoke yet — the new secret
-	// has to be durable first.
-	if _, err := r.Reconcile(ctx, req); err != nil {
-		t.Fatalf("rotation reconcile: %v", err)
-	}
-	if len(drv.deletedKeys) != 0 {
-		t.Fatalf("the replaced key was revoked in the same pass that minted its replacement (%v); "+
-			"a crash there leaves the consumer holding a revoked key and loses the new secret", drv.deletedKeys)
-	}
-	if err := c.Get(ctx, req.NamespacedName, live); err != nil {
-		t.Fatalf("get after rotation: %v", err)
-	}
-	if live.Status == nil || live.Status.SupersededAccessKeyID != "AK1" {
-		t.Fatalf("supersededAccessKeyID = %v, want AK1 recorded for a later revoke",
-			live.Status)
-	}
-
-	// Third pass: now it is safe, and it happens.
-	if _, err := r.Reconcile(ctx, req); err != nil {
-		t.Fatalf("third reconcile: %v", err)
-	}
-	if len(drv.deletedKeys) != 1 || drv.deletedKeys[0] != "AK1" {
-		t.Fatalf("revoked %v, want exactly [AK1] on the pass after the secret became durable", drv.deletedKeys)
-	}
-	if err := c.Get(ctx, req.NamespacedName, live); err != nil {
-		t.Fatalf("get after revoke: %v", err)
-	}
-	if live.Status.SupersededAccessKeyID != "" {
-		t.Fatalf("supersededAccessKeyID = %q after a successful revoke, want it cleared",
-			live.Status.SupersededAccessKeyID)
-	}
-}
-
-// A namespace without the heritage label is refused where the credentials are
-// issued, not only at admission: the webhook can be bypassed.
-func TestANonPlatformNamespaceGetsNoCredentials(t *testing.T) {
+func TestANonPlatformNamespaceGetsNothing(t *testing.T) {
 	const ns, name = "tenant-a", "sneaky"
 	drv := &fakeDriver{}
 	tenantNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}
@@ -229,22 +144,21 @@ func TestANonPlatformNamespaceGetsNoCredentials(t *testing.T) {
 		t.Fatalf("the backend was touched for a non-platform namespace: %v", call)
 	}
 
-	secret := &corev1.Secret{}
-	err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: credentialsSecretName(bucketFor(ns, name))}, secret)
+	cm := &corev1.ConfigMap{}
+	err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: connectionConfigMapName(bucketFor(ns, name))}, cm)
 	if !apierrors.IsNotFound(err) {
-		t.Fatalf("a credentials Secret exists in a tenant namespace (err=%v)", err)
+		t.Fatalf("a connection ConfigMap exists in a tenant namespace (err=%v)", err)
 	}
 }
 
-// Deletion order: the key is revoked, then the bucket removed, and only then the
-// finalizer released. A finalizer dropped first leaves storage in Garage that no
-// resource names.
-func TestDeleteRevokesThenRemovesThenReleases(t *testing.T) {
+// Deletion order: the bucket is removed and only then the finalizer released. A
+// finalizer dropped first leaves storage in Garage that no resource names.
+func TestDeleteRemovesTheBucketThenReleasesTheFinalizer(t *testing.T) {
 	const ns, name = "d8-monitoring", "loki"
 	drv := &fakeDriver{}
 	bucket := bucketFor(ns, name)
 	bucket.DeletionTimestamp = &metav1.Time{Time: time.Now()}
-	bucket.Status = &v1alpha1.SystemBucketStatus{AccessKeyID: "AK1", BucketName: "d8-monitoring-loki"}
+	bucket.Status = &v1alpha1.SystemBucketStatus{BucketName: "d8-monitoring-loki"}
 
 	r, c := newReconciler(t, drv, platformNS(ns), bucket)
 	ctx := context.Background()
@@ -255,8 +169,8 @@ func TestDeleteRevokesThenRemovesThenReleases(t *testing.T) {
 
 	// The owner is part of the call: the driver refuses to destroy a bucket
 	// recorded against a different SystemBucket.
-	want := []string{"DeleteAccess:AK1", "DeleteBucket:d8-monitoring-loki:d8-monitoring/loki"}
-	if len(drv.calls) != len(want) || drv.calls[0] != want[0] || drv.calls[1] != want[1] {
+	want := []string{"DeleteBucket:d8-monitoring-loki:d8-monitoring/loki"}
+	if len(drv.calls) != len(want) || drv.calls[0] != want[0] {
 		t.Fatalf("calls = %v, want %v", drv.calls, want)
 	}
 
@@ -271,11 +185,9 @@ func TestDeleteRevokesThenRemovesThenReleases(t *testing.T) {
 // would leave a bucket in Garage with no resource accountable for it.
 func TestAFailedTeardownKeepsTheFinalizer(t *testing.T) {
 	const ns, name = "d8-monitoring", "loki"
-	drv := &fakeDriver{ensureErr: nil}
+	drv := &fakeDriver{}
 	bucket := bucketFor(ns, name)
 	bucket.DeletionTimestamp = &metav1.Time{Time: time.Now()}
-	bucket.Status = &v1alpha1.SystemBucketStatus{AccessKeyID: "AK1"}
-
 	r, c := newReconciler(t, &failingDeleteDriver{fakeDriver: drv}, platformNS(ns), bucket)
 	ctx := context.Background()
 
@@ -296,152 +208,6 @@ type failingDeleteDriver struct{ *fakeDriver }
 
 func (f *failingDeleteDriver) DeleteBucket(_ context.Context, _ *backend.Store, _, _ string) error {
 	return apierrors.NewServiceUnavailable("garage is down")
-}
-
-// A Secret that exists but has lost its secret key is the same case as no Secret.
-//
-// Garage returns a key's secret half once and never again, so reusing a key whose
-// only copy is gone writes credentials that cannot work — and then reports Ready
-// over them. The consumer gets 403 on every request while the resource says Ready,
-// and it never heals: the next pass makes the same decision.
-func TestAnEmptySecretKeyForcesAFreshKey(t *testing.T) {
-	const ns, name = "d8-monitoring", "loki"
-
-	for _, tc := range []struct {
-		name     string
-		secret   *corev1.Secret
-		wantMint bool
-	}{
-		{
-			name:     "no Secret at all",
-			secret:   nil,
-			wantMint: true,
-		},
-		{
-			name: "a Secret with a usable secret key",
-			secret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: name + "-s3-credentials", Namespace: ns},
-				Data: map[string][]byte{
-					v1alpha1.SecretKeyAccessKeyID:     []byte("AK1"),
-					v1alpha1.SecretKeySecretAccessKey: []byte("secret-of-AK1"),
-				},
-			},
-			wantMint: false,
-		},
-		{
-			// Hand-edited, restored from a backup without data, or a partial first
-			// write. Existence alone used to be enough to reuse the key.
-			name: "a Secret whose secret key is empty",
-			secret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: name + "-s3-credentials", Namespace: ns},
-				Data: map[string][]byte{
-					v1alpha1.SecretKeyAccessKeyID:     []byte("AK1"),
-					v1alpha1.SecretKeySecretAccessKey: []byte(""),
-				},
-			},
-			wantMint: true,
-		},
-		{
-			name: "a Secret with no secret key at all",
-			secret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: name + "-s3-credentials", Namespace: ns},
-				Data:       map[string][]byte{v1alpha1.SecretKeyAccessKeyID: []byte("AK1")},
-			},
-			wantMint: true,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			drv := &fakeDriver{mintedKeys: []string{"AK-new"}}
-			bucket := bucketFor(ns, name)
-			bucket.Status = &v1alpha1.SystemBucketStatus{AccessKeyID: "AK1"}
-
-			objs := []client.Object{platformNS(ns), bucket}
-			if tc.secret != nil {
-				objs = append(objs, tc.secret)
-			}
-			r, _ := newReconciler(t, drv, objs...)
-
-			if _, err := r.Reconcile(context.Background(),
-				ctrl.Request{NamespacedName: client.ObjectKey{Namespace: ns, Name: name}}); err != nil {
-				t.Fatalf("reconcile: %v", err)
-			}
-
-			minted := false
-			reused := false
-			for _, c := range drv.calls {
-				switch c {
-				case "EnsureAccess:mint:AK-new":
-					minted = true
-				case "EnsureAccess:reuse:AK1":
-					reused = true
-				}
-			}
-			if minted != tc.wantMint {
-				t.Fatalf("minted a fresh key = %v, want %v (calls %v); reusing a key whose secret "+
-					"half is gone writes credentials that cannot work", minted, tc.wantMint, drv.calls)
-			}
-			if reused == tc.wantMint && tc.wantMint {
-				t.Fatalf("the key was reused as well as minted: %v", drv.calls)
-			}
-		})
-	}
-}
-
-// The credentials Secret must never carry an id from one key and the secret half
-// of another.
-//
-// Garage returns a secret key once, so a reused key's secret can only come from
-// the Secret — and the id has to come from there too. The id the driver reports
-// on a reuse pass is the one the resource's *status* named, and the status can be
-// a pass behind the Secret: the reconcile that mints a key writes the Secret
-// first and the status second, and the Secret write triggers another reconcile in
-// between. Taking only the secret half from the Secret therefore paired a stale
-// id with a fresh secret, and the consumer was left holding credentials that
-// authenticate as nothing — "Insufficient permissions" on every request, from a
-// resource reporting Ready with a Secret that looks complete.
-func TestCredentialsSecretKeepsThePairWhole(t *testing.T) {
-	ctx := context.Background()
-	const ns = "d8-monitoring"
-
-	bucket := &v1alpha1.SystemBucket{
-		ObjectMeta: metav1.ObjectMeta{Name: "loki", Namespace: ns, UID: "u1"},
-	}
-
-	// What the Secret holds: the pair that was actually issued.
-	existing := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: credentialsSecretName(bucket), Namespace: ns},
-		Data: map[string][]byte{
-			v1alpha1.SecretKeyAccessKeyID:     []byte("AK-current"),
-			v1alpha1.SecretKeySecretAccessKey: []byte("secret-of-AK-current"),
-		},
-	}
-
-	c := fake.NewClientBuilder().WithScheme(reconcilerScheme(t)).WithObjects(existing).Build()
-	r := &SystemBucketReconciler{Client: c, APIReader: c, Scheme: c.Scheme(), Log: testLogger(t)}
-
-	// The driver reports a reuse of the key the *status* named, which is one pass
-	// behind: an older key, and no secret half.
-	access := &backend.AccessState{Ready: true, AccessKeyID: "AK-stale", SecretAccessKey: ""}
-	state := &backend.StoreState{Ready: true, Endpoint: "http://garage:3900", Region: "garage"}
-
-	if _, err := r.ensureCredentialsSecret(ctx, bucket, state, access, "d8-monitoring-loki", existing); err != nil {
-		t.Fatalf("ensureCredentialsSecret: %v", err)
-	}
-
-	got := &corev1.Secret{}
-	if err := c.Get(ctx, client.ObjectKeyFromObject(existing), got); err != nil {
-		t.Fatalf("read the Secret back: %v", err)
-	}
-	id := string(got.Data[v1alpha1.SecretKeyAccessKeyID])
-	secret := string(got.Data[v1alpha1.SecretKeySecretAccessKey])
-
-	if id == "AK-stale" {
-		t.Errorf("the Secret was rewritten with the stale id %q while keeping the secret of another key: "+
-			"that pair authenticates as nothing", id)
-	}
-	if id != "AK-current" || secret != "secret-of-AK-current" {
-		t.Errorf("Secret holds (%s, %s), want the pair it already had (AK-current, secret-of-AK-current)", id, secret)
-	}
 }
 
 // The admission webhook refuses a derived bucket name S3 will not take, but a
@@ -505,7 +271,7 @@ func TestADerivedBucketNameOverTheS3LimitIsRefusedBeforeTheBackend(t *testing.T)
 func TestAnExplicitBucketNameGetsPastTheNameGuard(t *testing.T) {
 	ns := "d8-" + strings.Repeat("n", 40)
 	name := strings.Repeat("b", 30)
-	drv := &fakeDriver{mintedKeys: []string{"AK1"}}
+	drv := &fakeDriver{}
 	bucket := bucketFor(ns, name)
 	bucket.Spec.BucketName = "loki"
 	r, _ := newReconciler(t, drv, platformNS(ns), bucket)
@@ -522,5 +288,57 @@ func TestAnExplicitBucketNameGetsPastTheNameGuard(t *testing.T) {
 	}
 	if !created {
 		t.Errorf("the bucket was not created despite a valid spec.bucketName: %v", drv.calls)
+	}
+}
+
+// What a consumer is handed now: a ConfigMap saying where to go, and nothing
+// that has to be kept secret.
+//
+// The assertion that matters is the second one. The change this came from was
+// "no long-lived credentials anywhere", and the way that regresses is not a
+// missing ConfigMap — it is a Secret quietly appearing next to it again.
+func TestTheConsumerGetsConnectionParametersAndNoCredentials(t *testing.T) {
+	const ns, name = "d8-monitoring", "loki"
+	drv := &fakeDriver{}
+	r, c := newReconciler(t, drv, platformNS(ns), bucketFor(ns, name))
+	ctx := context.Background()
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKey{Namespace: ns, Name: name}}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	cm := &corev1.ConfigMap{}
+	key := client.ObjectKey{Namespace: ns, Name: connectionConfigMapName(bucketFor(ns, name))}
+	if err := c.Get(ctx, key, cm); err != nil {
+		t.Fatalf("the connection ConfigMap was not written: %v", err)
+	}
+	for _, k := range []string{
+		v1alpha1.ConnectionKeyS3Endpoint,
+		v1alpha1.ConnectionKeyS3Region,
+		v1alpha1.ConnectionKeyS3Bucket,
+	} {
+		if cm.Data[k] == "" {
+			t.Errorf("connection ConfigMap has no %s: %v", k, cm.Data)
+		}
+	}
+	if cm.Data[v1alpha1.ConnectionKeyS3Bucket] != ns+"-"+name {
+		t.Errorf("bucket = %q, want the derived name", cm.Data[v1alpha1.ConnectionKeyS3Bucket])
+	}
+
+	secrets := &corev1.SecretList{}
+	if err := c.List(ctx, secrets, client.InNamespace(ns)); err != nil {
+		t.Fatalf("list secrets: %v", err)
+	}
+	if len(secrets.Items) != 0 {
+		t.Errorf("a Secret was written for the consumer: %v — the module hands out no long-lived credentials",
+			secrets.Items[0].Name)
+	}
+
+	live := &v1alpha1.SystemBucket{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, live); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if live.Status == nil || live.Status.ConnectionRef == nil || live.Status.ConnectionRef.Name != cm.Name {
+		t.Errorf("status.connectionRef = %v, want %s", live.Status.ConnectionRef, cm.Name)
 	}
 }

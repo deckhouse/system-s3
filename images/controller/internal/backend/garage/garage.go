@@ -38,7 +38,9 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -51,7 +53,7 @@ import (
 
 // garageVersion is the Garage release this driver targets. Keep it in sync with
 // the upstream tag pinned in images/garage/werf.inc.yaml.
-const garageVersion = "v2.3.0"
+const garageVersion = "v2.4.1"
 
 // Keys in the Garage secret.
 const (
@@ -64,12 +66,17 @@ const (
 // caching every pod in the cluster); the module namespace; and the Garage image
 // reference.
 type Driver struct {
-	client        client.Client
-	apiReader     client.Reader
-	restConfig    *rest.Config
-	log           logger.Logger
-	namespace     string
-	image         string
+	client     client.Client
+	apiReader  client.Reader
+	restConfig *rest.Config
+	log        logger.Logger
+	namespace  string
+	image      string
+	// copierImage is the controller's own image, which the migration Job runs
+	// with a different argument (see migrator.Command). The controller cannot
+	// derive it — a pod does not know the reference it was pulled from once it is
+	// running — so the chart passes it in, the same way it passes the Garage one.
+	copierImage   string
 	clusterDomain string
 
 	// The exec clientset is built once. Capturing node identities execs into
@@ -95,7 +102,7 @@ func (d *Driver) clientset() (*kubernetes.Clientset, error) {
 }
 
 // New builds a Garage Driver.
-func New(c client.Client, apiReader client.Reader, restConfig *rest.Config, log logger.Logger, namespace, image, clusterDomain string) *Driver {
+func New(c client.Client, apiReader client.Reader, restConfig *rest.Config, log logger.Logger, namespace, image, copierImage, clusterDomain string) *Driver {
 	return &Driver{
 		client:        c,
 		apiReader:     apiReader,
@@ -103,18 +110,50 @@ func New(c client.Client, apiReader client.Reader, restConfig *rest.Config, log 
 		log:           log.Named("garage"),
 		namespace:     namespace,
 		image:         image,
+		copierImage:   copierImage,
 		clusterDomain: clusterDomain,
 	}
 }
 
 // EnsureStore reconciles the Garage data plane and reports its state.
-func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (backend.StoreState, error) {
-	state := backend.StoreState{Version: garageVersion}
+//
+// The results are named because of the deferred note below: a mode change that
+// is not applied has to reach the operator from EVERY exit of this function, and
+// there are a dozen of them.
+func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state backend.StoreState, err error) {
+	state = backend.StoreState{Version: garageVersion}
 
 	if d.image == "" {
 		state.Message = "GARAGE_IMAGE is not configured on the controller"
 		return state, nil
 	}
+
+	// No StorageClass, no data plane. The module orders its volumes like any other
+	// workload and has nothing of its own to fall back to: the previous
+	// implementation provisioned hostPath volumes on the control-plane nodes,
+	// which is exactly what a platform with storage modules should not be doing
+	// behind their back.
+	//
+	// Nothing is created in this state — not even the Secret above is followed by
+	// a workload — and the reason is on every SystemBucket rather than in the log
+	// alone.
+	if store.StorageClass == "" {
+		state.Message = "no StorageClass is configured for the system object storage: " +
+			"set storageClass in the module settings, or global.modules.storageClass, " +
+			"or mark a StorageClass as the cluster default"
+		return state, nil
+	}
+
+	// Which data plane is being reconciled is the first thing to settle, because
+	// every object below is named after it. There is one plane on all but the
+	// hours a migration takes; while a migration runs there are two, and this pass
+	// belongs to the one the endpoint points at — the incoming plane is built by
+	// the migration itself (see reconcileMigration), on its own terms.
+	migration, err := d.loadMigrationState(ctx, store)
+	if err != nil {
+		return state, fmt.Errorf("read the migration state: %w", err)
+	}
+	store = planeOf(store, migration.serving, store.HighAvailability, store.StorageClass)
 
 	if err := d.ensureSecret(ctx, store); err != nil {
 		return state, fmt.Errorf("ensure secret: %w", err)
@@ -126,58 +165,66 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (backend
 		return state, fmt.Errorf("read pinned store state: %w", err)
 	}
 
-	// A replica-count switch (the singleReplica module setting toggled) cannot be
-	// applied in place: it changes the replication factor, which Garage refuses
-	// to do on a live cluster. Tear the data plane down instead and let the rest
-	// of this reconcile rebuild it empty at the next incarnation. This DESTROYS
-	// the stored objects — documented on the setting.
-	if want := initialReplicationFactor(store); pinned.exists && pinned.rf != want {
-		// And not before the operator has said so in the same change.
-		//
-		// The module declares this as a CEL rule on its settings too, which is the
-		// better place to refuse: the edit never lands. But that rule cannot be the
-		// guarantee. Deckhouse skips transition rules when there is no previous
-		// value to compare with, so a ModuleConfig that carried no settings until
-		// now — everything on defaults, the common case — gets the flip through
-		// unexamined; and the rule is not evaluated at all before DKP 1.77. An e2e
-		// run flipped singleReplica on such a ModuleConfig and the API server took
-		// it without a word.
-		//
-		// The teardown happens here, so the last word is here.
-		if store.RecreateConfirmation != backend.RecreateConfirmationValue {
-			state.Message = fmt.Sprintf(
-				"refusing to recreate the data plane: storage.singleReplica changed (replication factor %d -> %d), "+
-					"which destroys every object in the system object storage. Set storage.recreateConfirmation to %q "+
-					"in the same ModuleConfig to proceed, or put storage.singleReplica back",
-				pinned.rf, want, backend.RecreateConfirmationValue)
-			d.log.Error("refusing a replica-count switch with no acknowledgement",
-				"store", store.Name, "pinnedReplicationFactor", pinned.rf, "wantedReplicationFactor", want)
-			return state, nil
-		}
+	// The high-availability mode and the StorageClass cannot be changed where the
+	// data plane stands: Garage refuses a replication_factor change on a live
+	// cluster, and a bound claim cannot be re-ordered from another class. Either
+	// change is therefore a migration to a second Garage cluster, which this pass
+	// starts and advances at the end, once it has found the cluster it is moving
+	// away from healthy (see reconcileMigration).
+	//
+	// What the configured class is compared against is the class the claims were
+	// actually created with, which is the only record of it — the module keeps no
+	// pinned copy of the class the way it pins the replication factor.
+	boundClass, err := d.boundStorageClass(ctx, store)
+	if err != nil {
+		return state, fmt.Errorf("read the StorageClass of the data plane volumes: %w", err)
+	}
 
-		done, msg, err := d.teardownDataPlane(ctx, store)
-		if err != nil {
-			return state, fmt.Errorf("recreate data plane: %w", err)
-		}
-		if !done {
-			state.Message = msg
-			return state, nil
-		}
-		pinned = pinnedState{rf: want, incarnation: pinned.incarnation + 1, exists: true}
-		d.log.Info("store torn down for a replica-count switch; rebuilding empty",
-			"store", store.Name, "incarnation", pinned.incarnation, "replicationFactor", pinned.rf)
+	// From here on the pass works on the store as it RUNS, not as it is asked to
+	// run. The pinned replication factor is the shape of the live cluster — the
+	// replica count, the layout, the placement rules and the volumes all follow it
+	// — and a mode that was edited must not move any of them: what moves the store
+	// to the new mode is the migration, in its own time, and this cluster keeps
+	// serving unchanged until the endpoint is switched.
+	//
+	// Without this the refusal was only half true: the message said the factor
+	// stays at 1, and the workload was scaled to the three replicas the new mode
+	// asked for, at factor 1. An e2e run caught it as a StatefulSet rolling out
+	// underneath a store that had just been told nothing would change.
+	desired := store
+	store = storeAsPinned(store, pinned)
+
+	// A migration is advanced at the END of this function, and only by a pass that
+	// found the serving cluster healthy. That leaves every earlier return — a
+	// cluster still rolling out, a volume still growing — with nothing to say
+	// about a mode or a class that was edited hours ago, which is exactly the
+	// moment an operator goes looking. So the pending move is reported from every
+	// exit, and suppressed on the one path that has already reported it in more
+	// detail.
+	migrationAdvanced := false
+	if plan := migrationTrigger(desired, store, boundClass); plan.reason != "" || migration.migrating() {
+		note := pendingMigrationNote(plan, migration)
+		defer func() {
+			if err != nil || migrationAdvanced {
+				return // the caller reports the error; the phase reported itself
+			}
+			state.Message = appendNote(state.Message, note)
+		}()
 	}
 
 	rf := pinned.rf
 	cfgHash := configHash(renderConfig(rf))
-	if err := d.apply(ctx, buildConfigMap(store, d.namespace, rf, pinned.incarnation)); err != nil {
+	if err := d.apply(ctx, buildConfigMap(store, d.namespace, rf)); err != nil {
 		return state, fmt.Errorf("ensure configmap: %w", err)
 	}
 	if err := d.apply(ctx, buildServiceAccount(store, d.namespace)); err != nil {
 		return state, fmt.Errorf("ensure serviceaccount: %w", err)
 	}
-	if err := d.apply(ctx, buildS3Service(store, d.namespace)); err != nil {
-		return state, fmt.Errorf("ensure s3 service: %w", err)
+	if err := d.apply(ctx, buildPlaneService(store, d.namespace)); err != nil {
+		return state, fmt.Errorf("ensure the plane service: %w", err)
+	}
+	if err := d.apply(ctx, buildEndpointService(store, d.namespace, endpointSelector(store, migration))); err != nil {
+		return state, fmt.Errorf("ensure the endpoint service: %w", err)
 	}
 	if err := d.apply(ctx, buildRPCService(store, d.namespace)); err != nil {
 		return state, fmt.Errorf("ensure rpc service: %w", err)
@@ -186,15 +233,11 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (backend
 	state.Endpoint = s3Endpoint(store, d.namespace, d.clusterDomain)
 	state.Region = "garage"
 
-	// The store is backed by node-sticky local PVs the controller provisions
-	// itself; the pool must exist before the StatefulSet's PVCs try to bind.
-	if err := d.ensureLocalPVs(ctx, store, pinned.incarnation); err != nil {
-		return state, fmt.Errorf("ensure local PVs: %w", err)
-	}
-	// Persist each replica's Garage node identity before any placement move, so
-	// a recycled replica (fresh empty PV on another master) rejoins with its
-	// stable node ID instead of generating a new one (which strands the old ID
-	// as a dead node and churns the layout beyond recovery on consolidate).
+	// Persist each replica's Garage node identity before any placement move, so a
+	// replica that comes back on an empty volume (a move of a node-pinned volume)
+	// rejoins with its stable node ID instead of generating a new one (which
+	// strands the old ID as a dead node and churns the layout beyond recovery on
+	// consolidate).
 	identitiesMissing, err := d.ensureNodeIdentities(ctx, store)
 	if err != nil {
 		return state, fmt.Errorf("ensure node identities: %w", err)
@@ -219,20 +262,52 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (backend
 		d.log.Error("placement is not converging", "store", store.Name, "reason", placementMsg)
 	}
 
-	workloadReady, workloadMsg, err := d.ensureWorkload(ctx, store, cfgHash)
+	// What the store is for decides how big it is: the sum of what its consumers
+	// asked for, plus the room a sum of quotas does not account for.
+	sumBytes, err := d.desiredBucketBytes(ctx)
+	if err != nil {
+		return state, fmt.Errorf("sum the SystemBucket sizes: %w", err)
+	}
+	volumeSize := volumeSizeFor(sumBytes)
+
+	// Claims first, workload second. The claims are what actually hold the space;
+	// the template is brought in line below so a replica created later asks for the
+	// same size.
+	_, growMsg := d.ensureVolumeCapacity(ctx, store, volumeSize)
+	if growMsg != "" {
+		d.log.Error("the data plane volumes could not be grown", "store", store.Name, "reason", growMsg)
+		defer func() {
+			if err != nil {
+				return
+			}
+			state.Message = appendNote(state.Message, growMsg)
+		}()
+	}
+
+	workloadReady, workloadMsg, err := d.ensureWorkload(ctx, store, cfgHash, volumeSize)
+	if err != nil {
+		return state, err
+	}
+
+	// The disruption budget belongs to a cluster that has a quorum to lose, so it
+	// is created in the highly available mode and removed outside it — a single
+	// replica has nothing to protect, and a budget over one pod would only stand
+	// in the way of a drain.
+	if err := d.ensureDisruptionBudget(ctx, store); err != nil {
+		return state, err
+	}
+
+	// The mesh is reconciled whether or not the pods are ready, and the order is
+	// the point: a pod becomes ready BECAUSE the layout reached it (see the
+	// readiness probe), so waiting for readiness first would be waiting for
+	// something this call is what causes.
+	mesh, err := d.ensureMeshAndLayout(ctx, store, volumeSize)
 	if err != nil {
 		return state, err
 	}
 	if !workloadReady {
-		state.Message = workloadMsg
+		state.Message = appendNote(workloadMsg, mesh.msg)
 		return state, nil
-	}
-
-	// Workloads are up: connect the RPC peers and assign the Garage cluster
-	// layout.
-	mesh, err := d.ensureMeshAndLayout(ctx, store)
-	if err != nil {
-		return state, err
 	}
 	state.TotalCapacity = mesh.total
 	state.Ready = mesh.ready
@@ -252,21 +327,106 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (backend
 			"%s; node identity not captured for %d replica(s): a placement move would give them new node IDs",
 			state.Message, identitiesMissing)
 	}
+
+	// Last, and only on a pass that got this far. A migration is never started,
+	// advanced or cut over while the cluster it is moving away from is not in a
+	// state to be moved away from — every return above this point is either an
+	// error or a cluster that is still converging, and both are answers of the
+	// form "not now".
+	migrationMsg, err := d.advanceMigration(ctx, desired, store, boundClass, migration, sumBytes)
+	if err != nil {
+		return state, err
+	}
+	migrationAdvanced = true
+	state.Message = appendNote(state.Message, migrationMsg)
+	state.MigrationPhase, state.MigrationStartedAt = reportedMigration(migration)
 	return state, nil
 }
 
-// pinnedState is the store state the controller pins at init and reads back
-// afterwards instead of recomputing: the Garage replication factor and the
-// data-plane incarnation. exists reports whether the garage.toml ConfigMap
-// holding it was found, i.e. whether the store was ever initialized.
-type pinnedState struct {
-	rf          int32
-	incarnation int32
-	exists      bool
+// ensureDisruptionBudget creates the data plane's PodDisruptionBudget in the
+// highly available mode and removes it outside that mode.
+//
+// Removal matters as much as creation: a budget left behind over a single
+// replica allows no disruption at all, and the first drain of the node it sits
+// on would wait forever on a store that has nothing to protect.
+func (d *Driver) ensureDisruptionBudget(ctx context.Context, store *backend.Store) error {
+	if desiredReplicas(store) > 1 {
+		if err := d.apply(ctx, buildPodDisruptionBudget(store, d.namespace)); err != nil {
+			return fmt.Errorf("ensure the disruption budget: %w", err)
+		}
+		return nil
+	}
+
+	pdb := &policyv1.PodDisruptionBudget{}
+	pdb.Name, pdb.Namespace = resourceName(store), d.namespace
+	if err := d.client.Delete(ctx, pdb); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("remove the disruption budget: %w", err)
+	}
+	return nil
 }
 
-// pinnedState returns the replication_factor to bake into garage.toml plus the
-// data-plane incarnation. Garage cannot change replication_factor on a live
+// storeAsPinned returns the store as the running cluster actually is: the
+// high-availability mode implied by the plane's pinned replication factor rather
+// than the one the settings ask for.
+//
+// A plane that was never initialised is returned unchanged — there is nothing
+// pinned yet, and the settings are exactly what it should be built from.
+func storeAsPinned(store *backend.Store, pinned pinnedState) *backend.Store {
+	if !pinned.exists {
+		return store
+	}
+	running := *store
+	running.HighAvailability = pinned.rf >= replicasHA
+	return &running
+}
+
+// appendNote joins a note to whatever the pass reported, keeping both readable
+// when either side has nothing to say.
+//
+// The empty note is not a theoretical case: the migration machine has passes
+// that do nothing and say nothing, and a message ending in a bare "; " is a
+// message an operator reads as truncated.
+func appendNote(message, note string) string {
+	switch {
+	case note == "":
+		return message
+	case message == "":
+		return note
+	default:
+		return fmt.Sprintf("%s; %s", message, note)
+	}
+}
+
+// boundStorageClass is the StorageClass the data plane's volumes were actually
+// created with, read from the first replica's claim. Empty when the store has no
+// claims yet (a fresh installation), which is the case where there is nothing to
+// disagree with.
+func (d *Driver) boundStorageClass(ctx context.Context, store *backend.Store) (string, error) {
+	pvc := &corev1.PersistentVolumeClaim{}
+	key := client.ObjectKey{Namespace: d.namespace, Name: fmt.Sprintf("data-%s-0", resourceName(store))}
+	if err := d.apiReader.Get(ctx, key, pvc); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	if pvc.Spec.StorageClassName == nil {
+		return "", nil
+	}
+	return *pvc.Spec.StorageClassName, nil
+}
+
+// pinnedState is the state one data plane pins at init and the controller reads
+// back afterwards instead of recomputing: the Garage replication factor. exists
+// reports whether the garage.toml ConfigMap holding it was found, i.e. whether
+// this plane was ever initialized.
+type pinnedState struct {
+	rf     int32
+	exists bool
+}
+
+// pinnedState returns the replication_factor to bake into garage.toml. Garage
+// cannot change replication_factor on a live
 // cluster, so it is decided ONCE at cluster init and then pinned: the value is
 // read back from the running garage.toml on every subsequent reconcile and never
 // recomputed from the current node count. This keeps the factor stable across
@@ -275,16 +435,17 @@ type pinnedState struct {
 // cluster merely degrades to read-only (data intact) if the live node count
 // drops below it.
 //
-// The only sanctioned way out of a pinned factor is an explicit recreate of the
-// data plane (a replica-count switch), which EnsureStore performs by tearing
-// everything down and bumping the incarnation.
+// There is no way out of a pinned factor in this release: a change of the
+// high-availability mode is reported and not applied (see EnsureStore). Moving a
+// store to the other mode means migrating its data to a second Garage cluster,
+// which a later release performs and which bumps the incarnation.
 func (d *Driver) pinnedState(ctx context.Context, store *backend.Store) (pinnedState, error) {
 	existing := &corev1.ConfigMap{}
 	err := d.client.Get(ctx, client.ObjectKey{Namespace: d.namespace, Name: configName(store)}, existing)
 	switch {
 	case apierrors.IsNotFound(err):
 		// First init: no pinned factor yet, compute it once.
-		return pinnedState{rf: initialReplicationFactor(store), incarnation: firstIncarnation}, nil
+		return pinnedState{rf: initialReplicationFactor(store)}, nil
 	case err != nil:
 		return pinnedState{}, err
 	}
@@ -296,7 +457,7 @@ func (d *Driver) pinnedState(ctx context.Context, store *backend.Store) (pinnedS
 	if rf <= 0 {
 		return pinnedState{}, fmt.Errorf("garage.toml ConfigMap %q exists but its replication_factor is absent or unparseable; refusing to recompute (would risk a replication_factor change on a live cluster)", configName(store))
 	}
-	return pinnedState{rf: rf, incarnation: incarnationFromConfigMap(existing), exists: true}, nil
+	return pinnedState{rf: rf, exists: true}, nil
 }
 
 // initialReplicationFactor computes the factor to pin at first init: the
@@ -350,8 +511,24 @@ func (d *Driver) ensureSecret(ctx context.Context, store *backend.Store) error {
 // ensureWorkload creates/updates the StatefulSet — a fixed replica count on
 // control-plane nodes over node-sticky local volumes — and reports whether its
 // pods are ready.
-func (d *Driver) ensureWorkload(ctx context.Context, store *backend.Store, cfgHash string) (bool, string, error) {
-	sts := buildStatefulSet(store, d.namespace, d.image, cfgHash)
+func (d *Driver) ensureWorkload(ctx context.Context, store *backend.Store, cfgHash string, volumeSize resource.Quantity) (bool, string, error) {
+	// A volumeClaimTemplate cannot be updated, so a workload asking for the old
+	// size is deleted with its pods left running and created again below. The data
+	// plane keeps serving across the gap; what it goes without, for the time
+	// between the two calls, is the controller that would replace a pod that died.
+	current, err := d.statefulSetVolumeSize(ctx, store)
+	if err != nil {
+		return false, "", fmt.Errorf("read the statefulset volume size: %w", err)
+	}
+	if !current.IsZero() && current.Cmp(volumeSize) != 0 {
+		d.log.Info("recreating the data-plane workload for a new volume size",
+			"store", store.Name, "from", current.String(), "to", volumeSize.String())
+		if err := d.dropStatefulSetKeepingPods(ctx, store); err != nil {
+			return false, "", fmt.Errorf("drop the statefulset for a volume resize: %w", err)
+		}
+	}
+
+	sts := buildStatefulSet(store, d.namespace, d.image, cfgHash, volumeSize)
 	if err := d.apply(ctx, sts); err != nil {
 		return false, "", fmt.Errorf("ensure statefulset: %w", err)
 	}
@@ -454,6 +631,19 @@ func mergeDesired(live, desired client.Object) error {
 	case *corev1.ServiceAccount:
 		l.AutomountServiceAccountToken = desired.(*corev1.ServiceAccount).AutomountServiceAccountToken
 		l.Labels = desired.GetLabels()
+	case *policyv1.PodDisruptionBudget:
+		l.Labels = desired.(*policyv1.PodDisruptionBudget).Labels
+		// The selector is immutable on a PodDisruptionBudget in the API versions
+		// this module runs against, so it is set at creation and left alone; what
+		// can change is the budget itself.
+		l.Spec.MaxUnavailable = desired.(*policyv1.PodDisruptionBudget).Spec.MaxUnavailable
+		l.Spec.MinAvailable = desired.(*policyv1.PodDisruptionBudget).Spec.MinAvailable
+	case *corev1.Secret:
+		// Data only. Type is immutable once the Secret exists, and the one Secret
+		// applied this way — the copier's credentials — is written whole on every
+		// pass anyway: its content is two key pairs that are re-checked against
+		// their clusters before they are stored.
+		l.Data = desired.(*corev1.Secret).Data
 	case *corev1.Service:
 		d := desired.(*corev1.Service)
 		l.Labels = d.Labels

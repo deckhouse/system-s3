@@ -1,77 +1,69 @@
+x-config-version: 3
 type: object
 properties:
-  storage:
-    type: object
-    default: {}
+  highAvailability:
+    type: boolean
+    x-examples: [true, false]
     description: |
-      Settings of the system object storage data plane: a Garage cluster on the
-      control-plane nodes, backed by node-sticky local volumes.
+      Overrides the platform's high-availability mode for the system object
+      storage.
 
-      It runs three replicas with a replication factor of 3, independent of the
-      control-plane node count, unless `singleReplica` reduces it to one. There is
-      no custom resource for it — the module runs exactly one data plane, and
-      these are all its knobs.
-    properties:
-      recreateConfirmation:
-        type: string
-        description: |
-          Acknowledges that changing `singleReplica` destroys everything stored
-          in the system object storage.
+      Left unset it follows `global.highAvailability`, and with that unset too,
+      whether the control plane itself is highly available (more than one
+      master).
 
-          Required in the same change that flips `singleReplica`, and ignored
-          otherwise. Set it to
-          `i-understand-this-destroys-all-system-object-data`.
+      The mode decides the shape of the data plane: highly available means three
+      Garage replicas with a replication factor of 3, and not highly available
+      means a single replica with a replication factor of 1 — a third of the
+      footprint, no redundancy, and the store is unavailable while its pod is
+      down.
 
-          Without it the controller refuses to touch the data plane: it keeps
-          running with the replica count it has, and every `SystemBucket` reports
-          the refusal in its `StorageReady` condition, naming this setting.
-          Nothing is destroyed and nothing is blocked — the edit itself is
-          accepted, it simply is not acted upon.
+      Left unset, the mode is DERIVED from the cluster, and one direction of that
+      is not acted on: a control plane that loses masters starts reading as not
+      highly available, and the store keeps its three replicas anyway. Dropping to
+      one is a loss of redundancy, and losing masters is not a request for it — it
+      happens when the cluster can least afford it. The store moves to a single
+      replica only when this setting says so out loud. The other direction needs
+      no asking: masters coming back grows the store on its own.
 
-          Remove it once the change is applied: left in place it would
-          authorise the next flip as well, and the point of it is to be a
-          deliberate gesture per change rather than a setting.
-      singleReplica:
-        type: boolean
-        default: false
-        description: |
-          Run the system object storage as a single Garage replica
-          (`replication_factor: 1`) instead of the default three.
+      Changing the mode on an installation that already holds data is performed
+      as a migration, because Garage cannot change its replication factor on a
+      live cluster: the module builds a second Garage cluster beside the first,
+      copies the objects into it and moves the endpoint onto it. Both clusters
+      exist at once for the length of it, so the storage it needs is up to twice
+      the usual. What consumers see is a few minutes, during the switch itself,
+      in which writes are refused while reads keep working — the endpoint keeps
+      its address and every key keeps working, so no credentials `Secret` has to
+      be re-read. Progress is reported in every `SystemBucket`'s `StorageReady`
+      condition, and the cluster migrated away from is kept read-only for 24
+      hours afterwards.
+  storageClass:
+    type: string
+    x-examples: ["ceph-csi-rbd", "localpath-system"]
+    description: |
+      StorageClass the system object storage orders its volumes from — one
+      PersistentVolumeClaim per Garage replica.
 
-          The replica is placed on one control-plane node and **never migrates
-          between masters**: its data lives on that node's local volume and there
-          is no second copy to re-replicate from. If that node is removed or
-          stays down, the system storage is unavailable until it returns (the data
-          on its disk is not touched), and the controller will not move the
-          replica for you.
+      Left unset it follows `global.modules.storageClass`, and with that unset
+      too, the cluster's default StorageClass.
 
-          Use it to cut the footprint of the system storage on small or
-          non-production installations. Do not use it where the platform data in
-          the system buckets must survive the loss of a control-plane node.
+      A StorageClass is required: the module has no storage of its own to fall
+      back to, so an installation where none of the three resolves brings up no
+      data plane at all and says so in every `SystemBucket`'s `StorageReady`
+      condition.
 
-          > **Toggling this setting recreates the data plane and DESTROYS
-          > everything stored in it.** Garage cannot change its replication factor
-          > on a live cluster, so the controller tears the data plane down
-          > (StatefulSet, volumes, node identities) and rebuilds it empty on fresh
-          > directories, in both directions (on and off). Buckets are recreated and
-          > access keys are re-issued automatically, but the objects are gone —
-          > back up anything you need first. The previous data directories are left
-          > on the control-plane nodes under
-          > `/var/lib/deckhouse/system-s3/garage/system` and can be removed
-          > manually once you no longer need them.
-      sizePerNode:
-        type: string
-        default: 10Gi
-        pattern: '^[0-9]+(\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki)?$'
-        description: |
-          Capacity of the node-sticky local volume provisioned per replica, as a
-          Kubernetes quantity.
+      Which class to choose is a durability decision. A class whose volumes are
+      pinned to a node (a local class) ties each replica's data to the node it
+      first landed on: the replica's copy is lost with that node and is rebuilt
+      from the others, which the highly available mode survives and the single
+      replica does not. A class whose volumes follow the pod (a network class)
+      keeps the data across a node's replacement.
 
-          The volume is a `hostPath` directory on the control-plane node, so the
-          value is nominal: Kubernetes does not enforce it, and the replica can
-          use as much as the node's filesystem has. Raising it after the fact does
-          not move data — it only changes the size the new PersistentVolumes of the
-          pool are created with.
+      Changing it on an installation that already holds data is performed as the
+      same migration a change of `highAvailability` is, because the volumes of a
+      running store cannot be re-ordered from another class in place. Putting the
+      setting back before the switch happens calls the migration off and removes
+      the half-built cluster.
   logLevel:
     type: string
     enum:

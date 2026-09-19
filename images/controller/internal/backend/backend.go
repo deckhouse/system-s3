@@ -29,6 +29,8 @@ limitations under the License.
 package backend
 
 import (
+	"time"
+
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/deckhouse/sds-common-lib/objectstorage"
@@ -40,29 +42,26 @@ import (
 // coupling the split was meant to remove.
 const StoreName = "system"
 
-// RecreateConfirmationValue is the exact string an operator has to put in
-// storage.recreateConfirmation to authorise a replica-count switch. It is spelled
-// out rather than parsed loosely on purpose: the point of the gesture is that it
-// cannot be made by accident, and it says what it does.
-const RecreateConfirmationValue = "i-understand-this-destroys-all-system-object-data"
-
-// The labels below name the cluster-scoped objects the driver owns. They live
-// here, next to StoreName, because two things far apart need the same strings:
-// the driver, which sets and selects on them, and the manager's cache
-// configuration in main, which restricts its Node and PersistentVolume
-// informers to exactly these objects.
+// The labels below are shared between the driver, which sets and selects on
+// them, and the manager's cache configuration in main, which restricts its Node
+// informer to exactly these objects.
 const (
 	// StoreLabel carries the store name on every object the driver creates (used
 	// as a selector, e.g. to list the local-PV pool).
 	StoreLabel = "storage.deckhouse.io/system-store"
 
-	// LocalNodeLabel marks a controller-provisioned local PV and records the node
-	// (its kubernetes.io/hostname value) its nodeAffinity pins it to. Its
-	// presence distinguishes pool PVs from any other PV.
-	LocalNodeLabel = "storage.deckhouse.io/system-local-node"
-
-	// ControlPlaneNodeLabel marks control-plane nodes: the only nodes the data
-	// plane is scheduled on, and so the only nodes the module ever reads.
+	// ControlPlaneNodeLabel marks the nodes the data plane runs on, and the only
+	// ones it may run on.
+	//
+	// The store holds the platform's own data — what a cluster has to be able to
+	// read while it is being repaired — so it lives on the nodes whose
+	// availability the cluster already guarantees, and not on the system nodes a
+	// NodeGroup grows, shrinks and replaces underneath it.
+	//
+	// It is read twice: the scheduler is given it as a required node affinity,
+	// and the placement reconcile counts the nodes the replicas can be spread
+	// across. The two must agree, or the reconcile chases a placement the
+	// scheduler will not produce.
 	ControlPlaneNodeLabel = "node-role.kubernetes.io/control-plane"
 )
 
@@ -75,30 +74,53 @@ type Store struct {
 	// user-chosen: there is only one store.
 	Name string
 
-	// SingleReplica runs one Garage replica with replication factor 1 instead
-	// of the default three. Flipping it forces a recreate of the data plane —
-	// Garage cannot change its replication factor in place — which destroys the
-	// stored objects.
-	SingleReplica bool
-
-	// RecreateConfirmation is the acknowledgement an operator has to set in the
-	// same change that flips SingleReplica, because that change destroys every
-	// object in the store.
+	// HighAvailability is the platform's high-availability mode as the chart
+	// resolved it: three Garage replicas with replication factor 3 when true, a
+	// single replica with factor 1 when false.
 	//
-	// The module also declares this as a CEL rule on its settings, which is the
-	// better place to refuse — the edit never lands. But that rule cannot be the
-	// guarantee: Deckhouse skips transition rules when there is no previous value
-	// to transition from, so a ModuleConfig that carried no settings at all until
-	// now (the common case: everything on defaults) gets the flip through
-	// unchecked, and the rule is not evaluated at all before DKP 1.77. The
-	// controller is where the teardown actually happens, so the last word is here.
-	RecreateConfirmation string
+	// It is desired state only. The factor the live cluster runs with is pinned in
+	// the data plane's own ConfigMap and read back from there, because Garage
+	// cannot change its replication factor on a live cluster: a store built in one
+	// mode keeps running in it until a migration moves the data to a cluster built
+	// in the other. So this field says what the cluster asks for, and a
+	// disagreement with the pinned factor is reported rather than acted on.
+	HighAvailability bool
 
-	// SizePerNode is the capacity of the node-sticky local volume provisioned
-	// per replica.
-	SizePerNode resource.Quantity
+	// HighAvailabilityExplicit reports that HighAvailability was written by
+	// somebody rather than derived from the number of masters the cluster has.
+	//
+	// It exists for one decision and is worth the field for it. The derived value
+	// flips on its own when masters are lost, and "the cluster is down to one
+	// master" must not be read as "please move the system storage to a single
+	// replica": that is a loss of redundancy nobody asked for, arrived at exactly
+	// when the cluster is least able to afford it. A store therefore only ever
+	// shrinks when the setting says so out loud. Growing is not guarded — masters
+	// coming back is good news, and acting on it costs nothing but a migration.
+	HighAvailabilityExplicit bool
 
-	// StorageClass is the managed StorageClass those local volumes belong to.
+	// Incarnation is which of the store's data planes this description refers to.
+	//
+	// There is normally one, and it is the first. A migration is the exception: the
+	// store runs two Garage clusters for as long as the copy takes — the one
+	// serving and the one being filled — and every object of each is named after
+	// its incarnation. The endpoint Service is the one thing that is not, because
+	// it is what consumers hold.
+	//
+	// It is part of the store description rather than a parameter on every call
+	// because "which data plane" is the same kind of fact as "which store": the
+	// driver's whole surface is written against one, and a migration is two passes
+	// over two descriptions.
+	Incarnation int32
+
+	// StorageClass is the class the data plane's volumes are ordered from. Empty
+	// when the cluster offers none, in which case no data plane is created at all
+	// — there is nothing for the module to fall back to, and inventing storage on
+	// the control-plane nodes behind the platform's storage modules is what this
+	// replaced.
+	//
+	// Like HighAvailability it is desired state: the claims of a running store
+	// were created with whatever class was configured then, and changing it needs
+	// the same migration.
 	StorageClass string
 }
 
@@ -131,6 +153,17 @@ type StoreState struct {
 	// secret and admin token the controller manages the store with. Empty until
 	// the Secret exists.
 	AdminSecretName string
+
+	// MigrationPhase is where a move between two Garage clusters has got to, and
+	// MigrationStartedAt is when it began. Empty and zero when the store has one
+	// data plane, which is almost always.
+	//
+	// They are reported rather than kept to themselves because a migration is the
+	// module's only operation measured in hours: without a series to look at, "is
+	// it still going, and since when" can only be answered by reading a
+	// SystemBucket's condition and hoping somebody wrote down when it started.
+	MigrationPhase     string
+	MigrationStartedAt time.Time
 }
 
 // The values that cross the driver seam — what the driver reports back about a
@@ -157,6 +190,22 @@ type (
 	// cannot recover a secret key after creation.
 	AccessState = objectstorage.AccessState
 )
+
+// BucketUsage is what a bucket holds and what it is allowed to hold, as the
+// backend counts it. It is reported alongside BucketState rather than inside it
+// because BucketState is shared with the user-facing module through
+// sds-common-lib, and usage is not something every driver there can answer.
+type BucketUsage struct {
+	// QuotaBytes is the size quota in force in the backend. Zero means the
+	// backend reported none — which, once the controller has reconciled the
+	// bucket, means the quota has not been applied yet rather than that the
+	// bucket is unbounded.
+	QuotaBytes int64
+
+	// UsedBytes and Objects are what the bucket holds right now.
+	UsedBytes int64
+	Objects   int64
+}
 
 // AccessResourceName is the backend-facing identifier (the Garage key display
 // name) for a SystemBucket's key, unique per (namespace, name).

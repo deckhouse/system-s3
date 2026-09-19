@@ -1,0 +1,6 @@
+version: 3
+conversions:
+  - del(.storage)
+description:
+  ru: "Удалите секцию `storage`: размер томов системного хранилища больше не задаётся настройкой, а вычисляется как сумма `spec.quota` всех SystemBucket и растёт вместе с ней."
+  en: "Delete the `storage` section: the size of the system storage volumes is no longer a setting — it is the sum of the SystemBuckets' `spec.quota` and grows with it."

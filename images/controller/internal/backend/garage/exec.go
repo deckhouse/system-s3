@@ -29,10 +29,20 @@ import (
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 )
 
-// runningGaragePods returns the names of the Running Garage pods for the cluster,
-// keyed by their StatefulSet ordinal (parsed from the pod name suffix). Used to
-// capture each replica's node identity for persistence.
-func (d *Driver) runningGaragePods(ctx context.Context, store *backend.Store) (map[int32]string, error) {
+// planePods returns the pods of ONE data plane — the store's incarnation, not
+// the store.
+//
+// The listing is by the store labels and then filtered, rather than by the
+// incarnation label itself, because a pod that predates the label reads back as
+// the first incarnation (see incarnationOfPod) and a label selector cannot say
+// that. During the rolling update that first adds the label, both halves of the
+// plane are still found.
+//
+// Everything that reaches into the pods goes through this. A plane's replicas are
+// meshed into a Garage cluster with each other and with nobody else: peering a
+// pod of the incoming plane into the serving cluster would join the two clusters
+// a migration exists to keep apart.
+func (d *Driver) planePods(ctx context.Context, store *backend.Store) ([]corev1.Pod, error) {
 	pods := &corev1.PodList{}
 	if err := d.apiReader.List(ctx, pods,
 		client.InNamespace(d.namespace),
@@ -40,9 +50,28 @@ func (d *Driver) runningGaragePods(ctx context.Context, store *backend.Store) (m
 	); err != nil {
 		return nil, err
 	}
-	out := map[int32]string{}
+	out := make([]corev1.Pod, 0, len(pods.Items))
 	for i := range pods.Items {
-		p := &pods.Items[i]
+		pod := &pods.Items[i]
+		if incarnationOfPod(pod) != planeIncarnation(store) {
+			continue
+		}
+		out = append(out, *pod)
+	}
+	return out, nil
+}
+
+// runningGaragePods returns the names of the Running Garage pods of the store's
+// data plane, keyed by their StatefulSet ordinal (parsed from the pod name
+// suffix). Used to capture each replica's node identity for persistence.
+func (d *Driver) runningGaragePods(ctx context.Context, store *backend.Store) (map[int32]string, error) {
+	pods, err := d.planePods(ctx, store)
+	if err != nil {
+		return nil, err
+	}
+	out := map[int32]string{}
+	for i := range pods {
+		p := &pods[i]
 		if p.Status.Phase != corev1.PodRunning {
 			continue
 		}

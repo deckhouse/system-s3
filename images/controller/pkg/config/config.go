@@ -34,20 +34,44 @@ const (
 	ReconcileTimeoutEnv        = "RECONCILE_TIMEOUT_SECONDS"
 	ReadyResyncIntervalEnv     = "READY_RESYNC_INTERVAL_SECONDS"
 	GarageImageEnv             = "GARAGE_IMAGE"
-	SingleReplicaEnv           = "SINGLE_REPLICA"
 
-	// RecreateConfirmationEnv carries storage.recreateConfirmation. The driver
-	// refuses a replica-count switch without it, because the switch destroys every
-	// object in the store.
-	RecreateConfirmationEnv = "RECREATE_CONFIRMATION"
-	SizePerNodeEnv          = "SIZE_PER_NODE"
-	StorageClassEnv         = "STORAGE_CLASS"
-	ClusterDomainEnv        = "CLUSTER_DOMAIN"
+	// ControllerImageEnv carries the controller's own image. The migration Job
+	// runs that same image with a different argument, and a pod cannot find out
+	// the reference it was pulled from, so the chart names it here.
+	ControllerImageEnv = "CONTROLLER_IMAGE"
+
+	// HighAvailabilityEnv carries the platform's high-availability mode, already
+	// resolved by the chart (module setting -> global.highAvailability -> whether
+	// the control plane is highly available). It decides the replica count and the
+	// replication factor the data plane is built with.
+	HighAvailabilityEnv = "HIGH_AVAILABILITY"
+
+	// HighAvailabilityExplicitEnv says whether the value above was written by
+	// somebody or derived from the shape of the control plane. The chart knows
+	// which; the controller cannot tell from a boolean, and the difference
+	// decides whether losing masters is allowed to shrink the store.
+	HighAvailabilityExplicitEnv = "HIGH_AVAILABILITY_EXPLICIT"
+
+	// The credentials endpoint (see internal/sts): where it listens and which
+	// certificate it serves. The certificate is the module's webhook certificate,
+	// mounted into this container by the chart, because it is issued for names in
+	// this namespace and there is no reason for a second one.
+	STSBindAddressEnv = "STS_BIND_ADDRESS"
+	STSCertFileEnv    = "STS_TLS_CERT_FILE"
+	STSKeyFileEnv     = "STS_TLS_KEY_FILE"
+
+	// STSEndpointEnv is the address consumers reach the endpoint at, and
+	// STSCertSecretEnv the Secret its CA is read from so it can be published to
+	// them. Both are rendered by the chart: the Service name and the certificate
+	// are the chart's to decide, and having the controller compose them from parts
+	// is how the two drift apart.
+	STSEndpointEnv   = "STS_ENDPOINT"
+	STSCertSecretEnv = "STS_CERT_SECRET"
+	StorageClassEnv  = "STORAGE_CLASS"
+	ClusterDomainEnv = "CLUSTER_DOMAIN"
 
 	DefaultControllerNamespace     = "d8-system-s3"
 	DefaultControllerName          = "system-s3-controller"
-	DefaultSizePerNode             = "10Gi"
-	DefaultStorageClass            = "system-s3-local"
 	DefaultHealthProbeBindAddress  = ":8081"
 	DefaultRequeueIntervalSeconds  = 30
 	DefaultMaxConcurrentReconciles = 1
@@ -66,6 +90,12 @@ const (
 	// the pod is restarted. A deadline turns that into an error, a log line
 	// naming the object, and a retry.
 	DefaultReconcileTimeoutSeconds = 300
+
+	// DefaultSTSBindAddress is the port the credentials endpoint listens on. Not
+	// 8443: that belongs to the webhook container in the same Pod, and two
+	// listeners on one port in one network namespace is one listener and one
+	// crash loop.
+	DefaultSTSBindAddress = ":8444"
 )
 
 type Options struct {
@@ -87,20 +117,48 @@ type Options struct {
 	// GarageImage is the module registry reference for the Garage server
 	// image, injected via the GARAGE_IMAGE env var from Helm.
 	GarageImage string
-	// SingleReplica runs the system storage as one Garage replica with
-	// replication factor 1 instead of the default three, injected via
-	// SINGLE_REPLICA from the module settings.
-	SingleReplica bool
-
-	// RecreateConfirmation is the acknowledgement required for a replica-count
-	// switch (see RecreateConfirmationEnv).
-	RecreateConfirmation string
-	// SizePerNode is the capacity of the node-sticky local volume provisioned
-	// per replica, injected via SIZE_PER_NODE from the module settings.
-	SizePerNode string
-	// StorageClass is the managed StorageClass backing those local volumes,
-	// injected via STORAGE_CLASS.
+	// ControllerImage is this controller's own image, which the object copier of
+	// a migration runs (see ControllerImageEnv). Empty means no migration can
+	// copy anything, which the phase says out loud rather than starting a Job
+	// with no image.
+	ControllerImage string
+	// HighAvailability runs the system storage as three Garage replicas with
+	// replication factor 3; without it, as a single replica with factor 1.
+	// Injected via HIGH_AVAILABILITY (see HighAvailabilityEnv).
+	//
+	// The default is true, which is the safe direction for a value that failed to
+	// arrive: three replicas on a cluster that wanted one costs footprint, one
+	// replica on a cluster that wanted three costs the redundancy it asked for.
+	HighAvailability bool
+	// HighAvailabilityExplicit reports that HighAvailability came from a setting
+	// somebody wrote (the module's own or global's) rather than from the number
+	// of masters the cluster happens to have.
+	//
+	// The default is false, and it is the safe direction for a value that failed
+	// to arrive: a store is then never shrunk without somebody asking.
+	HighAvailabilityExplicit bool
+	// StorageClass is the class the data plane's volumes are ordered from,
+	// injected via STORAGE_CLASS (the chart resolves it: the module setting, then
+	// global.modules.storageClass, then the cluster default).
+	//
+	// It has no default here, and must not have one. Empty means the cluster
+	// offered no class at all, and the only honest response to that is to bring up
+	// no data plane and say so — a default would name a class that may not exist
+	// and turn a clear refusal into claims stuck Pending.
 	StorageClass string
+	// STSBindAddress, STSCertFile and STSKeyFile configure the credentials
+	// endpoint. With no certificate the endpoint does not start at all: it hands
+	// out secret keys, and doing that over plaintext because a file was missing is
+	// not a degraded mode worth having.
+	STSBindAddress string
+	STSCertFile    string
+	STSKeyFile     string
+
+	// STSEndpoint is published to consumers in their credentials Secret, and
+	// STSCertSecret is where the CA that signs it is read from.
+	STSEndpoint   string
+	STSCertSecret string
+
 	// ClusterDomain is the Kubernetes cluster DNS domain (e.g. cluster.local),
 	// injected via CLUSTER_DOMAIN from global.discovery.clusterDomain. Used to
 	// build in-cluster Service FQDNs.
@@ -142,19 +200,21 @@ func NewConfig() *Options {
 	opts.ReadyResyncInterval = secondsFromEnv(ReadyResyncIntervalEnv, DefaultReadyResyncIntervalSeconds)
 
 	opts.GarageImage = os.Getenv(GarageImageEnv)
+	opts.ControllerImage = os.Getenv(ControllerImageEnv)
 
-	opts.SingleReplica = boolFromEnv(SingleReplicaEnv, false)
-	opts.RecreateConfirmation = os.Getenv(RecreateConfirmationEnv)
+	opts.HighAvailability = boolFromEnv(HighAvailabilityEnv, true)
+	opts.HighAvailabilityExplicit = boolFromEnv(HighAvailabilityExplicitEnv, false)
 
-	opts.SizePerNode = os.Getenv(SizePerNodeEnv)
-	if opts.SizePerNode == "" {
-		opts.SizePerNode = DefaultSizePerNode
+	opts.STSBindAddress = os.Getenv(STSBindAddressEnv)
+	if opts.STSBindAddress == "" {
+		opts.STSBindAddress = DefaultSTSBindAddress
 	}
+	opts.STSCertFile = os.Getenv(STSCertFileEnv)
+	opts.STSKeyFile = os.Getenv(STSKeyFileEnv)
+	opts.STSEndpoint = os.Getenv(STSEndpointEnv)
+	opts.STSCertSecret = os.Getenv(STSCertSecretEnv)
 
 	opts.StorageClass = os.Getenv(StorageClassEnv)
-	if opts.StorageClass == "" {
-		opts.StorageClass = DefaultStorageClass
-	}
 
 	opts.ClusterDomain = os.Getenv(ClusterDomainEnv)
 	if opts.ClusterDomain == "" {
@@ -170,9 +230,9 @@ func NewConfig() *Options {
 // The chart renders all of these, and it renders them correctly, so none of this
 // fires in a normal installation. It fires when somebody edits the environment of
 // a running pod to change the module's behaviour — which is exactly the moment a
-// typo must not look like it worked. SINGLE_REPLICA is the sharpest case: it is
-// the one switch whose activation destroys data, and a silent "it did not take"
-// is the wrong default for it in both directions.
+// typo must not look like it worked. HIGH_AVAILABILITY is the sharpest case: it
+// decides the shape of the data plane at first init and is pinned from then on,
+// so a silent "it did not take" is a store built in the wrong mode.
 
 // positiveIntFromEnv reads a positive integer, falling back to def and saying so
 // when the value is unusable.

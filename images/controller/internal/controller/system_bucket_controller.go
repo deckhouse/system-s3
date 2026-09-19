@@ -20,9 +20,11 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -37,6 +39,8 @@ import (
 	"github.com/deckhouse/sds-common-lib/logger"
 	v1alpha1 "github.com/deckhouse/system-s3/api/v1alpha1"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
+	"github.com/deckhouse/system-s3/images/controller/internal/monitoring"
+	"github.com/deckhouse/system-s3/images/controller/internal/sts"
 	"github.com/deckhouse/system-s3/images/controller/pkg/config"
 )
 
@@ -47,24 +51,25 @@ const SystemBucketCtrlName = "system-bucket"
 
 // SystemBucketReconciler drives every SystemBucket through a short FSM:
 //
-//		StorageReady -> BucketReady -> CredentialsReady -> Ready
+//		StorageReady -> BucketReady -> ConnectionReady -> Ready
 //
 //	  - StorageReady reports the module's single data plane (see StoreManager). It
 //	    gates everything else: no bucket can be created while Garage is not
 //	    serving.
 //	  - BucketReady creates the bucket in the backend.
-//	  - CredentialsReady mints the access key and writes the S3 credentials Secret
-//	    in the SystemBucket's namespace. A change to the
-//	    storage.deckhouse.io/rotate annotation issues a fresh key pair.
+//	  - ConnectionReady writes the ConfigMap that tells a consumer where the
+//	    storage is, what its bucket is called and how to ask for credentials.
 //
-// There is no authorization stage: a SystemBucket is admitted only in a platform
-// namespace (see platformNamespace) and grants exactly one consumer — the
-// component that created it — full access to its own bucket.
+// No credentials are issued here, and none are stored anywhere: a consumer
+// exchanges its ServiceAccount token at the credentials endpoint for a key the
+// backend stops honouring an hour later (see internal/sts). Who may do that for
+// which bucket is an ordinary RBAC grant, so this controller has no authorization
+// stage and no key lifecycle at all — nothing to rotate, nothing to revoke,
+// nothing to leak.
 type SystemBucketReconciler struct {
 	Client client.Client
-	// APIReader is an uncached reader used to look up the credentials Secret and
-	// the namespace: a stale cached read of either would make the controller
-	// rotate a live key or refuse a legitimate namespace.
+	// APIReader is an uncached reader used to look up the namespace: a stale
+	// cached read would refuse a legitimate one.
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Log       logger.Logger
@@ -88,33 +93,27 @@ type StoreConverger interface {
 // Driver is the backend surface the reconciler needs. It is an interface so the
 // reconciler can be tested without a Garage instance.
 type Driver interface {
-	EnsureBucket(ctx context.Context, store *backend.Store, name, owner string) (backend.BucketState, error)
+	EnsureBucket(ctx context.Context, store *backend.Store, name, owner string, quota int64) (backend.BucketState, backend.BucketUsage, error)
 	DeleteBucket(ctx context.Context, store *backend.Store, name, owner string) error
-	EnsureAccess(ctx context.Context, store *backend.Store, bucketName, keyName, prevKeyID string, mintFresh bool) (backend.AccessState, error)
-	DeleteAccess(ctx context.Context, store *backend.Store, keyID string) error
 }
 
 var systemBucketStageOrder = []string{
 	v1alpha1.SystemBucketConditionStorageReady,
 	v1alpha1.SystemBucketConditionBucketReady,
-	v1alpha1.SystemBucketConditionCredentialsReady,
+	v1alpha1.SystemBucketConditionConnectionReady,
 }
 
 // bucketObserved accumulates the status fields written back onto the resource.
 type bucketObserved struct {
-	endpoint         string
-	bucketName       string
-	accessKeyID      string
-	secretName       string
-	observedRotation string
-	rotated          bool
+	endpoint       string
+	bucketName     string
+	connectionName string
 
-	// supersededKeyID is a key a rotation replaced, carried into the status so a
-	// later pass can revoke it. supersededHandled says the status field should be
-	// cleared because the revoke succeeded — the two are separate because
-	// "remember this key" and "forget this key" are written on different passes.
-	supersededKeyID   string
-	supersededHandled bool
+	// usage is what the backend says the bucket holds and is allowed to hold. It
+	// is published on every pass, including the ones that end early, because a
+	// consumer reading "how full am I" wants the last known answer rather than an
+	// empty field.
+	usage backend.BucketUsage
 }
 
 // AddSystemBucketReconcilerToManager wires the SystemBucket reconciler.
@@ -140,7 +139,7 @@ func AddSystemBucketReconcilerToManager(mgr manager.Manager, cfg *config.Options
 		For(&v1alpha1.SystemBucket{}, builder.WithPredicates(bucketPredicate)).
 		// The credentials Secret is owned by the SystemBucket, so a consumer (or an
 		// operator) deleting it re-drives the bucket and a fresh key pair is issued.
-		Owns(&corev1.Secret{}).
+		Owns(&corev1.ConfigMap{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: cfg.MaxConcurrentReconciles}).
 		Complete(r)
 }
@@ -192,14 +191,17 @@ func (r *SystemBucketReconciler) reconcileDelete(ctx context.Context, bucket *v1
 	store := r.Store.Store()
 	name := effectiveBucketName(bucket)
 
-	if bucket.Status != nil && bucket.Status.AccessKeyID != "" {
-		if err := r.Driver.DeleteAccess(ctx, store, bucket.Status.AccessKeyID); err != nil {
-			return fmt.Errorf("revoke access key for SystemBucket %s/%s: %w", bucket.Namespace, bucket.Name, err)
-		}
-	}
+	// No key is revoked here because none was issued for this resource. The
+	// temporary keys handed to consumers of this bucket are grants on the bucket
+	// and go with it — they are the only kind of key this module ever mints.
 	if err := r.Driver.DeleteBucket(ctx, store, name, bucketOwnerRef(bucket)); err != nil {
 		return fmt.Errorf("delete bucket %q: %w", name, err)
 	}
+
+	// The series go when the bucket goes. A deleted SystemBucket that keeps
+	// publishing its last usage is an alert waiting to fire about something that
+	// does not exist.
+	monitoring.ForgetBucket(bucket.Namespace, bucket.Name, name)
 
 	controllerutil.RemoveFinalizer(bucket, Finalizer)
 	return r.Client.Update(ctx, bucket)
@@ -267,81 +269,45 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 		return r.finish(ctx, bucket, status, observed, nil)
 	}
 
-	bstate, err := r.Driver.EnsureBucket(ctx, store, name, bucketOwnerRef(bucket))
+	quota, quotaErr := requestedQuota(bucket)
+	if quotaErr != nil {
+		// A quantity the schema's pattern let through but resource.ParseQuantity
+		// does not accept. Terminal for this resource — nothing moves until the
+		// field is fixed — so it is reported where the bucket's own failures are
+		// reported, and the reconcile stops here rather than creating a bucket with
+		// no quota.
+		status.Advance(v1alpha1.SystemBucketConditionBucketReady, false,
+			fmt.Sprintf("spec.quota %q is not a Kubernetes quantity: %v", bucket.Spec.Quota, quotaErr), nil)
+		status.GateAfter(v1alpha1.SystemBucketConditionBucketReady)
+		return r.finish(ctx, bucket, status, observed, nil)
+	}
+
+	bstate, usage, err := r.Driver.EnsureBucket(ctx, store, name, bucketOwnerRef(bucket), quota)
 	if bstate.BucketName != "" {
 		observed.bucketName = bstate.BucketName
+	}
+	observed.usage = usage
+	if bstate.BucketName != "" {
+		monitoring.BucketUsage(bucket.Namespace, bucket.Name, bstate.BucketName, usage.UsedBytes, usage.QuotaBytes)
 	}
 	if !status.Advance(v1alpha1.SystemBucketConditionBucketReady, bstate.Ready, bstate.Message, err) {
 		return r.finish(ctx, bucket, status, observed, err)
 	}
 
-	// Decide whether to issue a fresh key: on a rotation-annotation change, when
-	// no key has been issued yet, or when the credentials Secret is missing.
-	rotationValue := bucket.Annotations[v1alpha1.RotateAnnotation]
-	observedRotation, recordedKey := "", ""
-	if bucket.Status != nil {
-		observedRotation = bucket.Status.ObservedRotation
-		recordedKey = bucket.Status.AccessKeyID
-	}
-	existing, secretExists, err := r.getSecret(ctx, bucket)
-	if err != nil {
-		return r.finish(ctx, bucket, status, observed, err)
-	}
-
-	// A key an earlier rotation replaced is revoked here, on the pass after the
-	// one that recorded it — which is the whole point: by now the secret half of
-	// its replacement is in etcd, so revoking cannot leave the consumer holding a
-	// key that no longer works. Failure is not fatal and not swallowed either:
-	// the field stays, so the next pass tries again rather than leaving an orphan
-	// key on a platform bucket forever.
-	if superseded := revokeCandidate(bucket, recordedKey); superseded != "" {
-		if rerr := r.Driver.DeleteAccess(ctx, store, superseded); rerr != nil {
-			r.Log.Error("unable to revoke the superseded access key; will retry",
-				logger.Err(rerr), "systemBucket", bucket.Name, "accessKeyID", superseded)
-		} else {
-			observed.supersededHandled = true
-		}
-	}
-
-	// A Secret with an empty secret key is the same case as no Secret at all.
+	// Nothing is minted here and nothing secret is written. What the consumer
+	// gets is a ConfigMap saying where the storage is, what its bucket is called
+	// and how to ask for credentials — the asking is done with the ServiceAccount
+	// token it already has, and RBAC decides whether it may (see internal/sts).
 	//
-	// Garage returns a key's secret half once and never again, so reusing a key
-	// whose only copy is gone means writing credentials that cannot work — and
-	// then reporting CredentialsReady=True over them. The consumer gets 403 on
-	// every request while the resource says Ready, and it never heals: the next
-	// pass makes the same decision. Checking that the Secret exists is not enough;
-	// what matters is whether it still carries the half nobody can reissue.
-	secretUsable := secretExists && len(existing.Data[v1alpha1.SecretKeySecretAccessKey]) > 0
-	mintFresh := rotationValue != observedRotation || recordedKey == "" || !secretUsable
-
-	astate, err := r.Driver.EnsureAccess(ctx, store, name,
-		backend.AccessResourceName(bucket.Namespace, bucket.Name), recordedKey, mintFresh)
-	if astate.AccessKeyID != "" {
-		observed.accessKeyID = astate.AccessKeyID
-	} else {
-		observed.accessKeyID = recordedKey
-	}
-	if err != nil || !astate.Ready {
-		status.Advance(v1alpha1.SystemBucketConditionCredentialsReady, false, astate.Message, err)
+	// That is the whole of the credentials story: there is no key with this
+	// bucket's name on it, so there is none to rotate, none to revoke and none to
+	// leak.
+	connectionName, err := r.ensureConnectionConfigMap(ctx, bucket, &state, name)
+	if !status.Advance(v1alpha1.SystemBucketConditionConnectionReady, err == nil,
+		"connection parameters written", err) {
 		return r.finish(ctx, bucket, status, observed, err)
 	}
-
-	// Write the credentials Secret. A fresh key comes with its secret key; a
-	// reused key keeps the secret key already stored in the Secret.
-	secretName, err := r.ensureCredentialsSecret(ctx, bucket, &state, &astate, name, existing)
-	if !status.Advance(v1alpha1.SystemBucketConditionCredentialsReady, err == nil, "credentials Secret written", err) {
-		return r.finish(ctx, bucket, status, observed, err)
-	}
-	observed.secretName = secretName
-	observed.observedRotation = rotationValue
-	observed.rotated = astate.SecretAccessKey != ""
-	// Recorded only now, together with the Secret that carries the new key: a
-	// rotation is a fresh secret (SecretAccessKey is only non-empty when a key was
-	// minted) that displaced a key this resource had recorded before.
-	if replaced := supersededAfterRotation(recordedKey, astate.AccessKeyID, astate.SecretAccessKey); replaced != "" {
-		observed.supersededKeyID = replaced
-		observed.supersededHandled = false
-	}
+	observed.connectionName = connectionName
 
 	status.SetReady("All stages reconciled")
 	return r.finish(ctx, bucket, status, observed, nil)
@@ -361,6 +327,21 @@ func (r *SystemBucketReconciler) platformNamespace(ctx context.Context, name str
 		return false, fmt.Errorf("read namespace %q: %w", name, err)
 	}
 	return ns.Labels[v1alpha1.LabelHeritage] == v1alpha1.HeritageDeckhouse, nil
+}
+
+// requestedQuota is spec.quota in bytes. An empty field reads as zero, which the
+// driver takes as "do not touch the quota": the schema defaults the field, so an
+// empty one is a resource created before the field existed or written by a client
+// that stripped it, and neither is a reason to remove a quota that is in force.
+func requestedQuota(bucket *v1alpha1.SystemBucket) (int64, error) {
+	if bucket.Spec.Quota == "" {
+		return 0, nil
+	}
+	q, err := resource.ParseQuantity(bucket.Spec.Quota)
+	if err != nil {
+		return 0, err
+	}
+	return q.Value(), nil
 }
 
 // bucketOwnerRef identifies a SystemBucket in the backend's ownership record.
@@ -416,107 +397,97 @@ func effectiveBucketName(bucket *v1alpha1.SystemBucket) string {
 	return bucket.Namespace + "-" + bucket.Name
 }
 
-// credentialsSecretName is spec.credentialsSecretName or <name>-s3-credentials.
-func credentialsSecretName(bucket *v1alpha1.SystemBucket) string {
-	if bucket.Spec.CredentialsSecretName != "" {
-		return bucket.Spec.CredentialsSecretName
-	}
-	return bucket.Name + "-s3-credentials"
+// connectionConfigMapName is where a consumer finds how to reach its bucket.
+// Not configurable: there is nothing in it worth naming differently, and a name
+// the resource does not derive is a name something has to look up.
+func connectionConfigMapName(bucket *v1alpha1.SystemBucket) string {
+	return bucket.Name + "-s3-connection"
 }
 
-// getSecret reads the credentials Secret (nil, false when it does not exist).
-// It reads through the uncached APIReader: the result drives the mintFresh
-// decision, and a stale cached read (Secret just written but not yet in the
-// informer cache) would make it look missing and trigger an unnecessary key
-// rotation — revoking a live key.
-func (r *SystemBucketReconciler) getSecret(ctx context.Context, bucket *v1alpha1.SystemBucket) (*corev1.Secret, bool, error) {
-	secret := &corev1.Secret{}
-	key := client.ObjectKey{Namespace: bucket.Namespace, Name: credentialsSecretName(bucket)}
-	if err := r.APIReader.Get(ctx, key, secret); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	return secret, true, nil
-}
-
-// ensureCredentialsSecret creates or updates the credentials Secret owned by the
-// SystemBucket and returns its name.
-func (r *SystemBucketReconciler) ensureCredentialsSecret(
+// ensureConnectionConfigMap creates or updates the ConfigMap owned by the
+// SystemBucket that says where the storage is, what the bucket is called and how
+// to exchange a ServiceAccount token for credentials. It returns its name.
+//
+// A ConfigMap and not a Secret: nothing here is secret. That is the point of the
+// change it came from — the module mints no long-lived key for anyone, so there
+// is no half of a key pair to protect, to rotate, or to lose.
+func (r *SystemBucketReconciler) ensureConnectionConfigMap(
 	ctx context.Context,
 	bucket *v1alpha1.SystemBucket,
 	state *backend.StoreState,
-	access *backend.AccessState,
 	bucketName string,
-	existing *corev1.Secret,
 ) (string, error) {
-	accessKeyID := access.AccessKeyID
-	secretKey := access.SecretAccessKey
-	if secretKey == "" && existing != nil {
-		// Reused key: the stored pair is kept whole. Garage hands a secret key back
-		// once, so the Secret is the only copy — and the id and the secret half are
-		// one fact, not two.
-		//
-		// Taking only the secret half from here was a defect that corrupted
-		// credentials. The id came from the driver, which had been told what to
-		// reuse by the resource's status, and the status can be one pass behind the
-		// Secret: the reconcile that mints a key writes the Secret first and the
-		// status second, so a reconcile triggered in between (the Secret write
-		// itself triggers one) reads a status that still names the previous key.
-		// The old code then wrote that previous id next to the new secret half, and
-		// the consumer held a pair that authenticates as nothing —
-		// "Insufficient permissions" on every request, with a resource that reports
-		// Ready and a Secret that looks complete. Measured on a cluster twice
-		// before the diagnostics were good enough to name it.
-		//
-		// Both halves therefore come from the same object. If that pair is stale,
-		// the next pass finds out honestly: EnsureAccess checks the recorded key
-		// against the backend and mints a fresh one when it is gone.
-		storedID := string(existing.Data[v1alpha1.SecretKeyAccessKeyID])
-		storedSecret := string(existing.Data[v1alpha1.SecretKeySecretAccessKey])
-		if storedID != "" && storedSecret != "" {
-			accessKeyID, secretKey = storedID, storedSecret
-		}
-	}
-
-	secret := &corev1.Secret{
+	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      credentialsSecretName(bucket),
+			Name:      connectionConfigMapName(bucket),
 			Namespace: bucket.Namespace,
 		},
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
-		if secret.Labels == nil {
-			secret.Labels = map[string]string{}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		if cm.Labels == nil {
+			cm.Labels = map[string]string{}
 		}
-		secret.Labels["storage.deckhouse.io/system-bucket"] = bucket.Name
-		// The label the controller's Secret cache is scoped to. Without it this
-		// Secret would be invisible to the cached client and to the Owns() watch,
-		// so a consumer deleting it by hand would go unnoticed.
-		secret.Labels[v1alpha1.ManagedByLabel] = v1alpha1.ManagedByValue
-		secret.Type = corev1.SecretTypeOpaque
-		// Data rather than StringData, so CreateOrUpdate can recognise a no-op.
-		//
-		// StringData is write-only: the server folds it into Data and never returns
-		// it, so an object read back has Data set and StringData nil. Setting
-		// StringData in the mutate function therefore makes the comparison differ
-		// every time, and an Update request goes out on every pass. The server
-		// collapses it — the resulting Data is identical, so resourceVersion does
-		// not move and no watch fires — but the request is still pointless.
-		secret.Data = map[string][]byte{
-			v1alpha1.SecretKeyS3Endpoint:      []byte(state.Endpoint),
-			v1alpha1.SecretKeyS3Region:        []byte(state.Region),
-			v1alpha1.SecretKeyS3Bucket:        []byte(bucketName),
-			v1alpha1.SecretKeyAccessKeyID:     []byte(accessKeyID),
-			v1alpha1.SecretKeySecretAccessKey: []byte(secretKey),
+		cm.Labels["storage.deckhouse.io/system-bucket"] = bucket.Name
+		// The label the controller's cache is scoped to. Without it this object
+		// would be invisible to the cached client and to the Owns() watch, so a
+		// consumer deleting it by hand would go unnoticed.
+		cm.Labels[v1alpha1.ManagedByLabel] = v1alpha1.ManagedByValue
+		cm.Data = map[string]string{
+			v1alpha1.ConnectionKeyS3Endpoint: state.Endpoint,
+			v1alpha1.ConnectionKeyS3Region:   state.Region,
+			v1alpha1.ConnectionKeyS3Bucket:   bucketName,
 		}
-		return controllerutil.SetControllerReference(bucket, secret, r.Scheme)
+		// Where to ask for credentials, what audience the token has to carry, and
+		// the CA to verify the endpoint with (the module's own, so nothing trusts
+		// it by default). Added only while the module actually serves the endpoint,
+		// so this never advertises something that does not answer.
+		if endpoint := r.stsEndpoint(); endpoint != "" {
+			cm.Data[v1alpha1.ConnectionKeySTSEndpoint] = endpoint
+			cm.Data[v1alpha1.ConnectionKeySTSAudience] = sts.TokenAudience
+			if ca := r.stsCA(ctx); len(ca) > 0 {
+				cm.Data[v1alpha1.ConnectionKeySTSCACert] = string(ca)
+			}
+		}
+		return controllerutil.SetControllerReference(bucket, cm, r.Scheme)
 	})
 	if err != nil {
 		return "", err
 	}
-	return secret.Name, nil
+	return cm.Name, nil
+}
+
+// stsEndpoint is the address of the credentials endpoint, or empty when the
+// module is not serving one.
+//
+// Written as an accessor because the configuration may legitimately be absent —
+// every test that exercises one method of this reconciler would otherwise have to
+// construct a whole config to avoid a nil dereference, and one of them did not,
+// which is how this was found.
+func (r *SystemBucketReconciler) stsEndpoint() string {
+	if r.Cfg == nil {
+		return ""
+	}
+	return r.Cfg.STSEndpoint
+}
+
+// stsCA is the CA that signs the credentials endpoint's certificate, read from
+// the module's own certificate Secret.
+//
+// Empty is not an error here: the endpoint's address is still worth publishing,
+// and a consumer that cannot verify it will say so far more clearly than a
+// reconcile that failed on a Secret it could not read.
+func (r *SystemBucketReconciler) stsCA(ctx context.Context) []byte {
+	if r.Cfg == nil || r.Cfg.STSCertSecret == "" {
+		return nil
+	}
+	secret := &corev1.Secret{}
+	key := client.ObjectKey{Namespace: r.Cfg.ControllerNamespace, Name: r.Cfg.STSCertSecret}
+	if err := r.APIReader.Get(ctx, key, secret); err != nil {
+		r.Log.Error("unable to read the CA of the credentials endpoint", logger.Err(err),
+			"secret", r.Cfg.STSCertSecret)
+		return nil
+	}
+	return secret.Data["ca.crt"]
 }
 
 func (r *SystemBucketReconciler) finish(
@@ -532,16 +503,41 @@ func (r *SystemBucketReconciler) finish(
 			reconcileErr = err
 		}
 	}
+	// Published from here because this is the one exit every pass goes through,
+	// including the ones that stop early: a bucket that never gets past its own
+	// failure is exactly the one worth a series.
+	monitoring.BucketReady(bucket.Namespace, bucket.Name, status.Ready())
+
 	if reconcileErr != nil {
 		return ctrl.Result{}, reconcileErr
 	}
 	if status.Ready() {
 		// Re-drive even when Ready, so a bucket or key removed behind the
 		// controller's back (directly in Garage) is restored within minutes rather
-		// than at the next informer resync.
-		return ctrl.Result{RequeueAfter: r.Cfg.ReadyResyncInterval}, nil
+		// than at the next informer resync — and so the scheduled rotation happens
+		// close to when it is due rather than at whatever the resync lands on.
+		return ctrl.Result{RequeueAfter: r.nextWakeup(bucket)}, nil
 	}
 	return ctrl.Result{RequeueAfter: r.Cfg.RequeueInterval}, nil
+}
+
+// nextWakeup is how long to wait before driving a Ready bucket again: the resync
+// cadence, unless something with a deadline comes first.
+//
+// The two deadlines are the scheduled rotation and the expiry of a replaced key.
+// Neither is urgent to the minute — the rotation may as well happen a few minutes
+// late, and the expired key is deleted by the backend's clock either way — but
+// waiting a full resync past them makes the status read wrong for that long
+// (nextRotationTime in the past, a superseded key that is expired and still
+// recorded), and a status that is routinely stale is a status nobody trusts.
+func (r *SystemBucketReconciler) nextWakeup(_ *v1alpha1.SystemBucket) time.Duration {
+	wait := r.Cfg.ReadyResyncInterval
+	// Never shorter than the plain requeue interval: the two are configured
+	// independently and a resync shorter than the requeue would be a spin.
+	if wait < r.Cfg.RequeueInterval {
+		wait = r.Cfg.RequeueInterval
+	}
+	return wait
 }
 
 func (r *SystemBucketReconciler) updateStatus(
@@ -586,79 +582,13 @@ func (r *SystemBucketReconciler) updateStatus(
 		if observed.bucketName != "" {
 			latest.Status.BucketName = observed.bucketName
 		}
-		if observed.accessKeyID != "" {
-			latest.Status.AccessKeyID = observed.accessKeyID
+		if observed.usage != (backend.BucketUsage{}) {
+			latest.Status.QuotaBytes = observed.usage.QuotaBytes
+			latest.Status.UsedBytes = observed.usage.UsedBytes
+			latest.Status.Objects = observed.usage.Objects
 		}
-		if observed.secretName != "" {
-			latest.Status.SecretRef = &v1alpha1.LocalSecretReference{Name: observed.secretName}
-			latest.Status.ObservedRotation = observed.observedRotation
-			if observed.rotated {
-				now := metav1.Now()
-				latest.Status.LastRotationTime = &now
-			}
-			// Written in the same status update as the Secret reference, which is
-			// what makes the revoke safe to do later: by the time anything reads
-			// this field, the key that replaced the recorded one is durable.
-			if observed.supersededKeyID != "" {
-				latest.Status.SupersededAccessKeyID = observed.supersededKeyID
-			}
-		}
-		// Cleared only on a successful revoke. A failed one leaves the field so the
-		// next pass retries — an orphan key on a platform bucket is not something
-		// to forget about.
-		if observed.supersededHandled {
-			latest.Status.SupersededAccessKeyID = ""
-		}
-		// And never left pointing at the key in use. revokeCandidate already
-		// refuses to revoke that one, so nothing acts on it, but the field is read
-		// by operators and by the e2e suite as "a key waiting to be revoked" — and
-		// a cluster produced exactly this state (superseded == accessKeyID) after a
-		// stale-status pass. Clearing it keeps the status honest instead of
-		// alarming.
-		if latest.Status.SupersededAccessKeyID != "" &&
-			latest.Status.SupersededAccessKeyID == latest.Status.AccessKeyID {
-			latest.Status.SupersededAccessKeyID = ""
+		if observed.connectionName != "" {
+			latest.Status.ConnectionRef = &v1alpha1.LocalObjectReference{Name: observed.connectionName}
 		}
 	})
-}
-
-// supersededKeyOf is the key a previous rotation replaced and left to be
-// revoked, or empty.
-func supersededKeyOf(bucket *v1alpha1.SystemBucket) string {
-	if bucket.Status == nil {
-		return ""
-	}
-	return bucket.Status.SupersededAccessKeyID
-}
-
-// revokeCandidate is the key this pass may revoke: one a previous rotation
-// recorded, and not the one currently in use.
-//
-// The second half is the guard that matters. If the recorded key somehow equals
-// the key the resource is using — a status written half-way, an operator editing
-// status by hand — revoking it would take away the credentials the consumer is
-// holding, which is the very failure this whole mechanism exists to prevent. So
-// the answer is "revoke nothing" rather than "revoke and hope".
-func revokeCandidate(bucket *v1alpha1.SystemBucket, inUseKeyID string) string {
-	superseded := supersededKeyOf(bucket)
-	if superseded == "" || superseded == inUseKeyID {
-		return ""
-	}
-	return superseded
-}
-
-// supersededAfterRotation is the key a rotation just replaced, or empty when
-// nothing was replaced.
-//
-// A rotation is three things at once, and all three have to hold: a secret half
-// came back (the backend only returns one when it mints), this resource had a
-// key recorded before, and the key it has now is a different one. Any two
-// without the third is something else — first provisioning, a re-read of an
-// existing key, a key the backend handed back unchanged — and recording a
-// superseded key for those would schedule a revoke of a key still in use.
-func supersededAfterRotation(recordedKeyID, newKeyID, newSecretKey string) string {
-	if newSecretKey == "" || recordedKeyID == "" || recordedKeyID == newKeyID {
-		return ""
-	}
-	return recordedKeyID
 }

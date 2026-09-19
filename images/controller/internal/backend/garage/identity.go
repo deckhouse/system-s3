@@ -54,15 +54,28 @@ func nodeIdentityDataKey(ord int32) string {
 // podOrdinal parses the StatefulSet ordinal from a pod name (the integer after
 // the last "-"), returning false when the suffix is not a number.
 func podOrdinal(name string) (int32, bool) {
+	_, ord, ok := splitOrdinal(name)
+	return ord, ok
+}
+
+// podParent is the name of the workload a pod or a claim belongs to: everything
+// before the ordinal. It is what tells the objects of two data planes apart when
+// one name is a prefix of the other ("system-garage" of "system-garage-i2").
+func podParent(name string) (string, bool) {
+	parent, _, ok := splitOrdinal(name)
+	return parent, ok
+}
+
+func splitOrdinal(name string) (string, int32, bool) {
 	i := strings.LastIndex(name, "-")
-	if i < 0 || i == len(name)-1 {
-		return 0, false
+	if i <= 0 || i == len(name)-1 {
+		return "", 0, false
 	}
 	n, err := strconv.Atoi(name[i+1:])
 	if err != nil || n < 0 {
-		return 0, false
+		return "", 0, false
 	}
-	return int32(n), true
+	return name[:i], int32(n), true
 }
 
 // ensureNodeIdentities persists each System replica's Garage node identity so a
@@ -168,7 +181,12 @@ func (d *Driver) ensureNodeIdentitySecret(ctx context.Context, store *backend.St
 	if err := d.client.Create(ctx, secret); err != nil && !apierrors.IsAlreadyExists(err) {
 		return nil, err
 	}
-	if err := d.client.Get(ctx, key, secret); err != nil {
+	// apiReader, not the cache, for the read-back. The object was created a
+	// microsecond ago and the informer has not seen it yet, so the cached read
+	// returns NotFound and the whole pass fails on an object that exists. It
+	// corrects itself on the next pass, but it puts an error in the log every time
+	// a data plane is created — which a migration now does routinely.
+	if err := d.apiReader.Get(ctx, key, secret); err != nil {
 		return nil, err
 	}
 	return secret, nil

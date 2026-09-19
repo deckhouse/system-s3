@@ -21,6 +21,7 @@ import (
 
 	_ "github.com/deckhouse/system-s3/hooks/go/020-webhook-certs"
 	_ "github.com/deckhouse/system-s3/hooks/go/030-remove-finalizers-on-module-delete"
+	_ "github.com/deckhouse/system-s3/hooks/go/040-storage-class"
 )
 
 func main() {

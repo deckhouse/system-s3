@@ -25,6 +25,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -47,10 +48,6 @@ const (
 	configMount    = "/etc/garage"
 	configFileName = "garage.toml"
 
-	// hostPathBase is where Garage data lives on control-plane nodes (the
-	// backing directory of each node-sticky local PV).
-	hostPathBase = "/var/lib/deckhouse/system-s3/garage"
-
 	// registryPullSecret is the module-scoped pull secret rendered by
 	// templates/registry-secret.yaml. The Garage image comes from the module's
 	// own ModuleSource (helm_lib_module_image), so its credentials live here —
@@ -58,14 +55,12 @@ const (
 	// carries no credentials for a separate ModuleSource.
 	registryPullSecret = "system-s3-module-registry"
 
-	// controlPlaneNodeLabel marks control-plane nodes; the StatefulSet is
-	// scheduled there (spread across them when several exist, co-located on the
-	// single master otherwise).
+	// controlPlaneNodeLabel marks the nodes the data plane may run on: the
+	// masters, and only those (see dataPlanePlacement).
 	controlPlaneNodeLabel = backend.ControlPlaneNodeLabel
 
-	// hostnameTopologyKey is the node label carrying the hostname; used both for
-	// the soft pod anti-affinity and as the local-PV nodeAffinity key that pins a
-	// replica to its node.
+	// hostnameTopologyKey is the node label carrying the hostname, used for the
+	// soft pod anti-affinity that spreads the replicas.
 	hostnameTopologyKey = "kubernetes.io/hostname"
 
 	// nodeIdentityMountPath is where the per-ordinal Garage node identity Secret
@@ -79,8 +74,8 @@ const (
 	annConfigHash = "storage.deckhouse.io/config-hash"
 )
 
-// replicasHA is the number of Garage replicas the default (highly available)
-// store runs, independent of the control-plane node count. Keeping it constant
+// replicasHA is the number of Garage replicas the highly available store runs,
+// independent of the control-plane node count. Keeping it constant
 // (rather than one pod per master) keeps the pinned replication factor and the
 // Garage quorum stable across master-count changes: three replicas always run —
 // spread across control-plane nodes when several exist, co-located on the single
@@ -99,31 +94,38 @@ const (
 // See nextPlacementAction in rebalance.go, which implements exactly these rules.
 const replicasHA int32 = 3
 
-// replicasSingle is the replica count of the single-replica store (the
-// singleReplica module setting): one Garage replica with replication_factor 1. It
-// gives up all redundancy — the store is unavailable while its pod is down and
-// lost with its master's disk — in exchange for a third of the footprint, and it
-// never migrates between masters (see reconcilePlacement).
-const replicasSingle int32 = 1
+// replicasNonHA is the replica count outside the high-availability mode: one
+// Garage replica with replication_factor 1. It gives up all redundancy — the
+// store is unavailable while its pod is down and lost with its master's disk —
+// in exchange for a third of the footprint, and it never migrates between
+// masters (see reconcilePlacement).
+const replicasNonHA int32 = 1
 
-// desiredReplicas is the number of Garage data-plane pods: one in single-replica
-// mode, replicasHA otherwise. Both counts are independent of the control-plane
-// node count; switching between them is not an in-place change but a recreate of
-// the data plane (see Driver.teardownDataPlane). It also drives the initial
-// replication factor (clamped to this count) and the layout reconcile.
+// desiredReplicas is the number of Garage data-plane pods: replicasHA in the
+// high-availability mode, replicasNonHA otherwise. Both counts are independent of
+// the control-plane node count. It also drives the initial replication factor
+// (clamped to this count) and the layout reconcile.
+//
+// This is desired state, and for an existing store it is not necessarily what
+// runs: the mode cannot be switched in place (Garage refuses a
+// replication_factor change on a live cluster), so a store built in one mode
+// keeps its replica count until a migration rebuilds it in the other. EnsureStore
+// reports the disagreement instead of acting on it.
 func desiredReplicas(store *backend.Store) int32 {
-	if store.SingleReplica {
-		return replicasSingle
+	if store.HighAvailability {
+		return replicasHA
 	}
-	return replicasHA
+	return replicasNonHA
 }
 
-// incarnationKey is the ConfigMap key recording the data plane's incarnation: a
-// counter bumped on every recreate (a replica-count switch) so the new, empty
-// cluster binds local PVs backed by FRESH directories instead of mounting the
-// previous incarnation's Garage metadata (which pins a different replication
-// factor and a layout of node IDs that no longer exist — a state Garage cannot
-// recover from).
+// incarnationKey is the ConfigMap key recording which data plane the config
+// belongs to. It is a record, not a source of truth — the object's own name says
+// the same thing — and it is there so that a namespace holding two Garage
+// clusters mid-migration can be read without decoding names.
+//
+// Which plane SERVES is kept elsewhere entirely (see migrationStateName): it is a
+// property of the store, and a per-plane ConfigMap cannot be asked a question
+// about the store.
 const incarnationKey = "incarnation"
 
 // placementAttemptTargetKey and placementAttemptCountKey record how many times
@@ -162,18 +164,32 @@ func isPlacementBookkeepingKey(key string) bool {
 // firstIncarnation is the incarnation of a store that was never recreated.
 const firstIncarnation int32 = 1
 
-// labelSystemLocalNode marks a controller-provisioned local PV and records the
-// node (its kubernetes.io/hostname value) its nodeAffinity pins it to. Its
-// presence distinguishes pool PVs from any other PV.
-const labelSystemLocalNode = backend.LocalNodeLabel
+// planeIncarnation is the incarnation a store description refers to, with the
+// zero value reading as the first — a store built before migrations existed has
+// one data plane and it is that one.
+func planeIncarnation(store *backend.Store) int32 {
+	if store.Incarnation < firstIncarnation {
+		return firstIncarnation
+	}
+	return store.Incarnation
+}
 
 // storeLabel carries the store name on every object the driver creates (used as
 // a selector, e.g. to list the local-PV pool).
 const storeLabel = backend.StoreLabel
 
-// resourceName is the common name/prefix for every object backing the store.
+// resourceName is the common name/prefix for the objects backing ONE data plane.
+//
+// It carries the incarnation from the second one on, because a migration runs two
+// Garage clusters side by side in one namespace: the one serving and the one being
+// filled. The first incarnation keeps the bare name, so an installation that has
+// never migrated is not renamed underneath itself — and the endpoint consumers
+// use is not this name at all (see s3SvcName).
 func resourceName(store *backend.Store) string {
-	return store.Name + "-garage"
+	if planeIncarnation(store) == firstIncarnation {
+		return store.Name + "-garage"
+	}
+	return fmt.Sprintf("%s-garage-i%d", store.Name, planeIncarnation(store))
 }
 
 func secretName(store *backend.Store) string {
@@ -183,7 +199,64 @@ func configName(store *backend.Store) string {
 	return resourceName(store) + "-config"
 }
 func rpcSvcName(store *backend.Store) string { return resourceName(store) + "-rpc" }
-func s3SvcName(store *backend.Store) string  { return resourceName(store) }
+
+// planeSvcName is the S3/admin Service of ONE data plane, and it is the module's
+// own way in.
+//
+// Consumers never use it — they use the endpoint, which points at whichever plane
+// serves. The module does, for everything it does TO a plane: a bucket created
+// during a migration is created on the plane being filled, and an admin call that
+// went through the endpoint instead would land on whichever plane the endpoint
+// happened to be pointing at when the call was made.
+func planeSvcName(store *backend.Store) string { return resourceName(store) + "-api" }
+
+// stableName is the name prefix of the objects that belong to the STORE rather
+// than to one of its data planes, and it therefore never carries the incarnation.
+//
+// There are few of them, and each is there because a migration must not lose it:
+// what a bucket is for outlives the cluster the bucket currently lives on.
+func stableName(store *backend.Store) string { return store.Name + "-garage" }
+
+// s3SvcName is the endpoint every consumer holds, and it NEVER carries the
+// incarnation.
+//
+// That is the whole reason a migration can be invisible to them: the Service
+// keeps its name and its cluster IP, and what changes at cutover is which pods it
+// selects. A consumer's S3_ENDPOINT is written into its credentials Secret once
+// and stays true across a migration it never hears about.
+func s3SvcName(store *backend.Store) string { return stableName(store) }
+
+// incarnationLabel is on the pods of a data plane and in the selector of the
+// endpoint Service. It is what makes the cutover a single write: the Service
+// stops selecting the old cluster's pods and starts selecting the new one's.
+const incarnationLabel = "storage.deckhouse.io/incarnation"
+
+// planeLabels are the pod labels of one incarnation: the common ones the
+// StatefulSet selects on, plus the incarnation the endpoint Service selects on.
+//
+// The two are separate on purpose. A StatefulSet's selector is immutable, so the
+// labels it matches cannot grow a field later; the endpoint Service's selector is
+// not, which is exactly what the cutover rewrites.
+func planeLabels(store *backend.Store) map[string]string {
+	labels := commonLabels(store)
+	labels[incarnationLabel] = strconv.FormatInt(int64(planeIncarnation(store)), 10)
+	return labels
+}
+
+// incarnationOfPod reads which data plane a pod belongs to.
+//
+// A pod with no such label belongs to the first incarnation, the same way a
+// ConfigMap with no incarnation key does: an installation made before the label
+// existed has exactly one data plane, and it is that one. Without this reading a
+// rolling update would look like a pod of no plane at all, and the pass would
+// stop finding the replicas it is meshing.
+func incarnationOfPod(pod *corev1.Pod) int32 {
+	n, err := strconv.Atoi(pod.Labels[incarnationLabel])
+	if err != nil || n < int(firstIncarnation) {
+		return firstIncarnation
+	}
+	return int32(n)
+}
 
 // commonLabels are placed on every object the driver creates. With no owning
 // custom resource they are also the only handle on the data plane, so the
@@ -196,33 +269,36 @@ func commonLabels(store *backend.Store) map[string]string {
 	}
 }
 
-// s3Endpoint is the in-cluster S3 URL of the store's Service.
+// s3Endpoint is the in-cluster S3 URL consumers are given: the endpoint Service,
+// which survives a migration.
 func s3Endpoint(store *backend.Store, namespace, clusterDomain string) string {
 	return fmt.Sprintf("http://%s.%s.svc.%s:%d", s3SvcName(store), namespace, clusterDomain, s3Port)
 }
 
-// s3HostPort is the in-cluster S3 endpoint as host:port (no scheme), for the
-// minio/S3 client used to empty buckets before deletion.
-func s3HostPort(store *backend.Store, namespace, clusterDomain string) string {
-	return fmt.Sprintf("%s.%s.svc.%s:%d", s3SvcName(store), namespace, clusterDomain, s3Port)
+// planeS3HostPort is the S3 endpoint of one plane as host:port (no scheme), for
+// the minio/S3 client used to empty buckets before deletion and to copy between
+// two planes.
+func planeS3HostPort(store *backend.Store, namespace, clusterDomain string) string {
+	return fmt.Sprintf("%s.%s.svc.%s:%d", planeSvcName(store), namespace, clusterDomain, s3Port)
 }
 
-// adminEndpoint is the in-cluster admin API URL of the store's Service.
+// adminEndpoint is the admin API URL of one plane. Never the endpoint Service:
+// an admin call is always made TO a particular Garage cluster.
 func adminEndpoint(store *backend.Store, namespace, clusterDomain string) string {
-	return fmt.Sprintf("http://%s.%s.svc.%s:%d", s3SvcName(store), namespace, clusterDomain, adminPort)
+	return fmt.Sprintf("http://%s.%s.svc.%s:%d", planeSvcName(store), namespace, clusterDomain, adminPort)
 }
 
 // replicationFactor is the Garage replication_factor the module settings ask
-// for: 1 in single-replica mode, 3 otherwise. This is only the initial intent
+// for: 3 in the high-availability mode, 1 otherwise. This is only the initial intent
 // used at cluster creation; the effective factor is clamped to the node count and
 // then PINNED for the cluster's lifetime (see Driver.pinnedState). Garage does
 // not support changing replication_factor on a live cluster, so it must never be
 // recomputed from the current node count afterwards.
 func replicationFactor(store *backend.Store) int32 {
-	if store.SingleReplica {
-		return 1
+	if store.HighAvailability {
+		return 3
 	}
-	return 3
+	return 1
 }
 
 // clampRF caps desired at the available node count, with a floor of 1. Garage
@@ -263,21 +339,6 @@ func replicationFactorFromConfigMap(cm *corev1.ConfigMap) int32 {
 	return int32(n)
 }
 
-// incarnationFromConfigMap returns the data-plane incarnation recorded in an
-// existing garage.toml ConfigMap. A missing or unparseable value reads back as
-// firstIncarnation, so a store whose ConfigMap predates the counter keeps the PV
-// names and data directories it is already bound to.
-func incarnationFromConfigMap(cm *corev1.ConfigMap) int32 {
-	if cm == nil {
-		return firstIncarnation
-	}
-	n, err := strconv.Atoi(cm.Data[incarnationKey])
-	if err != nil || n < int(firstIncarnation) {
-		return firstIncarnation
-	}
-	return int32(n)
-}
-
 // configHash is a short content hash of garage.toml, stamped onto the pod
 // template so the workload rolls when the config changes (Garage reads the file
 // only at startup, and every node must run the same replication_factor).
@@ -309,14 +370,13 @@ api_bind_addr = "[::]:%d"
 }
 
 // buildConfigMap returns the ConfigMap holding garage.toml with the given
-// replication factor. It also records the data-plane incarnation, the counter
-// that keeps a recreated store off the previous incarnation's data directories;
-// the key lives outside garage.toml so bumping it does not roll the pods by
-// itself (the factor change already does).
-func buildConfigMap(store *backend.Store, namespace string, rf, incarnation int32) *corev1.ConfigMap {
+// replication factor. It also records which data plane the config belongs to;
+// that key lives outside garage.toml so it is not part of the hash the pods roll
+// on.
+func buildConfigMap(store *backend.Store, namespace string, rf int32) *corev1.ConfigMap {
 	data := map[string]string{
 		configFileName: renderConfig(rf),
-		incarnationKey: strconv.FormatInt(int64(incarnation), 10),
+		incarnationKey: strconv.FormatInt(int64(planeIncarnation(store)), 10),
 	}
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -341,8 +401,15 @@ func buildServiceAccount(store *backend.Store, namespace string) *corev1.Service
 	}
 }
 
-// buildS3Service returns the ClusterIP Service exposing the S3 and admin APIs.
-func buildS3Service(store *backend.Store, namespace string) *corev1.Service {
+// buildEndpointService returns the Service consumers hold: one object for the
+// life of the store, whose selector is the whole of a cutover.
+//
+// The selector is passed in rather than derived here because it is the one thing
+// about this Service that is not a property of the store. While one plane runs it
+// is the store's labels — which is also what an installation upgraded into this
+// code already has, so nothing is re-selected under a running cluster. While two
+// planes run it names one of them.
+func buildEndpointService(store *backend.Store, namespace string, selector map[string]string) *corev1.Service {
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      s3SvcName(store),
@@ -350,7 +417,57 @@ func buildS3Service(store *backend.Store, namespace string) *corev1.Service {
 			Labels:    commonLabels(store),
 		},
 		Spec: corev1.ServiceSpec{
-			Selector: commonLabels(store),
+			Selector: selector,
+			Ports: []corev1.ServicePort{
+				{Name: "s3", Port: s3Port, TargetPort: intstr.FromInt32(s3Port)},
+				{Name: "admin", Port: adminPort, TargetPort: intstr.FromInt32(adminPort)},
+			},
+		},
+	}
+}
+
+// buildPodDisruptionBudget keeps a voluntary eviction from taking a second
+// replica while the first is still coming back.
+//
+// maxUnavailable: 1 is the whole policy, and it is only worth having in the
+// highly available mode: with three replicas at replication factor 3 the cluster
+// keeps a quorum while one is away and loses it at two, and a rolling update of
+// the control plane drains nodes one after another without asking whether the
+// previous workload has recovered. The budget is what makes it ask.
+//
+// It rests on the readiness probe meaning "in the cluster and able to serve"
+// rather than "listening" — a budget counting processes rather than members
+// would let the second eviction through the moment the first pod accepted a
+// connection, which is well before it has anything to serve.
+//
+// Per plane, because each plane is its own Garage cluster with its own quorum.
+func buildPodDisruptionBudget(store *backend.Store, namespace string) *policyv1.PodDisruptionBudget {
+	maxUnavailable := intstr.FromInt32(1)
+	return &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      resourceName(store),
+			Namespace: namespace,
+			Labels:    planeLabels(store),
+		},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MaxUnavailable: &maxUnavailable,
+			Selector:       &metav1.LabelSelector{MatchLabels: planeLabels(store)},
+		},
+	}
+}
+
+// buildPlaneService returns the S3/admin Service of one data plane — the module's
+// own way into a particular Garage cluster, alongside the endpoint that points at
+// whichever one serves.
+func buildPlaneService(store *backend.Store, namespace string) *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      planeSvcName(store),
+			Namespace: namespace,
+			Labels:    planeLabels(store),
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: planeLabels(store),
 			Ports: []corev1.ServicePort{
 				{Name: "s3", Port: s3Port, TargetPort: intstr.FromInt32(s3Port)},
 				{Name: "admin", Port: adminPort, TargetPort: intstr.FromInt32(adminPort)},
@@ -371,7 +488,7 @@ func buildRPCService(store *backend.Store, namespace string) *corev1.Service {
 		Spec: corev1.ServiceSpec{
 			ClusterIP:                "None",
 			PublishNotReadyAddresses: true,
-			Selector:                 commonLabels(store),
+			Selector:                 planeLabels(store),
 			Ports: []corev1.ServicePort{
 				{Name: "rpc", Port: rpcPort, TargetPort: intstr.FromInt32(rpcPort)},
 			},
@@ -401,33 +518,39 @@ func garageContainer(image string) corev1.Container {
 			{Name: "data", MountPath: dataMountPath},
 		},
 		ReadinessProbe: &corev1.Probe{
-			// A TCP connect, and it has to be: /health on the admin port deadlocks
-			// the bootstrap.
+			// /health on the admin port: 200 once this node holds a role in the
+			// layout and can reach enough of its peers to serve.
 			//
-			// Garage answers 200 on /health only once the node is connected to the
-			// mesh and holds a role in the layout. The layout is assigned by this
-			// controller, over the admin API, through the headless Service in front
-			// of these pods — and a Service only routes to READY endpoints. So
-			// gating readiness on /health means: no pod is ready until the layout is
-			// assigned, and the layout cannot be assigned until a pod is ready. A
-			// fresh installation sits at 0/3 ready forever, the controller gets
-			// "connection refused" from a Service with no endpoints, and the store
-			// reports "Garage StatefulSet rolling out" until someone looks.
+			// That is a stronger statement than "the process is listening", and the
+			// disruption budget is what needs it. A drain evicts a replica, the
+			// StatefulSet brings it back, and the budget must not let the next
+			// eviction through until the replacement is back IN THE CLUSTER — not
+			// merely accepting connections. On a rolling update of the control plane
+			// that is the difference between one replica down at a time and a quorum
+			// lost.
 			//
-			// That was measured, not reasoned about: an e2e run spent 35 minutes in
-			// exactly that state.
+			// It used to be a TCP connect because /health deadlocked the bootstrap:
+			// the layout was assigned through a Service, a Service routes to ready
+			// endpoints only, and no pod could become ready until the layout was
+			// assigned. An e2e run sat at 0/3 for 35 minutes. The layout is now
+			// assigned at a pod's own address (see ensureMeshAndLayout), so the
+			// deadlock is gone and the probe can say what it should.
 			//
-			// What the probe can honestly say is that the process is up and
-			// listening. Whether the store can serve is a cluster-level fact, and it
-			// is already checked where it can be: EnsureStore queries
-			// GetClusterHealth and only then reports StorageReady, so a pod that
-			// accepts connections while the cluster is degraded does not make any
-			// SystemBucket look Ready.
+			// No token: /health is the one admin endpoint Garage serves
+			// unauthenticated, exactly so that a probe can use it.
 			ProbeHandler: corev1.ProbeHandler{
-				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(s3Port)},
+				HTTPGet: &corev1.HTTPGetAction{
+					Path: "/health",
+					Port: intstr.FromInt32(adminPort),
+				},
 			},
+			// Generous, because becoming ready waits on the controller's next pass
+			// rather than on this process: the pod starts, answers 503 until the
+			// layout reaches it, and that is a normal first minute rather than a
+			// fault.
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       10,
+			FailureThreshold:    30,
 		},
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
@@ -435,9 +558,9 @@ func garageContainer(image string) corev1.Container {
 				corev1.ResourceMemory: resource.MustParse("256Mi"),
 			},
 		},
-		// The container had no security context of its own at all: it inherited
-		// root from the pod and kept the runtime's default capability set on top of
-		// a hostPath mount. See hardenedRoot.
+		// The container had no security context of its own at all: it inherited root
+		// from the pod and kept the runtime's default capability set. See
+		// hardenedRoot.
 		SecurityContext: hardenedRoot(),
 	}
 }
@@ -480,11 +603,15 @@ func podSpec(store *backend.Store, image string) corev1.PodSpec {
 	return corev1.PodSpec{
 		ServiceAccountName: resourceName(store),
 		ImagePullSecrets:   []corev1.LocalObjectReference{{Name: registryPullSecret}},
-		// Garage must own its metadata/data directory. The base image runs as a
-		// non-root user, but a hostPath-backed local PV directory is created
-		// root:root by the kubelet, and fsGroup does not cover hostPath — so the
-		// data-plane pod runs as root, consistent with how Deckhouse storage data
-		// planes run.
+		// Garage must own its metadata/data directory, and it runs as root to get
+		// it. With a hostPath-backed volume that was forced — the kubelet creates
+		// the directory root:root and fsGroup does not apply to hostPath. On a
+		// PersistentVolumeClaim from a StorageClass fsGroup does apply, so the pod
+		// could run as the image's non-root user instead. That is a change to the
+		// data plane's identity on disk, not a comment fix: an existing store's
+		// files are owned by root, so it needs a migration of its own and a run on
+		// the stand. Left as it is, deliberately, and consistent with how Deckhouse
+		// storage data planes run.
 		SecurityContext: &corev1.PodSecurityContext{
 			RunAsUser:  ptr.To[int64](0),
 			RunAsGroup: ptr.To[int64](0),
@@ -497,11 +624,10 @@ func podSpec(store *backend.Store, image string) corev1.PodSpec {
 
 // hardenedRoot is the container security context for the data plane.
 //
-// root stays, and it is not optional: the directory behind a hostPath-backed PV
-// is created by the kubelet as root:root, and fsGroup does not apply to hostPath.
-// But root with no capabilities and no escalation is a much smaller surface than
+// root with no capabilities and no escalation is a much smaller surface than
 // root with the default set, and Garage needs none of them — it listens on 3900,
-// 3901 and 3903, all unprivileged, and writes to a volume root already owns.
+// 3901 and 3903, all unprivileged, and writes to a volume root already owns. Why
+// root at all is explained on the pod security context in podSpec.
 //
 // ReadOnlyRootFilesystem is deliberately not set. It is the one part of this that
 // could stop the data plane rather than merely constrain it, if Garage or the
@@ -549,39 +675,125 @@ fi
 `, dataMountPath, nodeIdentityMountPath)
 
 // buildStatefulSet returns the data-plane StatefulSet: a desiredReplicas count
-// backed by node-sticky local PVs on control-plane nodes.
+// on control-plane nodes, each replica with a PersistentVolumeClaim of its own
+// from the module's StorageClass.
+//
 // The replica count is independent of the master count — replicas spread
-// one-per-node when several control-plane nodes exist (soft anti-affinity) and
-// co-locate on the single master otherwise; in single-replica mode the one pod
-// simply lands on whichever master the scheduler picks and stays there. Pods
-// start in parallel (no ordinal barrier). Storage is a per-ordinal PVC on the
-// WaitForFirstConsumer local StorageClass: the controller pre-creates a pool of
-// hostPath-backed, nodeAffinity-pinned PVs (ensureLocalPVs), so each
-// replica sticks to its node and finds its data again after a restart. This keeps
-// a constant replication factor and Garage quorum across master-count changes;
-// the layout is reconciled in mesh.go as replicas move and rejoin.
-func buildStatefulSet(store *backend.Store, namespace, image, cfgHash string) *appsv1.StatefulSet {
-	spec := podSpec(store, image) // data comes from volumeClaimTemplates
-
-	// The data plane runs on control-plane nodes and must tolerate their taints.
-	spec.NodeSelector = map[string]string{controlPlaneNodeLabel: ""}
-	spec.Tolerations = []corev1.Toleration{
-		{Key: "node-role.kubernetes.io/control-plane", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
-		{Key: "node-role.kubernetes.io/master", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
-	}
-	// Prefer (not require) spreading replicas one-per-control-plane-node, so every
-	// replica still schedules and runs when only a single master exists.
+// one-per-node when several control-plane nodes exist (soft anti-affinity and a
+// soft spread constraint, both scoped to this data plane) and co-locate on the
+// single master otherwise; outside the high-availability mode the one pod simply
+// lands on whichever master the scheduler picks. Pods start in parallel (no
+// ordinal barrier). This keeps a constant replication factor and Garage quorum
+// across master-count changes; the layout is reconciled in mesh.go as replicas
+// move and rejoin.
+//
+// What the volume does when a replica moves is the StorageClass's business, not
+// this module's: a class whose volumes follow the pod carries the replica's data
+// with it, and a node-pinned class leaves it behind to be rebuilt by anti-entropy
+// from the other replicas. The placement reconcile reads which of the two it is
+// from the bound volume and moves replicas accordingly (see rebalance.go).
+// dataPlanePlacement says where the data plane may run: control-plane nodes,
+// and nothing else.
+//
+// It used to be system nodes for preference and masters for the rest, on the
+// reasoning that a cluster with system nodes should not spend its control plane
+// on object storage. That was the wrong way round for this store. What lives in
+// it is the platform's own data — the thing a cluster has to be able to read
+// while it is being repaired — so it belongs on the nodes whose availability the
+// cluster already guarantees, and not next to the tenant-facing workloads a
+// system node is sized and scaled for. The practical half of the same argument:
+// system nodes come and go with a NodeGroup, and a store that follows them
+// re-replicates itself every time one is replaced.
+//
+// So the required affinity is one term now, and there is no preferred term to go
+// with it: there is one kind of node the data plane may have, and a cluster
+// always has at least one of them. A node that is labelled both a master and a
+// system node is still a master and still eligible — the rule is about which
+// nodes may be used, not about which labels a node is allowed to carry.
+//
+// The tolerations are what a master is tainted with, plus a taint dedicating a
+// node to this module by name, for an operator who wants one master carrying the
+// store and the others left alone. Tolerating a taint is not asking for the node:
+// where the pod actually lands is the affinity's business.
+//
+// What this does NOT do is decide how many replicas there are. That follows the
+// high-availability mode (see desiredReplicas); adding masters to a cluster
+// spreads the replicas, it does not create them.
+func dataPlanePlacement(spec *corev1.PodSpec) {
+	spec.NodeSelector = nil
 	spec.Affinity = &corev1.Affinity{
-		PodAntiAffinity: &corev1.PodAntiAffinity{
-			PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
-				Weight: 100,
-				PodAffinityTerm: corev1.PodAffinityTerm{
-					LabelSelector: &metav1.LabelSelector{MatchLabels: commonLabels(store)},
-					TopologyKey:   hostnameTopologyKey,
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{
+					{MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: controlPlaneNodeLabel, Operator: corev1.NodeSelectorOpExists},
+					}},
 				},
-			}},
+			},
 		},
 	}
+	spec.Tolerations = dataPlaneTolerations()
+}
+
+// dataPlaneTolerations is what the data plane has to tolerate to land on a
+// master.
+func dataPlaneTolerations() []corev1.Toleration {
+	return []corev1.Toleration{
+		{Key: "node-role.kubernetes.io/control-plane", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
+		{Key: "node-role.kubernetes.io/master", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
+		{Key: "dedicated.deckhouse.io", Operator: corev1.TolerationOpEqual, Value: "system-s3"},
+	}
+}
+
+func buildStatefulSet(store *backend.Store, namespace, image, cfgHash string, volumeSize resource.Quantity) *appsv1.StatefulSet {
+	spec := podSpec(store, image) // data comes from volumeClaimTemplates
+
+	// Where the data plane may run: the masters, and nothing else.
+	dataPlanePlacement(&spec)
+
+	// Spread the replicas across the masters, as far as the cluster allows.
+	//
+	// Both rules below select on planeLabels — the store's labels AND its
+	// incarnation — and that scoping is the load-bearing part, not a detail. A
+	// migration runs two Garage clusters side by side on the same masters for as
+	// long as the copy takes, and each has to spread over the same small set of
+	// nodes. A rule that selected on the store alone would make the two planes
+	// repel each other: the second plane's replicas would score every master as
+	// occupied, pile onto one node, or with a hard rule not schedule at all —
+	// and the migration, which is how this module replaces a data plane, would
+	// deadlock on its own placement policy. Each plane spreads itself; neither
+	// has an opinion about the other.
+	//
+	// Both rules are soft, for the same reason they are two. A cluster with one
+	// master runs three replicas on it: that is a degraded store, not a refusal
+	// to run, and the node-pinned volumes it comes back to are what it rebuilds
+	// from. Nothing here may ever leave a replica Pending.
+	//
+	// The anti-affinity says "not on a node that already has one of mine" — a
+	// repulsion, evaluated per pod, which is what keeps the first replicas apart.
+	// The spread constraint says "keep the counts per node within one", which is
+	// the same intent stated over the whole set: it is what stops three replicas
+	// landing 2+1 on three masters when the scheduler scores two of them equally.
+	// Honouring node affinity and taints makes the skew count only the nodes this
+	// pod could actually land on — the masters — instead of every node in the
+	// cluster, which would make the constraint satisfiable while doing nothing.
+	spec.Affinity.PodAntiAffinity = &corev1.PodAntiAffinity{
+		PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
+			Weight: 100,
+			PodAffinityTerm: corev1.PodAffinityTerm{
+				LabelSelector: &metav1.LabelSelector{MatchLabels: planeLabels(store)},
+				TopologyKey:   hostnameTopologyKey,
+			},
+		}},
+	}
+	spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
+		MaxSkew:            1,
+		TopologyKey:        hostnameTopologyKey,
+		WhenUnsatisfiable:  corev1.ScheduleAnyway,
+		LabelSelector:      &metav1.LabelSelector{MatchLabels: planeLabels(store)},
+		NodeAffinityPolicy: ptr.To(corev1.NodeInclusionPolicyHonor),
+		NodeTaintsPolicy:   ptr.To(corev1.NodeInclusionPolicyHonor),
+	}}
 
 	// Persist each replica's Garage node identity. When placement recycles a
 	// replica onto another master its PVC is recreated empty, so without this the
@@ -624,95 +836,32 @@ func buildStatefulSet(store *backend.Store, namespace, image, cfgHash string) *a
 			ServiceName:         rpcSvcName(store),
 			Replicas:            &replicas,
 			PodManagementPolicy: appsv1.ParallelPodManagement,
-			Selector:            &metav1.LabelSelector{MatchLabels: commonLabels(store)},
+			// The selector deliberately does NOT carry the incarnation, and it is
+			// the one place that does not. A StatefulSet's selector is immutable,
+			// so narrowing it would mean recreating the workload of every existing
+			// installation just to add a label. It is safe to leave wide: a
+			// StatefulSet only ever claims pods whose NAME says they are its own
+			// (the ordinal's parent must equal the set's name), and the two planes
+			// have different names, so their sets do not reach for each other's
+			// pods however alike their selectors look.
+			Selector: &metav1.LabelSelector{MatchLabels: commonLabels(store)},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels:      commonLabels(store),
+					Labels:      planeLabels(store),
 					Annotations: map[string]string{annConfigHash: cfgHash},
 				},
 				Spec: spec,
 			},
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
 				{
-					ObjectMeta: metav1.ObjectMeta{Name: "data", Labels: commonLabels(store)},
+					ObjectMeta: metav1.ObjectMeta{Name: "data", Labels: planeLabels(store)},
 					Spec: corev1.PersistentVolumeClaimSpec{
 						AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 						StorageClassName: &sc,
 						Resources: corev1.VolumeResourceRequirements{
-							Requests: corev1.ResourceList{corev1.ResourceStorage: store.SizePerNode},
+							Requests: corev1.ResourceList{corev1.ResourceStorage: volumeSize},
 						},
 					},
-				},
-			},
-		},
-	}
-}
-
-// shortHash is a filesystem/label-safe short digest of s (used to derive PV
-// names and data-directory paths from an arbitrary node hostname).
-func shortHash(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:])[:10]
-}
-
-// localPVName is the deterministic name of the index-th pool PV pinned to node
-// for the given incarnation. Deterministic naming makes the pool reconcile
-// idempotent; carrying the incarnation keeps a recreated store from binding a
-// leftover PV of the previous one (whose directory holds incompatible data).
-// firstIncarnation keeps the plain, incarnation-less name.
-func localPVName(store *backend.Store, node string, incarnation, index int32) string {
-	if incarnation <= firstIncarnation {
-		return fmt.Sprintf("%s-local-%s-%d", resourceName(store), shortHash(node), index)
-	}
-	return fmt.Sprintf("%s-local-%s-i%d-%d", resourceName(store), shortHash(node), incarnation, index)
-}
-
-// localPVPath is the on-node directory backing that pool PV. A recreated store
-// (incarnation > firstIncarnation) gets a directory of its own, so it starts from
-// empty storage instead of the previous incarnation's Garage metadata; the old
-// directories are left on disk untouched (Retain semantics).
-func localPVPath(store *backend.Store, node string, incarnation, index int32) string {
-	if incarnation <= firstIncarnation {
-		return fmt.Sprintf("%s/%s/%s-%d", hostPathBase, store.Name, shortHash(node), index)
-	}
-	return fmt.Sprintf("%s/%s/i%d/%s-%d", hostPathBase, store.Name, incarnation, shortHash(node), index)
-}
-
-// buildLocalPV builds one node-sticky local PV for the pool: a hostPath-backed
-// volume (DirectoryOrCreate, so the kubelet creates the directory on first mount
-// — no node agent needed) pinned to node via nodeAffinity, on the
-// WaitForFirstConsumer local StorageClass, with Retain so PVC/PV deletion never
-// wipes data. The capacity is nominal (hostPath does not enforce it).
-func buildLocalPV(store *backend.Store, node string, incarnation, index int32) *corev1.PersistentVolume {
-	hostPathType := corev1.HostPathDirectoryOrCreate
-	labels := commonLabels(store)
-	labels[labelSystemLocalNode] = node
-	sc := store.StorageClass
-	return &corev1.PersistentVolume{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   localPVName(store, node, incarnation, index),
-			Labels: labels,
-		},
-		Spec: corev1.PersistentVolumeSpec{
-			Capacity:                      corev1.ResourceList{corev1.ResourceStorage: store.SizePerNode},
-			AccessModes:                   []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
-			StorageClassName:              sc,
-			PersistentVolumeSource: corev1.PersistentVolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{
-					Path: localPVPath(store, node, incarnation, index),
-					Type: &hostPathType,
-				},
-			},
-			NodeAffinity: &corev1.VolumeNodeAffinity{
-				Required: &corev1.NodeSelector{
-					NodeSelectorTerms: []corev1.NodeSelectorTerm{{
-						MatchExpressions: []corev1.NodeSelectorRequirement{{
-							Key:      hostnameTopologyKey,
-							Operator: corev1.NodeSelectorOpIn,
-							Values:   []string{node},
-						}},
-					}},
 				},
 			},
 		},

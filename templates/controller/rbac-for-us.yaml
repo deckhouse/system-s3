@@ -20,6 +20,16 @@
 
   The webhooks share the same ServiceAccount but exercise only the read verbs.
 
+  tokenreviews and subjectaccessreviews are what the credentials endpoint is:
+  it takes a caller's ServiceAccount token, asks the API server who that is, and
+  asks it again whether they may use the bucket they named. Creating those two
+  reviews is a delegation of authority, not authority of its own — the answer
+  comes from the cluster's RBAC, and the endpoint cannot widen it. The same pair
+  is already granted to the kube-rbac-proxy sidecar through d8:rbac-proxy for the
+  metrics port; it is stated here explicitly rather than inherited, because a
+  binding that exists for a different reason is a thing that can be removed for
+  that reason.
+
   Cluster-wide Secret verbs carry no `delete`, deliberately: the credentials
   Secret has a controllerReference to its SystemBucket and is garbage-collected
   with it, and the module's own Secrets live in its namespace and are covered by
@@ -54,19 +64,25 @@
     (dict "apiGroups" (list "") "resources" (list "events") "verbs" (list "create" "list" "patch"))
     (dict "apiGroups" (list "") "resources" (list "pods") "verbs" (list "get" "list" "delete"))
     (dict "apiGroups" (list "") "resources" (list "pods/exec") "verbs" (list "create"))
-    (dict "apiGroups" (list "") "resources" (list "persistentvolumeclaims") "verbs" (list "get" "list" "delete"))
+    (dict "apiGroups" (list "") "resources" (list "persistentvolumeclaims") "verbs" (list "get" "list" "update" "patch" "delete"))
     (dict "apiGroups" (list "") "resources" (list "secrets" "configmaps" "services" "serviceaccounts") "verbs" (list "create" "update" "patch" "delete"))
     (dict "apiGroups" (list "apps") "resources" (list "statefulsets") "verbs" (list "create" "update" "patch" "delete"))
+    (dict "apiGroups" (list "batch") "resources" (list "jobs") "verbs" (list "get" "list" "watch" "create" "delete"))
+    (dict "apiGroups" (list "policy") "resources" (list "poddisruptionbudgets") "verbs" (list "get" "list" "watch" "create" "update" "patch" "delete"))
     (dict "apiGroups" (list "coordination.k8s.io") "resources" (list "leases") "verbs" (list "get" "list" "watch" "create" "update" "patch" "delete"))
   )
   "clusterRoleRules" (list
     (dict "apiGroups" (list "storage.deckhouse.io") "resources" (list "systembuckets" "systembuckets/status" "systembuckets/finalizers") "verbs" (list "get" "list" "watch" "create" "update" "patch" "delete"))
-    (dict "apiGroups" (list "") "resources" (list "secrets") "verbs" (list "get" "list" "watch" "create" "update" "patch"))
-    (dict "apiGroups" (list "") "resources" (list "configmaps" "services" "serviceaccounts") "verbs" (list "get" "list" "watch"))
+    (dict "apiGroups" (list "") "resources" (list "secrets") "verbs" (list "get" "list" "watch"))
+    (dict "apiGroups" (list "") "resources" (list "configmaps") "verbs" (list "get" "list" "watch" "create" "update" "patch"))
+    (dict "apiGroups" (list "") "resources" (list "services" "serviceaccounts") "verbs" (list "get" "list" "watch"))
     (dict "apiGroups" (list "") "resources" (list "namespaces") "verbs" (list "get" "list" "watch"))
     (dict "apiGroups" (list "") "resources" (list "nodes") "verbs" (list "get" "list" "watch"))
     (dict "apiGroups" (list "") "resources" (list "persistentvolumes") "verbs" (list "get" "list" "watch" "create" "delete"))
     (dict "apiGroups" (list "apps") "resources" (list "statefulsets") "verbs" (list "get" "list" "watch"))
+    (dict "apiGroups" (list "policy") "resources" (list "poddisruptionbudgets") "verbs" (list "get" "list" "watch"))
+    (dict "apiGroups" (list "authentication.k8s.io") "resources" (list "tokenreviews") "verbs" (list "create"))
+    (dict "apiGroups" (list "authorization.k8s.io") "resources" (list "subjectaccessreviews") "verbs" (list "create"))
   )
 }}
 {{ include "helm_lib_module_controller_rbac" (list . $rbacConfig) }}

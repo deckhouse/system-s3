@@ -17,17 +17,6 @@ limitations under the License.
 package consts
 
 const (
-	// SystemStoreLabel and SystemLocalNodeLabel are on every local PersistentVolume
-	// the controller provisions for the data plane.
-	//
-	// The module-delete hook needs them because that pool is the one thing the
-	// module leaves behind: PersistentVolumes are cluster-scoped, so deleting the
-	// namespace does not take them, Helm does not own them (the controller creates
-	// them, not the chart), and the store has no custom resource for them to be
-	// owned by. The only collector lives in the controller, which is gone by then.
-	SystemStoreLabel     string = "storage.deckhouse.io/system-store"
-	SystemLocalNodeLabel string = "storage.deckhouse.io/system-local-node"
-
 	ModuleName       string = "systemS3"
 	ModuleNamespace  string = "d8-system-s3"
 	ModulePluralName string = "system-s3"
@@ -35,6 +24,14 @@ const (
 	// the webhooks container consumes. It must match the Service name
 	// (helm_lib_module_webhook_service defaults to "webhooks").
 	WebhookCertCn string = "webhooks"
+
+	// STSServiceName is the Service in front of the credentials endpoint (the
+	// controller's STS listener). The same certificate covers it — it is issued
+	// for names in this namespace and the endpoint needs no PKI of its own — which
+	// is why the name is here, next to the CN, rather than in the chart alone:
+	// the certificate's SANs have to include it or every client fails TLS
+	// verification against a name the certificate never claimed.
+	STSServiceName string = "system-s3-sts"
 )
 
 // ModuleFinalizerPrefix is what a finalizer this module sets looks like (the

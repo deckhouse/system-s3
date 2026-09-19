@@ -35,11 +35,15 @@ import (
 // 404s for missing resources, and DeleteKey/DeleteBucket/UpdateBucket as POST
 // with the id in a query parameter.
 //
-// NOTE: the request/response shapes below target the documented Garage v2.3.0
+// NOTE: the request/response shapes below target the documented Garage v2.4.1
 // admin API; the wire format is deliberately localised here so a fix stays in
 // one file. The exported method set and the returned Go structs are unchanged
 // from the v1 client, so the callers (mesh.go, rebalance.go, buckets.go,
 // access.go) are not affected by the v2 migration.
+//
+// The v2 specification (doc/api/garage-admin-v2.json) is byte-for-byte the same
+// set of 49 calls in v2.3.0 and v2.4.1 — same paths, same schemas — which is why
+// the version bump touches nothing here beyond this comment.
 type adminClient struct {
 	http    *http.Client
 	baseURL string // e.g. http://host:3903
@@ -238,6 +242,50 @@ func isNotFound(err error) bool {
 	return ae.StatusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(ae.Body), "not found")
 }
 
+// layoutHistory is the part of GET /v2/GetClusterLayoutHistory this module reads:
+// which layout version is current, and the oldest version every node is known to
+// have acknowledged.
+type layoutHistory struct {
+	CurrentVersion int64 `json:"currentVersion"`
+	MinAck         int64 `json:"minAck"`
+}
+
+// layoutHistory reads how far the cluster has got in agreeing on the layout.
+//
+// MinAck below CurrentVersion means some node has not acknowledged the layout
+// the others are already using. That is normal for a few seconds after a change
+// and permanent for a node that is never coming back.
+func (c *adminClient) layoutHistory(ctx context.Context) (*layoutHistory, error) {
+	var out layoutHistory
+	if err := c.do(ctx, http.MethodGet, "/v2/GetClusterLayoutHistory", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// skipDeadNodesResult names the nodes whose trackers were advanced.
+type skipDeadNodesResult struct {
+	AckUpdated  []string `json:"ackUpdated"`
+	SyncUpdated []string `json:"syncUpdated"`
+}
+
+// skipDeadNodes advances the layout trackers past nodes that are not answering,
+// so a node that is never coming back stops holding the cluster on an old layout
+// version.
+//
+// allowMissingData is the dangerous half and this module never sets it: with it
+// false, only the ACK tracker moves — the cluster stops WAITING for the dead
+// node, and does not pretend the data it held has been accounted for. Moving the
+// SYNC tracker is the operator's decision to accept a loss, not a controller's.
+func (c *adminClient) skipDeadNodes(ctx context.Context, version int64, allowMissingData bool) (*skipDeadNodesResult, error) {
+	body := map[string]any{"version": version, "allowMissingData": allowMissingData}
+	var out skipDeadNodesResult
+	if err := c.do(ctx, http.MethodPost, "/v2/ClusterLayoutSkipDeadNodes", body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // --- Bucket / key management ------------------------------------------------
 
 // keyInfo is the response of POST /v2/CreateKey and GET /v2/GetKeyInfo.
@@ -250,9 +298,42 @@ type keyInfo struct {
 }
 
 // bucketInfo is the response of POST /v2/CreateBucket and GET /v2/GetBucketInfo.
+//
+// Bytes/Objects are what the bucket holds and Quotas what it is allowed to hold;
+// both are absent from a CreateBucket response, which is why nothing reads them
+// off one.
 type bucketInfo struct {
-	ID            string   `json:"id"`
-	GlobalAliases []string `json:"globalAliases"`
+	ID            string          `json:"id"`
+	GlobalAliases []string        `json:"globalAliases"`
+	Bytes         int64           `json:"bytes"`
+	Objects       int64           `json:"objects"`
+	Quotas        bucketQuotas    `json:"quotas"`
+	Keys          []bucketKeyPerm `json:"keys"`
+}
+
+// bucketKeyPerm is one key's access to a bucket, as GetBucketInfo reports it.
+// It is how the cutover finds the keys whose write access has to be revoked:
+// the module knows which keys it issued, but the bucket knows which keys can
+// actually write to it.
+type bucketKeyPerm struct {
+	AccessKeyID string      `json:"accessKeyId"`
+	Name        string      `json:"name"`
+	Permissions permissions `json:"permissions"`
+}
+
+// bucketQuotas is the quota pair Garage keeps per bucket. Both halves are
+// nullable — null is "no limit" — and this module sets only the size.
+type bucketQuotas struct {
+	MaxSize    *int64 `json:"maxSize"`
+	MaxObjects *int64 `json:"maxObjects"`
+}
+
+// keyListItem is one entry of GET /v2/ListKeys.
+type keyListItem struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Expired    bool   `json:"expired"`
+	Expiration string `json:"expiration"`
 }
 
 // permissions is the access granted to a key on a bucket.
@@ -271,13 +352,27 @@ func (c *adminClient) createKey(ctx context.Context, name string) (*keyInfo, err
 	return &out, nil
 }
 
-// keyListItem is one entry of GET /v2/ListKeys.
-type keyListItem struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+// createExpiringKey creates a key that Garage stops honouring at expiresAt.
+//
+// The expiry is set at creation rather than afterwards on purpose: a key that
+// exists for a moment without one is a key that outlives the process if that
+// process dies between the two calls, and these are minted per request by a
+// service that hands the secret to a caller and forgets it. There is nothing to
+// come back and clean up with.
+func (c *adminClient) createExpiringKey(ctx context.Context, name string, expiresAt time.Time) (*keyInfo, error) {
+	body := map[string]any{
+		"name":       name,
+		"expiration": expiresAt.UTC().Format(time.RFC3339),
+	}
+	var out keyInfo
+	if err := c.do(ctx, http.MethodPost, "/v2/CreateKey", body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
-// listKeys returns every access key in the cluster.
+// listKeys returns every access key in the cluster, with the expiry state Garage
+// keeps for each.
 func (c *adminClient) listKeys(ctx context.Context) ([]keyListItem, error) {
 	var out []keyListItem
 	if err := c.do(ctx, http.MethodGet, "/v2/ListKeys", nil, &out); err != nil {
@@ -296,6 +391,28 @@ func (c *adminClient) keyExists(ctx context.Context, accessKeyID string) (bool, 
 		return false, nil
 	}
 	return false, err
+}
+
+// setKeyExpiration gives an access key a moment at which Garage itself stops
+// honouring it.
+//
+// This is what makes a rotation overlap safe to promise. The alternative — the
+// controller coming back to delete the old key when the window is over — is a
+// promise only as good as the controller: a pod that is evicted, a reconcile that
+// errors, a cluster that is busy, and the replaced key stays valid indefinitely.
+// An expiry is held by the backend, so the window closes on time whether or not
+// anything is still watching it.
+//
+// The key is not deleted by this: an expired key still exists in Garage's
+// metadata (ListKeys reports expired: true), and removing it is a later,
+// unhurried cleanup.
+func (c *adminClient) setKeyExpiration(ctx context.Context, accessKeyID string, at time.Time) error {
+	body := map[string]any{"expiration": at.UTC().Format(time.RFC3339)}
+	err := c.do(ctx, http.MethodPost, "/v2/UpdateKey?id="+url.QueryEscape(accessKeyID), body, nil)
+	if isNotFound(err) {
+		return nil // already gone: nothing left to expire
+	}
+	return err
 }
 
 // deleteKey removes an access key (idempotent: a missing key is not an error).
@@ -321,6 +438,57 @@ func (c *adminClient) getBucketByAlias(ctx context.Context, alias string) (*buck
 	return nil, false, err
 }
 
+// bucketListItem is one entry of GET /v2/ListBuckets.
+type bucketListItem struct {
+	ID            string   `json:"id"`
+	GlobalAliases []string `json:"globalAliases"`
+}
+
+// cleanupIncompleteUploads removes the multipart uploads of a bucket that were
+// started more than olderThan ago and never finished, and reports how many went.
+//
+// Garage does not do this on its own: an upload interrupted halfway leaves its
+// parts in the bucket for good. They are not objects — they do not appear in a
+// listing, they are not counted against the bucket's quota, and the only place
+// they show up is unfinishedMultipartUploadBytes in GetBucketInfo — but they
+// occupy the volume exactly like data that is being used.
+func (c *adminClient) cleanupIncompleteUploads(ctx context.Context, bucketID string, olderThan time.Duration) (int64, error) {
+	body := map[string]any{
+		"bucketId":      bucketID,
+		"olderThanSecs": int64(olderThan.Seconds()),
+	}
+	var out struct {
+		UploadsDeleted int64 `json:"uploadsDeleted"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v2/CleanupIncompleteUploads", body, &out); err != nil {
+		return 0, err
+	}
+	return out.UploadsDeleted, nil
+}
+
+// listBuckets returns every bucket of the cluster.
+//
+// The migration copies what a cluster HOLDS rather than what the module believes
+// it should hold: a bucket whose ownership record was lost is still a bucket full
+// of a consumer's data, and leaving it behind because a ConfigMap forgot about it
+// is not a migration.
+func (c *adminClient) listBuckets(ctx context.Context) ([]bucketListItem, error) {
+	var out []bucketListItem
+	if err := c.do(ctx, http.MethodGet, "/v2/ListBuckets", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// getBucketByID reads a bucket by its identifier.
+func (c *adminClient) getBucketByID(ctx context.Context, id string) (*bucketInfo, error) {
+	var out bucketInfo
+	if err := c.do(ctx, http.MethodGet, "/v2/GetBucketInfo?id="+url.QueryEscape(id), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // createBucket creates a bucket with the given global alias.
 func (c *adminClient) createBucket(ctx context.Context, alias string) (*bucketInfo, error) {
 	var out bucketInfo
@@ -330,6 +498,28 @@ func (c *adminClient) createBucket(ctx context.Context, alias string) (*bucketIn
 	return &out, nil
 }
 
+// setBucketQuota sets the bucket's size quota in bytes, in place, leaving the
+// object-count quota alone.
+//
+// Garage enforces it on write: a PUT that would take the bucket past maxSize is
+// refused with QuotaExceeded. That is the whole point of carrying spec.quota into
+// the backend rather than only into the volume sizing — without it a single
+// consumer could fill the store and every other platform component would start
+// failing writes for a reason none of them could see.
+//
+// maxObjects is deliberately sent as null rather than omitted: UpdateBucket
+// replaces the quota object, so leaving the field out would be read as "no object
+// quota" anyway, and saying it explicitly is how the intent survives a reader.
+func (c *adminClient) setBucketQuota(ctx context.Context, bucketID string, maxSize int64) error {
+	body := map[string]any{
+		"quotas": map[string]any{
+			"maxSize":    maxSize,
+			"maxObjects": nil,
+		},
+	}
+	return c.do(ctx, http.MethodPost, "/v2/UpdateBucket?id="+url.QueryEscape(bucketID), body, nil)
+}
+
 // deleteBucket removes a bucket by id (idempotent).
 func (c *adminClient) deleteBucket(ctx context.Context, bucketID string) error {
 	err := c.do(ctx, http.MethodPost, "/v2/DeleteBucket?id="+url.QueryEscape(bucketID), nil, nil)
@@ -337,6 +527,17 @@ func (c *adminClient) deleteBucket(ctx context.Context, bucketID string) error {
 		return nil
 	}
 	return err
+}
+
+// deny revokes the given permissions from a key on a bucket (idempotent). The
+// permissions set to true are the ones REMOVED.
+func (c *adminClient) deny(ctx context.Context, bucketID, accessKeyID string, perms permissions) error {
+	body := map[string]any{
+		"bucketId":    bucketID,
+		"accessKeyId": accessKeyID,
+		"permissions": perms,
+	}
+	return c.do(ctx, http.MethodPost, "/v2/DenyBucketKey", body, nil)
 }
 
 // allow grants the given permissions to a key on a bucket (idempotent).

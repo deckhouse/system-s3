@@ -12,6 +12,18 @@ properties:
     type: object
     default: {}
     properties:
+      effectiveStorageClass:
+        type: string
+        x-examples: ["ceph-csi-rbd"]
+        description: |
+          The StorageClass the data plane's volumes are ordered from, resolved by
+          the storage-class hook: the module's own setting, then
+          global.modules.storageClass, then the cluster's default StorageClass.
+
+          Empty when none of the three resolves. The chart still renders — the
+          controller is what reports the missing class, on every SystemBucket —
+          because a chart that failed to render would take the whole module down
+          with a Helm error instead of one condition saying what to set.
       customWebhookCert:
         type: object
         default: {}
@@ -29,6 +41,40 @@ properties:
           ca:
             type: string
             x-examples: ["YjY0ZW5jX3N0cmluZwo="]
+      customWebhookCA:
+        type: object
+        default: {}
+        description: |
+          The CA the webhook and credentials-endpoint certificate is signed by,
+          kept apart from the certificate itself.
+
+          It is separate so that the CA can be given a common name of its own. A
+          CA sharing the certificate's CN produces a chain that Go accepts and
+          OpenSSL refuses — the issuer name equals the subject name, so openssl
+          calls the certificate self-issued and stops at depth 0. Consumers
+          verifying the credentials endpoint with anything but Go would fail.
+        properties:
+          crt:
+            type: string
+            x-examples: ["YjY0ZW5jX3N0cmluZwo="]
+          key:
+            type: string
+            x-examples: ["YjY0ZW5jX3N0cmluZwo="]
+      stsServiceName:
+        type: string
+        default: system-s3-sts
+        description: |
+          Name of the Service in front of the credentials endpoint. It is a value
+          rather than a literal in the chart because the certificate's SANs are
+          generated from the same name in hooks/go/consts — the two have to agree
+          or every consumer fails TLS verification.
+      stsPort:
+        type: integer
+        default: 8444
+        description: |
+          The port the controller serves the credentials endpoint on. Not 8443:
+          that is the webhook container's, in the same Pod and the same network
+          namespace.
       controllerMetricsProxyPort:
         type: integer
         default: 8080

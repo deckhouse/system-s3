@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 )
 
@@ -61,7 +62,7 @@ type nodePeer struct {
 // layout via the admin API, returning whether the cluster is healthy and
 // serving. It is idempotent: connect is a no-op for already-connected peers and
 // layout is only staged for nodes not yet present in it.
-func (d *Driver) ensureMeshAndLayout(ctx context.Context, store *backend.Store) (meshResult, error) {
+func (d *Driver) ensureMeshAndLayout(ctx context.Context, store *backend.Store, capacity resource.Quantity) (meshResult, error) {
 	token, err := d.adminToken(ctx, store)
 	if err != nil {
 		return meshResult{}, err
@@ -78,7 +79,21 @@ func (d *Driver) ensureMeshAndLayout(ctx context.Context, store *backend.Store) 
 		return meshResult{msg: "waiting for Garage pods to report a node identity"}, nil
 	}
 
-	svc := newAdminClient(adminEndpoint(store, d.namespace, d.clusterDomain), token)
+	// Addressed at a pod, not at the Service — and that is what lets the readiness
+	// probe mean something.
+	//
+	// Garage answers /health only once a node holds a role in the layout, and the
+	// layout is assigned by these very calls. Made through the Service, which
+	// routes to READY endpoints only, they cannot be made until a pod is ready and
+	// a pod cannot be ready until they are made: a fresh installation sits at 0/3
+	// forever (measured once at 35 minutes). Made at a pod's address, they work
+	// while every pod is still unready, the layout lands, and readiness becomes
+	// free to mean "this node is in the cluster and can serve" — which is what the
+	// disruption budget needs it to mean.
+	//
+	// Any live peer will do: connect, layout and health are cluster-wide facts,
+	// and discoverPeers only returns nodes that just answered.
+	svc := newAdminClient(fmt.Sprintf("http://%s:%d", peers[0].ip, adminPort), token)
 
 	// 1. Connect peers (idempotent gossip seed).
 	peerSpecs := make([]string, 0, len(peers))
@@ -97,8 +112,7 @@ func (d *Driver) ensureMeshAndLayout(ctx context.Context, store *backend.Store) 
 		return meshResult{msg: fmt.Sprintf("reading layout: %v", err)}, nil
 	}
 
-	size := store.SizePerNode
-	changes := layoutRoleChanges(layout, peers, desiredReplicas(store), size.Value())
+	changes := layoutRoleChanges(layout, peers, desiredReplicas(store), capacity.Value())
 	if len(changes) > 0 {
 		if err := svc.stageLayout(ctx, changes); err != nil {
 			return meshResult{msg: fmt.Sprintf("staging layout: %v", err)}, nil
@@ -122,7 +136,55 @@ func (d *Driver) ensureMeshAndLayout(ctx context.Context, store *backend.Store) 
 		return meshResult{msg: fmt.Sprintf("Garage store health is %q (%d/%d storage nodes ok)", health.Status, health.StorageNodesOk, health.StorageNodes), total: total}, nil
 	}
 
+	// 4. A node that is never coming back must stop holding the cluster on an old
+	// layout version.
+	d.skipDeadNodesIfStuck(ctx, store, svc, len(peers), desiredReplicas(store))
+
 	return meshResult{ready: true, msg: "Garage store is healthy", total: total}, nil
+}
+
+// skipDeadNodesIfStuck advances the layout trackers past nodes that are gone, and
+// only when it is safe to call them gone.
+//
+// Garage keeps a layout version alive until every node has acknowledged it. A
+// node that is removed for good — a master taken out of the cluster — never will,
+// and the cluster then sits on an old version indefinitely. The admin API has a
+// call for exactly this; what it needs is somebody to decide that the silent node
+// is dead rather than restarting.
+//
+// The decision here is deliberately narrow: every replica the store expects is
+// live and healthy, and the layout is still waiting on somebody. Whoever that is,
+// it is not one of ours. During a rolling restart the count is short and nothing
+// is called dead.
+//
+// Failures are logged and swallowed. This tidies up a layout; it is not a reason
+// to fail a pass over a cluster that has just been found healthy.
+func (d *Driver) skipDeadNodesIfStuck(ctx context.Context, store *backend.Store, svc *adminClient, livePeers int, want int32) {
+	if int32(livePeers) < want {
+		return
+	}
+	hist, err := svc.layoutHistory(ctx)
+	if err != nil {
+		d.log.Error("unable to read the cluster layout history", logger.Err(err), "store", store.Name)
+		return
+	}
+	if hist.MinAck >= hist.CurrentVersion {
+		return
+	}
+
+	// allowMissingData stays false: the ACK tracker moves, the SYNC tracker does
+	// not. The cluster stops waiting for the dead node without anyone pretending
+	// the data it held has been accounted for.
+	res, err := svc.skipDeadNodes(ctx, hist.CurrentVersion, false)
+	if err != nil {
+		d.log.Error("unable to advance the layout past nodes that are gone", logger.Err(err),
+			"store", store.Name, "version", hist.CurrentVersion, "minAck", hist.MinAck)
+		return
+	}
+	if len(res.AckUpdated) > 0 {
+		d.log.Info("the layout no longer waits for nodes that are gone",
+			"store", store.Name, "version", hist.CurrentVersion, "nodes", res.AckUpdated)
+	}
 }
 
 // adminToken reads the admin token from the per-cluster secret.
@@ -137,17 +199,14 @@ func (d *Driver) adminToken(ctx context.Context, store *backend.Store) (string, 
 // discoverPeers lists the Garage pods and queries each pod's admin API for its
 // node identity. Pods without an IP or not yet answering are skipped.
 func (d *Driver) discoverPeers(ctx context.Context, store *backend.Store, token string) ([]nodePeer, error) {
-	pods := &corev1.PodList{}
-	if err := d.apiReader.List(ctx, pods,
-		client.InNamespace(d.namespace),
-		client.MatchingLabels(commonLabels(store)),
-	); err != nil {
+	pods, err := d.planePods(ctx, store)
+	if err != nil {
 		return nil, err
 	}
 
-	peers := make([]nodePeer, 0, len(pods.Items))
-	for i := range pods.Items {
-		pod := &pods.Items[i]
+	peers := make([]nodePeer, 0, len(pods))
+	for i := range pods {
+		pod := &pods[i]
 		if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" {
 			continue
 		}

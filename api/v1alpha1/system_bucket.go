@@ -22,16 +22,23 @@ import (
 
 // SystemBucket is a namespaced CR with which a Deckhouse component asks for a
 // bucket in the platform's system object storage. The controller creates the
-// bucket in the system backend, mints a dedicated access key / secret key for
-// it, and writes a Secret with the standard S3 connection variables in the same
-// namespace (status.secretRef).
+// bucket in the system backend and writes a ConfigMap with the S3 connection
+// parameters in the same namespace (status.connectionRef).
+//
+// No credentials are written anywhere, and none are long-lived: a consumer
+// exchanges its ServiceAccount token at the credentials endpoint for a key that
+// the backend stops honouring an hour later. Kubernetes RBAC decides who may do
+// that, per bucket, through the virtual systembuckets/read and /write
+// subresources.
 //
 // It is deliberately the dumbest resource the module could ship, and every
 // omission is a decision:
 //
-//   - No access resource. The consumer is a platform component, not a tenant
-//     handing out scoped credentials, so the credentials come with the bucket.
-//     Rotation is an annotation (see RotateAnnotation), not a second object.
+//   - No access resource, and no credentials object of any kind. Who may reach a
+//     bucket is an ordinary RBAC grant, which is the answer an administrator
+//     already knows how to read, audit and revoke — and revoking it takes effect
+//     without anything having to be rotated, because what was handed out expires
+//     on its own.
 //   - No reference to a store. The module owns exactly one system data plane,
 //     configured through ModuleConfig, so there is nothing to point at and no
 //     head resource to keep Ready.
@@ -45,9 +52,13 @@ import (
 //     system storage out of tenant hands without matching namespace names
 //     against a pattern.
 //
-// Key rotation: add or change the annotation storage.deckhouse.io/rotate to
-// trigger issuance of a fresh key pair (the Secret is updated and the previous
-// key is revoked). status.observedRotation records the last processed value.
+// The markers below are not rendered. crds/systembucket.yaml is written by
+// hand, and hack/generate_code.sh generates deepcopy only — so this is a record
+// of what the shipped manifest enforces, kept next to the fields it constrains,
+// and the manifest is the thing that has to be edited with them. They were
+// added because the type carried none of it: a reader of this package saw two
+// unconstrained strings and no immutability at all, which is a laxer resource
+// than the one a cluster actually has.
 //
 // The markers below are not rendered. crds/systembucket.yaml is written by
 // hand, and hack/generate_code.sh generates deepcopy only — so this is a record
@@ -61,6 +72,8 @@ import (
 // +kubebuilder:subresource:status
 // +kubebuilder:metadata:labels={"heritage=deckhouse","module=system-s3","backup.deckhouse.io/cluster-config=true"}
 // +kubebuilder:printcolumn:name="Bucket",type="string",JSONPath=`.status.bucketName`
+// +kubebuilder:printcolumn:name="Quota",type="string",JSONPath=`.spec.quota`
+// +kubebuilder:printcolumn:name="Used",type="integer",JSONPath=`.status.usedBytes`
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Secret",type="string",JSONPath=`.status.secretRef.name`
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].status`
@@ -105,19 +118,29 @@ type SystemBucketSpec struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	BucketName string `json:"bucketName,omitempty"`
 
-	// CredentialsSecretName overrides the name of the credentials Secret
-	// written in this bucket's namespace. Defaults to
-	// <metadata.name>-s3-credentials.
+	// Quota is how much the bucket may hold, as a Kubernetes quantity. It becomes
+	// the bucket's quota in the backend — a write past it is refused — and it is
+	// what the data plane sizes its volumes from: the store provisions the sum of
+	// every SystemBucket's quota, so asking for more here is what makes the
+	// volumes grow.
 	//
-	// Immutable after creation: the Secret is owned by this resource, so renaming
-	// it would leave the old one behind for as long as this resource lives, and
-	// the new name starts with no Secret at all — which the controller treats as
-	// a lost secret key and answers by rotating the access key. Delete the
-	// SystemBucket and create it with the name you want.
+	// It is named after what it does. The field used to be called size, which
+	// read as a reservation — something the bucket is given and holds — while
+	// what it has always been is a ceiling the backend enforces per write.
+	//
+	// The default is deliberately small. A system bucket is a platform
+	// component's working set, not a data lake, and a default that fits a
+	// component which never says how much it needs is better than one that
+	// reserves tens of gigabytes per consumer on a control-plane volume.
+	//
+	// It can be raised at any time. Lowering it is accepted but does not shrink
+	// anything: the quota follows, so writes stop at the new value, while the
+	// volumes the store already provisioned stay the size they are — a
+	// PersistentVolumeClaim cannot shrink.
 	// +optional
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
-	CredentialsSecretName string `json:"credentialsSecretName,omitempty"`
+	// +kubebuilder:default="1Gi"
+	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki)?$`
+	Quota string `json:"quota,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true
@@ -140,47 +163,34 @@ type SystemBucketStatus struct {
 	// +optional
 	BucketName string `json:"bucketName,omitempty"`
 
-	// AccessKeyID is the public access key id issued for this bucket (the
-	// secret key is only written into the credentials Secret).
-	// +optional
-	AccessKeyID string `json:"accessKeyID,omitempty"`
-
-	// SecretRef references the Secret (in this bucket's namespace) holding the
-	// S3 connection variables and credentials.
-	// +optional
-	SecretRef *LocalSecretReference `json:"secretRef,omitempty"`
-
-	// ObservedRotation is the last value of the rotation annotation processed
-	// by the controller. When it differs from the current annotation value a
-	// new key pair is issued.
-	// +optional
-	ObservedRotation string `json:"observedRotation,omitempty"`
-
-	// SupersededAccessKeyID is a key that has been replaced and still
-	// has to be revoked in the backend.
+	// ConnectionRef references the ConfigMap (in this bucket's namespace) holding
+	// the S3 connection parameters: where the storage is, what the bucket is
+	// called, and how to exchange a ServiceAccount token for credentials.
 	//
-	// It exists because the two halves of a rotation cannot be made
-	// atomic: the backend mints a key and hands back its secret half
-	// once and never again, so the secret has to reach the consumer's
-	// Secret before the old key is taken away. Revoking first leaves a
-	// window — a conflict on the Secret write, a reconcile timeout, an
-	// evicted Pod — in which the consumer holds a key that no longer
-	// works and the new secret exists only in the controller's memory.
-	//
-	// So the old key is recorded here instead and revoked on a later
-	// pass, once the new one is durable. The field is what makes that
-	// retryable: a revoke that fails is tried again rather than
-	// forgotten, which is the difference between a stale key and an
-	// orphan nobody will ever clean up.
+	// A ConfigMap and not a Secret because nothing in it is secret. There is no
+	// long-lived key to keep: credentials are minted per consumer, for an hour,
+	// against a token Kubernetes issued and RBAC approved.
 	// +optional
-	SupersededAccessKeyID string `json:"supersededAccessKeyID,omitempty"`
+	ConnectionRef *LocalObjectReference `json:"connectionRef,omitempty"`
 
-	// LastRotationTime is the timestamp of the most recent key issuance.
+	// QuotaBytes is the quota the backend enforces on this bucket, derived from
+	// spec.quota. Reported back rather than echoed from the spec: what stops a
+	// write is what the backend holds, and the two differ while a reconcile is
+	// still to come.
 	// +optional
-	LastRotationTime *metav1.Time `json:"lastRotationTime,omitempty"`
+	QuotaBytes int64 `json:"quotaBytes,omitempty"`
+
+	// UsedBytes and Objects are what the bucket currently holds, as the backend
+	// counts it. They are the only place a consumer can see how close it is to
+	// its quota, and the only input an operator has for raising spec.quota before
+	// writes start failing.
+	// +optional
+	UsedBytes int64 `json:"usedBytes,omitempty"`
+	// +optional
+	Objects int64 `json:"objects,omitempty"`
 
 	// Conditions hold the latest stage states. Known types: StorageReady,
-	// BucketReady, CredentialsReady, Ready.
+	// BucketReady, ConnectionReady, Ready.
 	// +optional
 	// +patchMergeKey=type
 	// +patchStrategy=merge
@@ -189,10 +199,10 @@ type SystemBucketStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
-// LocalSecretReference references a Secret by name within a known namespace.
+// LocalObjectReference references an object by name within a known namespace.
 // +k8s:deepcopy-gen=true
-type LocalSecretReference struct {
-	// Name of the referenced Secret.
+type LocalObjectReference struct {
+	// Name of the referenced object.
 	Name string `json:"name"`
 }
 
@@ -207,9 +217,11 @@ const (
 	// backend.
 	SystemBucketConditionBucketReady = "BucketReady"
 
-	// SystemBucketConditionCredentialsReady reports whether the credentials
-	// Secret holds a key pair that is valid for the bucket.
-	SystemBucketConditionCredentialsReady = "CredentialsReady"
+	// SystemBucketConditionConnectionReady reports whether the ConfigMap with
+	// the connection parameters has been written. It is not a statement about
+	// credentials — there are none to be ready — but about the consumer having
+	// been told where to go and how to ask.
+	SystemBucketConditionConnectionReady = "ConnectionReady"
 
 	// SystemBucketConditionReady is the aggregate.
 	SystemBucketConditionReady = "Ready"
@@ -224,12 +236,12 @@ const (
 var SystemBucketConditionTypes = []string{
 	SystemBucketConditionStorageReady,
 	SystemBucketConditionBucketReady,
-	SystemBucketConditionCredentialsReady,
+	SystemBucketConditionConnectionReady,
 	SystemBucketConditionReady,
 }
 
 // ManagedByLabel and ManagedByValue mark every object this module creates,
-// including the credentials Secret it writes into a consumer's namespace.
+// including the connection ConfigMap it writes into a consumer's namespace.
 //
 // The label is not decoration: the controller's cache is scoped to it, because a
 // cache over every Secret in the cluster would hold each Helm release in the
@@ -244,10 +256,6 @@ const (
 // GVK lookups.
 const SystemBucketKind = "SystemBucket"
 
-// RotateAnnotation, when its value changes, triggers issuance of a fresh access
-// key pair for the SystemBucket.
-const RotateAnnotation = "storage.deckhouse.io/rotate"
-
 // Namespace admission gate for SystemBucket. Every namespace a DKP module owns
 // carries these through helm_lib_module_labels, so the label is an authoritative
 // "this is a platform namespace" marker — unlike a d8-* name pattern, which is a
@@ -257,16 +265,24 @@ const (
 	HeritageDeckhouse = "deckhouse"
 )
 
-// Keys written into the credentials Secret referenced by
-// SystemBucketStatus.SecretRef. Standardised so a consuming component can
-// `envFrom` it directly, and identical to the keys the user-facing sds-object
-// module writes.
+// Keys written into the connection ConfigMap referenced by
+// SystemBucketStatus.ConnectionRef. Standardised so a consuming component can
+// `envFrom` it directly, and named as the S3 world names them.
+//
+// There is no key pair here and there is no Secret next to it: access to a
+// bucket is obtained by exchanging a ServiceAccount token at the credentials
+// endpoint, which mints a key that lives for an hour. What a consumer needs to
+// do that is the endpoint's address, the audience its token has to carry, and
+// the CA that signs the endpoint (the module's own, so nothing in the cluster
+// trusts it by default) — and all three are public.
 const (
-	SecretKeyS3Endpoint      = "S3_ENDPOINT"
-	SecretKeyS3Region        = "S3_REGION"
-	SecretKeyS3Bucket        = "S3_BUCKET"
-	SecretKeyAccessKeyID     = "AWS_ACCESS_KEY_ID"
-	SecretKeySecretAccessKey = "AWS_SECRET_ACCESS_KEY"
+	ConnectionKeyS3Endpoint = "S3_ENDPOINT"
+	ConnectionKeyS3Region   = "S3_REGION"
+	ConnectionKeyS3Bucket   = "S3_BUCKET"
+
+	ConnectionKeySTSEndpoint = "S3_STS_ENDPOINT"
+	ConnectionKeySTSAudience = "S3_STS_AUDIENCE"
+	ConnectionKeySTSCACert   = "S3_STS_CA_CERT"
 )
 
 // Status.phase values.

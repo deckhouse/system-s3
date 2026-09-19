@@ -1,0 +1,17 @@
+{{- /*
+  What turns monitoring/ into objects in the cluster. Without this template the
+  rules sit in the repository doing nothing, which is the quietest way for
+  alerting to be absent: the files are there, the review sees them, and nothing
+  is ever evaluated. The module linter refuses a monitoring/ folder without this
+  file for exactly that reason.
+
+  The helper walks the directory recursively and renders what it finds, so
+  adding a rule file needs no change here. It is also gated on the Prometheus
+  CRDs being present — a cluster without the prometheus module gets no objects
+  rather than a failed render.
+
+  The dashboards are rendered the same way, from monitoring/grafana-dashboards:
+  the folder under it is the folder they land in in Grafana.
+*/ -}}
+{{- include "helm_lib_prometheus_rules" (list . (printf "d8-%s" .Chart.Name)) }}
+{{- include "helm_lib_grafana_dashboard_definitions" . }}

@@ -1,0 +1,9 @@
+# A store that was put into the single-replica mode, with the acknowledgement
+# string that used to be required to switch it and the volume size that used to
+# be a setting. All three fields are gone from the schema; the mode has to
+# survive the move, the other two have nowhere to go.
+storage:
+  singleReplica: true
+  recreateConfirmation: i-understand-this-destroys-all-system-object-data
+  sizePerNode: 20Gi
+logLevel: DEBUG
