@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"regexp"
 	"strconv"
 
@@ -270,9 +271,9 @@ func commonLabels(store *backend.Store) map[string]string {
 }
 
 // s3Endpoint is the in-cluster S3 URL consumers are given: the endpoint Service,
-// which survives a migration.
+// which survives a migration. https: the port is the TLS terminator's.
 func s3Endpoint(store *backend.Store, namespace, clusterDomain string) string {
-	return fmt.Sprintf("http://%s.%s.svc.%s:%d", s3SvcName(store), namespace, clusterDomain, s3Port)
+	return fmt.Sprintf("https://%s.%s.svc.%s:%d", s3SvcName(store), namespace, clusterDomain, s3Port)
 }
 
 // planeS3HostPort is the S3 endpoint of one plane as host:port (no scheme), for
@@ -285,7 +286,12 @@ func planeS3HostPort(store *backend.Store, namespace, clusterDomain string) stri
 // adminEndpoint is the admin API URL of one plane. Never the endpoint Service:
 // an admin call is always made TO a particular Garage cluster.
 func adminEndpoint(store *backend.Store, namespace, clusterDomain string) string {
-	return fmt.Sprintf("http://%s.%s.svc.%s:%d", planeSvcName(store), namespace, clusterDomain, adminPort)
+	return fmt.Sprintf("https://%s.%s.svc.%s:%d", planeSvcName(store), namespace, clusterDomain, adminPort)
+}
+
+// podAdminURL is the admin API of one Garage node, at the pod's own address.
+func podAdminURL(podIP string) string {
+	return fmt.Sprintf("https://%s", net.JoinHostPort(podIP, strconv.Itoa(adminPort)))
 }
 
 // replicationFactor is the Garage replication_factor the module settings ask
@@ -350,6 +356,11 @@ func configHash(cfg string) string {
 // renderConfig produces the garage.toml content for the given (already clamped)
 // replication factor. Secrets (rpc, admin token) are supplied via environment
 // variables, not the file.
+//
+// The S3 and admin APIs listen on the loopback, on ports of their own: the TLS
+// terminator in the same pod owns the ports clients dial (see tls.go). Garage
+// has no TLS of its own, and a plaintext listener on the pod's address would be
+// a way around the terminator for anything that can reach the pod.
 func renderConfig(rf int32) string {
 	return fmt.Sprintf(`metadata_dir = "%s/meta"
 data_dir = "%s/data"
@@ -361,12 +372,12 @@ rpc_bind_addr = "[::]:%d"
 
 [s3_api]
 s3_region = "garage"
-api_bind_addr = "[::]:%d"
+api_bind_addr = "127.0.0.1:%d"
 root_domain = ".s3.garage"
 
 [admin]
-api_bind_addr = "[::]:%d"
-`, dataMountPath, dataMountPath, rf, rpcPort, s3Port, adminPort)
+api_bind_addr = "127.0.0.1:%d"
+`, dataMountPath, dataMountPath, rf, rpcPort, garageS3Loopback, garageAdminLoopback)
 }
 
 // buildConfigMap returns the ConfigMap holding garage.toml with the given
@@ -508,10 +519,10 @@ func garageContainer(image string) corev1.Container {
 			{Name: "GARAGE_RPC_SECRET", ValueFrom: secretKeyRef(secretKeyRPC)},
 			{Name: "GARAGE_ADMIN_TOKEN", ValueFrom: secretKeyRef(secretKeyAdmin)},
 		},
+		// Only RPC. The S3 and admin ports clients dial belong to the TLS
+		// terminator's container; Garage's own listeners are on the loopback.
 		Ports: []corev1.ContainerPort{
-			{Name: "s3", ContainerPort: s3Port},
 			{Name: "rpc", ContainerPort: rpcPort},
-			{Name: "admin", ContainerPort: adminPort},
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "config", MountPath: configMount},
@@ -538,10 +549,16 @@ func garageContainer(image string) corev1.Container {
 			//
 			// No token: /health is the one admin endpoint Garage serves
 			// unauthenticated, exactly so that a probe can use it.
+			//
+			// Through the TLS terminator, which is the only way to the admin API from
+			// outside the pod. The kubelet does not verify the certificate of an HTTPS
+			// probe, and does not need to: it is asking its own pod. A terminator that
+			// is down fails the probe too, which is right — the node is not reachable.
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/health",
-					Port: intstr.FromInt32(adminPort),
+					Path:   "/health",
+					Port:   intstr.FromInt32(adminPort),
+					Scheme: corev1.URISchemeHTTPS,
 				},
 			},
 			// Generous, because becoming ready waits on the controller's next pass

@@ -67,6 +67,16 @@ const (
 	// is how the two drift apart.
 	STSEndpointEnv   = "STS_ENDPOINT"
 	STSCertSecretEnv = "STS_CERT_SECRET"
+
+	// The data plane's TLS. Garage serves none of its own; a sidecar in every
+	// Garage pod terminates it with the certificate in GarageTLSSecretEnv, which
+	// the chart renders from the module's CA. The controller mounts the same
+	// Secret into the Garage pods and the migration Job, reads its ca.crt from
+	// GarageTLSCAFileEnv to verify Garage itself, and publishes the CA to
+	// consumers next to the endpoint.
+	GarageTLSSecretEnv = "GARAGE_TLS_SECRET"
+	GarageTLSCAFileEnv = "GARAGE_TLS_CA_FILE"
+
 	StorageClassEnv  = "STORAGE_CLASS"
 	ClusterDomainEnv = "CLUSTER_DOMAIN"
 
@@ -159,6 +169,14 @@ type Options struct {
 	STSEndpoint   string
 	STSCertSecret string
 
+	// GarageTLSSecret is the Secret holding the data plane's serving certificate
+	// (tls.crt, tls.key, ca.crt), and GarageTLSCAFile the controller's own mount
+	// of its ca.crt. Without them the data plane is not brought up: every client
+	// of it verifies against this CA, and there is no plaintext mode to fall back
+	// to.
+	GarageTLSSecret string
+	GarageTLSCAFile string
+
 	// ClusterDomain is the Kubernetes cluster DNS domain (e.g. cluster.local),
 	// injected via CLUSTER_DOMAIN from global.discovery.clusterDomain. Used to
 	// build in-cluster Service FQDNs.
@@ -213,6 +231,8 @@ func NewConfig() *Options {
 	opts.STSKeyFile = os.Getenv(STSKeyFileEnv)
 	opts.STSEndpoint = os.Getenv(STSEndpointEnv)
 	opts.STSCertSecret = os.Getenv(STSCertSecretEnv)
+	opts.GarageTLSSecret = os.Getenv(GarageTLSSecretEnv)
+	opts.GarageTLSCAFile = os.Getenv(GarageTLSCAFileEnv)
 
 	opts.StorageClass = os.Getenv(StorageClassEnv)
 

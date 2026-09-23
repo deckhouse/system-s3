@@ -316,6 +316,10 @@ func (d *Driver) buildCopyJob(
 		{Name: migrator.EnvSourceSecretKey, ValueFrom: migrationSecretRef(source, migrationSecretSourceSecret)},
 		{Name: migrator.EnvTargetAccessKey, ValueFrom: migrationSecretRef(source, migrationSecretTargetID)},
 		{Name: migrator.EnvTargetSecretKey, ValueFrom: migrationSecretRef(source, migrationSecretTargetSecret)},
+		// Both clusters are behind the same kind of terminator with the same
+		// certificate, so one CA and one name verify either side.
+		{Name: migrator.EnvCAFile, Value: tlsMountPath + "/ca.crt"},
+		{Name: migrator.EnvServerName, Value: garageServerName(source, d.namespace)},
 	}
 
 	return &batchv1.Job{
@@ -348,7 +352,13 @@ func (d *Driver) buildCopyJob(
 						Args:            []string{migrator.Command},
 						Env:             env,
 						SecurityContext: copierSecurityContext(),
+						VolumeMounts: []corev1.VolumeMount{
+							{Name: tlsVolume, MountPath: tlsMountPath, ReadOnly: true},
+						},
 					}},
+					// The CA only. The copier verifies Garage; it has no business holding
+					// the key Garage's certificate is served with.
+					Volumes: []corev1.Volume{caOnlyVolume(d.tlsSecret)},
 				},
 			},
 		},

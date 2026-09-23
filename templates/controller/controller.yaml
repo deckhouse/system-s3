@@ -79,9 +79,15 @@
     (dict "name" "STS_TLS_KEY_FILE" "value" "/etc/sts-certs/tls.key")
     (dict "name" "STS_ENDPOINT" "value" (printf "https://%s.d8-%s.svc.%s" .Values.systemS3.internal.stsServiceName .Chart.Name .Values.global.discovery.clusterDomain))
     (dict "name" "STS_CERT_SECRET" "value" "webhooks-https-certs")
+    (dict "name" "GARAGE_TLS_SECRET" "value" "garage-tls")
+    (dict "name" "GARAGE_TLS_CA_FILE" "value" "/etc/garage-tls/ca.crt")
   )
   "additionalControllerVolumeMounts" (list
     (dict "name" "webhook-certs" "mountPath" "/etc/sts-certs" "readOnly" true)
+    (dict "name" "garage-tls-ca" "mountPath" "/etc/garage-tls" "readOnly" true)
+  )
+  "additionalVolumes" (list
+    (dict "name" "garage-tls-ca" "secret" (dict "secretName" "garage-tls" "items" (list (dict "key" "ca.crt" "path" "ca.crt"))))
   )
 }}
 {{ include "helm_lib_module_controller_manifests" (list . $config) }}

@@ -29,11 +29,12 @@ loki   d8-monitoring-loki   Ready   loki-s3-connection   True    30s
 
 | Ключ | Значение |
 |------|----------|
-| `S3_ENDPOINT` | Внутрикластерный адрес системного хранилища. |
+| `S3_ENDPOINT` | Внутрикластерный адрес системного хранилища, `https://`. |
 | `S3_REGION` | Регион, который объявляет эндпоинт (`garage`). |
 | `S3_BUCKET` | Фактическое имя бакета. |
+| `S3_CA_CERT` | CA, которым подписан S3-эндпоинт. Собственный для модуля, как и `S3_STS_CA_CERT` (сейчас это один и тот же CA), поэтому по умолчанию ему в кластере никто не доверяет. |
 | `S3_STS_ENDPOINT` | Куда обменивать токен ServiceAccount на учётные данные. |
-| `S3_STS_AUDIENCE` | Audience (адресат), который должен нести токен: `system-s3-sts`. |
+| `S3_STS_AUDIENCE` | Значение `audience` (адресат токена), которое нужно запросить для токена ServiceAccount, предъявляемого на `S3_STS_ENDPOINT`, — всегда `system-s3-sts`. Указывается в спецификации пода, в projected-томе с токеном (см. ниже): из ConfigMap Kubernetes его не возьмёт. Эндпоинт принимает только токены, выпущенные для этого адресата, поэтому токен пода по умолчанию будет отвергнут. Такой токен не аутентифицирует в API-сервере: утёкший, он позволяет только запросить учётные данные, которые его ServiceAccount и так вправе получить. |
 | `S3_STS_CA_CERT` | CA, которым подписан эндпоинт выдачи. Он собственный для модуля, поэтому по умолчанию ему в кластере никто не доверяет. |
 
 **Учётных данных в нём нет — и больше их нет нигде.** Долгоживущий ключ модуль не
@@ -41,18 +42,25 @@ loki   d8-monitoring-loki   Ready   loki-s3-connection   True    30s
 одинаково: предъявляют токен своего ServiceAccount на эндпоинте выдачи и получают
 пару ключей, которую бэкенд перестаёт принимать через час.
 
-Адреса берите через `envFrom` этого ConfigMap, а токен монтируйте:
+Адреса берите через `envFrom` этого ConfigMap, токен монтируйте, а оба CA
+смонтируйте в отдельный каталог:
 
 ```yaml
     envFrom:
       - configMapRef:
           name: loki-s3-connection
+    env:
+      # Go: системные корни плюс CA модуля, для всех TLS-клиентов процесса.
+      # /etc/ssl/certs остаётся в списке, потому что SSL_CERT_DIR заменяет
+      # каталоги по умолчанию, а не дополняет их.
+      - name: SSL_CERT_DIR
+        value: /etc/ssl/certs:/etc/system-s3/ca
     volumeMounts:
       - name: s3-token
         mountPath: /var/run/secrets/system-s3
         readOnly: true
-      - name: s3-connection
-        mountPath: /etc/s3
+      - name: s3-ca
+        mountPath: /etc/system-s3/ca
         readOnly: true
     volumes:
       - name: s3-token
@@ -62,10 +70,34 @@ loki   d8-monitoring-loki   Ready   loki-s3-connection   True    30s
                 path: token
                 audience: system-s3-sts     # S3_STS_AUDIENCE
                 expirationSeconds: 3600
-      - name: s3-connection
+      - name: s3-ca
         configMap:
-          name: loki-s3-connection          # ради S3_STS_CA_CERT файлом
+          name: loki-s3-connection
+          items:                            # только CA, PEM-файлами
+            - {key: S3_CA_CERT, path: s3-ca.crt}
+            - {key: S3_STS_CA_CERT, path: sts-ca.crt}
 ```
+
+**S3-эндпоинт работает только по TLS**, с сертификатом от собственного CA модуля,
+и клиент должен этому CA доверять — открытого порта, на который можно
+откатиться, нет.
+
+- **Go** (minio-go, aws-sdk-go-v2, всё на `crypto/tls`): примера выше достаточно.
+  Go на Linux собирает системные корни из файла-бандла *и* из всех файлов в
+  каталогах `SSL_CERT_DIR`, поэтому CA модуля добавляются к публичным, и любой
+  клиент процесса, который пользуется системными корнями, доверяет обоим
+  эндпоинтам без единой строки кода. Системные корни Go читает один раз за
+  процесс: новый CA вступает в силу после рестарта. CA долгоживущий; продление
+  серверного сертификата его не меняет.
+- **AWS CLI и boto3**: `AWS_CA_BUNDLE=/etc/system-s3/ca/s3-ca.crt`. Переменная
+  заменяет бандл SDK, а не дополняет его, так что клиенту, который ходит ещё и
+  на публичные эндпоинты, нужен бандл с обоими.
+- **Инструменты на OpenSSL** (curl, `ssl` в Python): `SSL_CERT_DIR` не поможет —
+  OpenSSL ищет сертификаты в каталоге по именам-хешам, которых в смонтированном
+  ConfigMap нет. Укажите файл: `curl --cacert /etc/system-s3/ca/s3-ca.crt`,
+  `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`.
+- **Не через `subPath` в `/etc/ssl/certs`.** Том с `subPath` не обновляется при
+  изменении ConfigMap, и под останется со старым CA после его замены модулем.
 
 ## Как получить учётные данные
 

@@ -209,7 +209,8 @@ func (d *Driver) emptyBucket(ctx context.Context, store *backend.Store, svc *adm
 	if err := svc.allow(ctx, bucketID, key.AccessKeyID, permissions{Read: true, Write: true, Owner: true}); err != nil {
 		return fmt.Errorf("grant temporary key on bucket %q: %w", name, err)
 	}
-	mc, err := s3util.NewClient(planeS3HostPort(store, d.namespace, d.clusterDomain), key.AccessKeyID, key.SecretAccessKey)
+	mc, err := s3util.NewClient(planeS3HostPort(store, d.namespace, d.clusterDomain), key.AccessKeyID, key.SecretAccessKey,
+		d.garageCA, garageServerName(store, d.namespace))
 	if err != nil {
 		return fmt.Errorf("build S3 client to empty bucket %q: %w", name, err)
 	}
@@ -229,5 +230,5 @@ func (d *Driver) adminClientFor(ctx context.Context, store *backend.Store) (*adm
 	if token == "" {
 		return nil, false, nil
 	}
-	return newAdminClient(adminEndpoint(store, d.namespace, d.clusterDomain), token), true, nil
+	return d.admin(store, adminEndpoint(store, d.namespace, d.clusterDomain), token), true, nil
 }

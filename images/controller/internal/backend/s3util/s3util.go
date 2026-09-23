@@ -25,14 +25,26 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+
+	"github.com/deckhouse/system-s3/images/controller/internal/tlsclient"
 )
 
 // NewClient builds a minio S3 client for the given endpoint (host:port, no
-// scheme) over plain HTTP.
-func NewClient(endpoint, accessKey, secretKey string) (*minio.Client, error) {
+// scheme) over TLS, verifying Garage's certificate against ca for serverName.
+//
+// There is no plaintext variant. The data plane's S3 port is its TLS
+// terminator's, and Garage's own listener is on the pod's loopback, so a
+// plaintext client would not reach anything — and the keys this client signs
+// with are owner keys over whole buckets.
+func NewClient(endpoint, accessKey, secretKey string, ca *tlsclient.CA, serverName string) (*minio.Client, error) {
+	transport, err := ca.Transport(serverName)
+	if err != nil {
+		return nil, err
+	}
 	return minio.New(endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
-		Secure: false,
+		Creds:     credentials.NewStaticV4(accessKey, secretKey, ""),
+		Secure:    true,
+		Transport: transport,
 	})
 }
 

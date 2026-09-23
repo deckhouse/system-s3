@@ -271,10 +271,16 @@ const (
 // do that is the endpoint's address, the audience its token has to carry, and
 // the CA that signs the endpoint (the module's own, so nothing in the cluster
 // trusts it by default) — and all three are public.
+//
+// S3_ENDPOINT is https as well, and S3_CA_CERT is what verifies it. Its value is
+// the same CA as S3_STS_CA_CERT today — one CA signs both — but it is a key of its
+// own, so a consumer configures "the CA of the S3 endpoint" by that name and does
+// not come to depend on the two endpoints sharing one.
 const (
 	ConnectionKeyS3Endpoint = "S3_ENDPOINT"
 	ConnectionKeyS3Region   = "S3_REGION"
 	ConnectionKeyS3Bucket   = "S3_BUCKET"
+	ConnectionKeyS3CACert   = "S3_CA_CERT"
 
 	ConnectionKeySTSEndpoint = "S3_STS_ENDPOINT"
 	ConnectionKeySTSAudience = "S3_STS_AUDIENCE"

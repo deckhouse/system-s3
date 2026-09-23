@@ -209,7 +209,7 @@ func TestWorkloadIsRecreatedForANewVolumeSizeWithoutTakingThePodsDown(t *testing
 				return cl.Delete(ctx, obj, opts...)
 			},
 		}).Build()
-	d := &Driver{client: c, apiReader: c, namespace: ns, image: "garage:test", log: testGarageLogger(t)}
+	d := testDriver(t, c, ns)
 
 	if _, _, err := d.ensureWorkload(ctx, store, "hash", resource.MustParse("30Gi")); err != nil {
 		t.Fatalf("ensureWorkload: %v", err)
@@ -246,7 +246,7 @@ func TestWorkloadIsNotRecreatedWhenTheSizeIsUnchanged(t *testing.T) {
 				return cl.Delete(ctx, obj, opts...)
 			},
 		}).Build()
-	d := &Driver{client: c, apiReader: c, namespace: ns, image: "garage:test", log: testGarageLogger(t)}
+	d := testDriver(t, c, ns)
 
 	if _, _, err := d.ensureWorkload(context.Background(), store, "hash", size); err != nil {
 		t.Fatalf("ensureWorkload: %v", err)

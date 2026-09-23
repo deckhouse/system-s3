@@ -437,6 +437,12 @@ func (r *SystemBucketReconciler) ensureConnectionConfigMap(
 			v1alpha1.ConnectionKeyS3Region:   state.Region,
 			v1alpha1.ConnectionKeyS3Bucket:   bucketName,
 		}
+		// The CA the S3 endpoint is verified with. The endpoint is https and its
+		// certificate comes from the module's own CA, so a consumer that is not
+		// given it cannot talk to the store at all.
+		if ca := r.garageCA(ctx); len(ca) > 0 {
+			cm.Data[v1alpha1.ConnectionKeyS3CACert] = string(ca)
+		}
 		// Where to ask for credentials, what audience the token has to carry, and
 		// the CA to verify the endpoint with (the module's own, so nothing trusts
 		// it by default). Added only while the module actually serves the endpoint,
@@ -476,18 +482,30 @@ func (r *SystemBucketReconciler) stsEndpoint() string {
 // Empty is not an error here: the endpoint's address is still worth publishing,
 // and a consumer that cannot verify it will say so far more clearly than a
 // reconcile that failed on a Secret it could not read.
+// garageCA is the CA of the data plane's certificate, read from the Secret the
+// Garage pods serve it from.
+func (r *SystemBucketReconciler) garageCA(ctx context.Context) []byte {
+	if r.Cfg == nil || r.Cfg.GarageTLSSecret == "" {
+		return nil
+	}
+	return r.secretCA(ctx, r.Cfg.GarageTLSSecret, "the CA of the S3 endpoint")
+}
+
+func (r *SystemBucketReconciler) secretCA(ctx context.Context, name, what string) []byte {
+	secret := &corev1.Secret{}
+	key := client.ObjectKey{Namespace: r.Cfg.ControllerNamespace, Name: name}
+	if err := r.APIReader.Get(ctx, key, secret); err != nil {
+		r.Log.Error("unable to read "+what, logger.Err(err), "secret", name)
+		return nil
+	}
+	return secret.Data["ca.crt"]
+}
+
 func (r *SystemBucketReconciler) stsCA(ctx context.Context) []byte {
 	if r.Cfg == nil || r.Cfg.STSCertSecret == "" {
 		return nil
 	}
-	secret := &corev1.Secret{}
-	key := client.ObjectKey{Namespace: r.Cfg.ControllerNamespace, Name: r.Cfg.STSCertSecret}
-	if err := r.APIReader.Get(ctx, key, secret); err != nil {
-		r.Log.Error("unable to read the CA of the credentials endpoint", logger.Err(err),
-			"secret", r.Cfg.STSCertSecret)
-		return nil
-	}
-	return secret.Data["ca.crt"]
+	return r.secretCA(ctx, r.Cfg.STSCertSecret, "the CA of the credentials endpoint")
 }
 
 func (r *SystemBucketReconciler) finish(

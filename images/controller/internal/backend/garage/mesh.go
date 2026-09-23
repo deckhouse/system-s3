@@ -93,7 +93,7 @@ func (d *Driver) ensureMeshAndLayout(ctx context.Context, store *backend.Store, 
 	//
 	// Any live peer will do: connect, layout and health are cluster-wide facts,
 	// and discoverPeers only returns nodes that just answered.
-	svc := newAdminClient(fmt.Sprintf("http://%s:%d", peers[0].ip, adminPort), token)
+	svc := d.admin(store, podAdminURL(peers[0].ip), token)
 
 	// 1. Connect peers (idempotent gossip seed).
 	peerSpecs := make([]string, 0, len(peers))
@@ -210,7 +210,7 @@ func (d *Driver) discoverPeers(ctx context.Context, store *backend.Store, token 
 		if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" {
 			continue
 		}
-		pc := newAdminClient(fmt.Sprintf("http://%s:%d", pod.Status.PodIP, adminPort), token)
+		pc := d.admin(store, podAdminURL(pod.Status.PodIP), token)
 		st, err := pc.status(ctx)
 		if err != nil || st.Node == "" {
 			// Pod not answering yet; it will be picked up on requeue.

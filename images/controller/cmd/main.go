@@ -44,6 +44,7 @@ import (
 	"github.com/deckhouse/system-s3/images/controller/internal/controller"
 	"github.com/deckhouse/system-s3/images/controller/internal/migrator"
 	"github.com/deckhouse/system-s3/images/controller/internal/sts"
+	"github.com/deckhouse/system-s3/images/controller/internal/tlsproxy"
 	"github.com/deckhouse/system-s3/images/controller/pkg/config"
 	"github.com/deckhouse/system-s3/images/controller/pkg/kubutils"
 )
@@ -85,6 +86,14 @@ func main() {
 	// a manager.
 	if len(os.Args) > 1 && os.Args[1] == migrator.Command {
 		runCopier(ctx, baseLog.Named("copier"))
+		return
+	}
+
+	// And the same binary again as the data plane's TLS terminator, a sidecar in
+	// every Garage pod. Garage serves no TLS of its own; see internal/tlsproxy for
+	// why the terminator is this code and not a proxy from somewhere else.
+	if len(os.Args) > 1 && os.Args[1] == tlsproxy.Command {
+		runTerminator(ctx, baseLog.Named("tls-terminator"))
 		return
 	}
 
@@ -226,7 +235,8 @@ func main() {
 	log.Info("kubernetes manager created")
 
 	driver := garage.New(mgr.GetClient(), mgr.GetAPIReader(), mgr.GetConfig(), baseLog,
-		cfgParams.ControllerNamespace, cfgParams.GarageImage, cfgParams.ControllerImage, cfgParams.ClusterDomain)
+		cfgParams.ControllerNamespace, cfgParams.GarageImage, cfgParams.ControllerImage, cfgParams.ClusterDomain).
+		WithTLS(cfgParams.GarageTLSSecret, cfgParams.GarageTLSCAFile)
 
 	// The data plane converges from the background loop as well as from every
 	// SystemBucket reconcile, so a cluster with no consumer yet still gets its
@@ -290,6 +300,24 @@ func main() {
 // the signal the migration phases wait for, and an exit code is the only part of
 // it they read. Everything else goes to the log, where an operator can watch an
 // hours-long copy make progress.
+func runTerminator(ctx context.Context, log logger.Logger) {
+	routes, err := tlsproxy.ParseRoutes(os.Getenv(tlsproxy.EnvRoutes))
+	if err != nil {
+		log.Error("the TLS terminator cannot start", logger.Err(err))
+		os.Exit(1)
+	}
+	p := &tlsproxy.Proxy{
+		Routes:   routes,
+		CertFile: os.Getenv(tlsproxy.EnvCertFile),
+		KeyFile:  os.Getenv(tlsproxy.EnvKeyFile),
+		Log:      log,
+	}
+	if err := p.Run(ctx); err != nil {
+		log.Error("the TLS terminator stopped", logger.Err(err))
+		os.Exit(1)
+	}
+}
+
 func runCopier(ctx context.Context, log logger.Logger) {
 	cfg, err := migrator.ConfigFromEnv()
 	if err != nil {

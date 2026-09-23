@@ -32,6 +32,13 @@ const (
 	// the certificate's SANs have to include it or every client fails TLS
 	// verification against a name the certificate never claimed.
 	STSServiceName string = "system-s3-sts"
+
+	// GarageServiceName is the data plane's endpoint Service, and GarageTLSSecret
+	// the Secret its TLS terminator serves a certificate from. The controller
+	// creates the Service and the Garage pods; the chart renders the Secret, from
+	// a certificate this module's hook issues.
+	GarageServiceName string = "system-garage"
+	GarageTLSSecret   string = "garage-tls"
 )
 
 // ModuleFinalizerPrefix is what a finalizer this module sets looks like (the

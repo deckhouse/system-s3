@@ -29,11 +29,12 @@ loki   d8-monitoring-loki   Ready   loki-s3-connection   True    30s
 
 | Key | Value |
 |-----|-------|
-| `S3_ENDPOINT` | In-cluster endpoint of the system storage. |
+| `S3_ENDPOINT` | In-cluster endpoint of the system storage, `https://`. |
 | `S3_REGION` | Region the endpoint advertises (`garage`). |
 | `S3_BUCKET` | Effective bucket name. |
+| `S3_CA_CERT` | CA that signs the S3 endpoint. The module's own, like `S3_STS_CA_CERT` (today it is the same CA), so nothing in the cluster trusts it by default. |
 | `S3_STS_ENDPOINT` | Where to exchange a ServiceAccount token for credentials. |
-| `S3_STS_AUDIENCE` | Audience the token has to carry (`system-s3-sts`). |
+| `S3_STS_AUDIENCE` | The `audience` to request for the ServiceAccount token the pod presents at `S3_STS_ENDPOINT` — always `system-s3-sts`. It goes into the pod spec, in the projected token volume (see below): Kubernetes cannot take it from a ConfigMap. The endpoint accepts only tokens issued for this audience, so the pod's default token is refused, and a token issued for it does not authenticate to the API server — if leaked, it can only be used to ask for the credentials its ServiceAccount is allowed anyway. |
 | `S3_STS_CA_CERT` | CA that signs the credentials endpoint. It is the module's own, so nothing in the cluster trusts it by default. |
 
 **There are no credentials in it, and none anywhere else.** The module issues no
@@ -42,18 +43,25 @@ the component that asked for the bucket, gets credentials the same way: it
 presents its ServiceAccount token at the credentials endpoint and receives a key
 pair the backend stops honouring an hour later.
 
-`envFrom` this ConfigMap for the addresses, and mount the token:
+`envFrom` this ConfigMap for the addresses, mount the token, and mount the two
+CAs into a directory of their own:
 
 ```yaml
     envFrom:
       - configMapRef:
           name: loki-s3-connection
+    env:
+      # Go: the system roots plus the module's CAs, for every TLS client in the
+      # process. /etc/ssl/certs stays in the list because SSL_CERT_DIR replaces
+      # the default directories rather than adding to them.
+      - name: SSL_CERT_DIR
+        value: /etc/ssl/certs:/etc/system-s3/ca
     volumeMounts:
       - name: s3-token
         mountPath: /var/run/secrets/system-s3
         readOnly: true
-      - name: s3-connection
-        mountPath: /etc/s3
+      - name: s3-ca
+        mountPath: /etc/system-s3/ca
         readOnly: true
     volumes:
       - name: s3-token
@@ -63,10 +71,33 @@ pair the backend stops honouring an hour later.
                 path: token
                 audience: system-s3-sts     # S3_STS_AUDIENCE
                 expirationSeconds: 3600
-      - name: s3-connection
+      - name: s3-ca
         configMap:
-          name: loki-s3-connection          # for S3_STS_CA_CERT as a file
+          name: loki-s3-connection
+          items:                            # the CAs alone, as PEM files
+            - {key: S3_CA_CERT, path: s3-ca.crt}
+            - {key: S3_STS_CA_CERT, path: sts-ca.crt}
 ```
+
+**The S3 endpoint is TLS-only**, with a certificate from the module's own CA, and
+the client has to trust that CA — there is no plaintext port to fall back to.
+
+- **Go** (minio-go, aws-sdk-go-v2, anything on `crypto/tls`): the example above is
+  all it takes. Go on Linux reads its system roots from the bundle file *and*
+  from every file in the `SSL_CERT_DIR` directories, so the module's CAs are
+  added to the public ones, and every client in the process that uses the
+  system roots trusts both endpoints without a line of code. Go reads the
+  system roots once per process: a new CA takes a restart. The CA is long-lived;
+  renewing the server certificate does not change it.
+- **AWS CLI and boto3**: `AWS_CA_BUNDLE=/etc/system-s3/ca/s3-ca.crt`.
+  It replaces the SDK's bundle rather than adding to it, so a client that also
+  talks to public endpoints needs a bundle with both.
+- **OpenSSL-based tools** (curl, Python `ssl`): `SSL_CERT_DIR` does not help —
+  OpenSSL looks certificates up in a directory by hashed file names, which a
+  ConfigMap mount does not have. Point the tool at the file:
+  `curl --cacert /etc/system-s3/ca/s3-ca.crt`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`.
+- **Not `subPath` into `/etc/ssl/certs`.** A `subPath` mount is not updated when
+  the ConfigMap changes, so the pod would keep a CA the module has replaced.
 
 ## Getting credentials
 

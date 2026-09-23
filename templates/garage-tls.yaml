@@ -1,0 +1,24 @@
+{{- /*
+  The certificate the data plane's TLS terminator serves (see
+  hooks/go/021-garage-certs and internal/tlsproxy in the controller).
+
+  Garage serves no TLS of its own. The controller builds the Garage pods and
+  mounts this Secret into their terminator sidecar; the controller itself and the
+  migration Job mount only its ca.crt, to verify Garage with. The Secret is
+  rendered here rather than created by the controller because the hook that
+  issues the certificate works through values, like every other certificate this
+  module has, and a renewal then reaches the pods as a replaced file — the
+  terminator picks it up on the next handshake, without restarting a replica.
+*/ -}}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: garage-tls
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "garage")) | nindent 2 }}
+type: kubernetes.io/tls
+data:
+  ca.crt: {{ .Values.systemS3.internal.garageCert.ca | b64enc | quote }}
+  tls.crt: {{ .Values.systemS3.internal.garageCert.crt | b64enc | quote }}
+  tls.key: {{ .Values.systemS3.internal.garageCert.key | b64enc | quote }}

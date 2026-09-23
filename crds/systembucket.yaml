@@ -123,8 +123,9 @@ spec:
                   type: object
                   description: |
                     Reference to the ConfigMap (in this bucket's namespace) with
-                    the S3 connection parameters: `S3_ENDPOINT`, `S3_REGION`,
-                    `S3_BUCKET`, and — for asking for credentials —
+                    the S3 connection parameters: `S3_ENDPOINT` (https),
+                    `S3_REGION`, `S3_BUCKET`, `S3_CA_CERT` (the CA that verifies
+                    the endpoint), and — for asking for credentials —
                     `S3_STS_ENDPOINT`, `S3_STS_AUDIENCE`, `S3_STS_CA_CERT`.
 
                     A ConfigMap and not a Secret: there is no key pair in it,

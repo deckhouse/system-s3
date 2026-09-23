@@ -475,7 +475,7 @@ func (d *Driver) garageHealthy(ctx context.Context, store *backend.Store) bool {
 	if err != nil || token == "" {
 		return false
 	}
-	svc := newAdminClient(adminEndpoint(store, d.namespace, d.clusterDomain), token)
+	svc := d.admin(store, adminEndpoint(store, d.namespace, d.clusterDomain), token)
 	h, err := svc.health(ctx)
 	if err != nil {
 		return false

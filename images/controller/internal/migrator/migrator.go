@@ -44,6 +44,7 @@ import (
 
 	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend/s3util"
+	"github.com/deckhouse/system-s3/images/controller/internal/tlsclient"
 )
 
 // Command is the argument that turns the controller binary into the copier.
@@ -61,6 +62,13 @@ const (
 	EnvTargetSecretKey = "MIGRATE_TARGET_SECRET_KEY"
 	EnvBuckets         = "MIGRATE_BUCKETS"
 	EnvWorkers         = "MIGRATE_WORKERS"
+
+	// EnvCAFile is the CA both clusters' certificates are verified against, and
+	// EnvServerName the name they are verified for. Both clusters present the
+	// same certificate — it is issued for every Service in the namespace — so one
+	// pair covers both sides of the copy.
+	EnvCAFile     = "MIGRATE_CA_FILE"
+	EnvServerName = "MIGRATE_TLS_SERVER_NAME"
 )
 
 // defaultWorkers is how many objects of one bucket are copied at a time.
@@ -81,10 +89,12 @@ type Endpoint struct {
 
 // Config is what the Job is started with.
 type Config struct {
-	Source  Endpoint
-	Target  Endpoint
-	Buckets []string
-	Workers int
+	Source     Endpoint
+	Target     Endpoint
+	Buckets    []string
+	Workers    int
+	CAFile     string
+	ServerName string
 }
 
 // ConfigFromEnv reads the Job's configuration, rejecting anything incomplete:
@@ -102,7 +112,9 @@ func ConfigFromEnv() (Config, error) {
 			AccessKey: os.Getenv(EnvTargetAccessKey),
 			SecretKey: os.Getenv(EnvTargetSecretKey),
 		},
-		Workers: defaultWorkers,
+		Workers:    defaultWorkers,
+		CAFile:     os.Getenv(EnvCAFile),
+		ServerName: os.Getenv(EnvServerName),
 	}
 	for _, name := range strings.Split(os.Getenv(EnvBuckets), ",") {
 		if name = strings.TrimSpace(name); name != "" {
@@ -121,6 +133,8 @@ func ConfigFromEnv() (Config, error) {
 		EnvTargetEndpoint:  cfg.Target.Endpoint,
 		EnvTargetAccessKey: cfg.Target.AccessKey,
 		EnvTargetSecretKey: cfg.Target.SecretKey,
+		EnvCAFile:          cfg.CAFile,
+		EnvServerName:      cfg.ServerName,
 	} {
 		if value == "" {
 			missing = append(missing, name)
@@ -150,11 +164,12 @@ type Result struct {
 // to report success while leaving objects behind — which the verification step
 // would then have to catch, one phase too late.
 func Run(ctx context.Context, cfg Config, log logger.Logger) error {
-	source, err := s3util.NewClient(cfg.Source.Endpoint, cfg.Source.AccessKey, cfg.Source.SecretKey)
+	ca := tlsclient.NewCA(cfg.CAFile)
+	source, err := s3util.NewClient(cfg.Source.Endpoint, cfg.Source.AccessKey, cfg.Source.SecretKey, ca, cfg.ServerName)
 	if err != nil {
 		return fmt.Errorf("connect to the source cluster: %w", err)
 	}
-	target, err := s3util.NewClient(cfg.Target.Endpoint, cfg.Target.AccessKey, cfg.Target.SecretKey)
+	target, err := s3util.NewClient(cfg.Target.Endpoint, cfg.Target.AccessKey, cfg.Target.SecretKey, ca, cfg.ServerName)
 	if err != nil {
 		return fmt.Errorf("connect to the target cluster: %w", err)
 	}

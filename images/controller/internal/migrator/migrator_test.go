@@ -108,6 +108,8 @@ func TestConfigFromEnvRefusesHalfAConfiguration(t *testing.T) {
 		EnvTargetAccessKey: "GK2",
 		EnvTargetSecretKey: "s2",
 		EnvBuckets:         "one, two ,three",
+		EnvCAFile:          "/etc/garage-tls/ca.crt",
+		EnvServerName:      "system-garage.d8-system-s3.svc",
 	}
 
 	t.Run("complete", func(t *testing.T) {
@@ -145,7 +147,7 @@ func setEnv(t *testing.T, values map[string]string) {
 	for _, name := range []string{
 		EnvSourceEndpoint, EnvSourceAccessKey, EnvSourceSecretKey,
 		EnvTargetEndpoint, EnvTargetAccessKey, EnvTargetSecretKey,
-		EnvBuckets, EnvWorkers,
+		EnvBuckets, EnvWorkers, EnvCAFile, EnvServerName,
 	} {
 		t.Setenv(name, values[name])
 	}

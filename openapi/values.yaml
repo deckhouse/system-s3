@@ -60,6 +60,32 @@ properties:
           key:
             type: string
             x-examples: ["YjY0ZW5jX3N0cmluZwo="]
+      garageCert:
+        type: object
+        default: {}
+        description: |
+          The certificate the data plane's TLS terminator serves, issued by the
+          021-garage-certs hook from the same CA as customWebhookCert.
+
+          Garage has no TLS of its own; a sidecar in every Garage pod terminates it
+          with this certificate, and the controller, the migration Job and every
+          consumer verify it against the CA. A key of its own rather than the
+          webhook certificate: the Garage pods hold it, and a compromised data-plane
+          pod must not be able to impersonate the credentials endpoint.
+        x-required-for-helm:
+          - crt
+          - key
+          - ca
+        properties:
+          crt:
+            type: string
+            x-examples: ["YjY0ZW5jX3N0cmluZwo="]
+          key:
+            type: string
+            x-examples: ["YjY0ZW5jX3N0cmluZwo="]
+          ca:
+            type: string
+            x-examples: ["YjY0ZW5jX3N0cmluZwo="]
       stsServiceName:
         type: string
         default: system-s3-sts

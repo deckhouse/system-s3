@@ -114,12 +114,12 @@ func TestNamesAndEndpoints(t *testing.T) {
 	if got := secretName(c); got != "system-garage-secrets" {
 		t.Errorf("secretName=%q", got)
 	}
-	if got := s3Endpoint(c, "d8-system-s3", "internal.store.local"); got != "http://system-garage.d8-system-s3.svc.internal.store.local:3900" {
+	if got := s3Endpoint(c, "d8-system-s3", "internal.store.local"); got != "https://system-garage.d8-system-s3.svc.internal.store.local:3900" {
 		t.Errorf("s3Endpoint=%q", got)
 	}
 	// The admin API is reached at the PLANE's Service, never at the endpoint: an
 	// admin call is always made to a particular Garage cluster.
-	if got := adminEndpoint(c, "d8-system-s3", "store.local"); got != "http://system-garage-api.d8-system-s3.svc.store.local:3903" {
+	if got := adminEndpoint(c, "d8-system-s3", "store.local"); got != "https://system-garage-api.d8-system-s3.svc.store.local:3903" {
 		t.Errorf("adminEndpoint=%q", got)
 	}
 	if l := commonLabels(c); l["storage.deckhouse.io/system-store"] != "system" {

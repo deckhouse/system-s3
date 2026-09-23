@@ -158,7 +158,7 @@ func TestModeChangeDoesNotTouchTheRunningCluster(t *testing.T) {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(pinnedAtThree(), statefulSet()).Build()
-	d := &Driver{client: c, apiReader: c, namespace: ns, image: "garage:test", log: testGarageLogger(t)}
+	d := testDriver(t, c, ns)
 
 	store := rfStore() // HighAvailability=false against a store pinned at 3
 
@@ -225,7 +225,7 @@ func TestARefusedModeChangeDoesNotResizeTheWorkload(t *testing.T) {
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(modeScheme(t)).WithObjects(cfg).Build()
-	d := &Driver{client: c, apiReader: c, namespace: ns, image: "garage:test", log: testGarageLogger(t)}
+	d := testDriver(t, c, ns)
 
 	store := rfStore()
 	store.HighAvailability = true
@@ -260,7 +260,7 @@ func TestARefusedModeChangeDoesNotResizeTheWorkload(t *testing.T) {
 func TestNoStorageClassBringsUpNoDataPlane(t *testing.T) {
 	ns := "d8-system-s3"
 	c := fake.NewClientBuilder().WithScheme(modeScheme(t)).Build()
-	d := &Driver{client: c, apiReader: c, namespace: ns, image: "garage:test", log: testGarageLogger(t)}
+	d := testDriver(t, c, ns)
 
 	store := &backend.Store{Name: "system", HighAvailability: true} // no StorageClass
 
@@ -309,7 +309,7 @@ func TestStorageClassChangeDoesNotTouchTheRunningVolumes(t *testing.T) {
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(modeScheme(t)).WithObjects(claim, cfg).Build()
-	d := &Driver{client: c, apiReader: c, namespace: ns, image: "garage:test", log: testGarageLogger(t)}
+	d := testDriver(t, c, ns)
 
 	state, err := d.EnsureStore(ctx, store)
 	if err != nil {

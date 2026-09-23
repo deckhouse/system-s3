@@ -49,6 +49,7 @@ import (
 
 	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
+	"github.com/deckhouse/system-s3/images/controller/internal/tlsclient"
 )
 
 // garageVersion is the Garage release this driver targets. Keep it in sync with
@@ -78,6 +79,11 @@ type Driver struct {
 	// running — so the chart passes it in, the same way it passes the Garage one.
 	copierImage   string
 	clusterDomain string
+
+	// tlsSecret is the Secret holding the data plane's serving certificate, and
+	// garageCA the controller's own mount of its CA (see tls.go and WithTLS).
+	tlsSecret string
+	garageCA  *tlsclient.CA
 
 	// The exec clientset is built once. Capturing node identities execs into
 	// every replica on every pass, and a clientset per exec is a set of REST
@@ -125,6 +131,17 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 
 	if d.image == "" {
 		state.Message = "GARAGE_IMAGE is not configured on the controller"
+		return state, nil
+	}
+	// The terminator is the controller's own image, and without it — or without
+	// the certificate it serves — the data plane would come up with nothing in
+	// front of it. Refused here, before anything is built.
+	if d.copierImage == "" {
+		state.Message = "CONTROLLER_IMAGE is not configured on the controller; the data plane's TLS terminator runs it"
+		return state, nil
+	}
+	if err := d.tlsConfigured(); err != nil {
+		state.Message = err.Error()
 		return state, nil
 	}
 
@@ -529,6 +546,7 @@ func (d *Driver) ensureWorkload(ctx context.Context, store *backend.Store, cfgHa
 	}
 
 	sts := buildStatefulSet(store, d.namespace, d.image, cfgHash, volumeSize)
+	withTLSTerminator(sts, d.copierImage, d.tlsSecret)
 	if err := d.apply(ctx, sts); err != nil {
 		return false, "", fmt.Errorf("ensure statefulset: %w", err)
 	}
