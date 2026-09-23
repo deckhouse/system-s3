@@ -41,6 +41,14 @@
   SystemBucket, and a Helm error would take the module down instead of saying
   what to set.
 
+  DATA_PLANE_NODE_SELECTOR and DATA_PLANE_TOLERATIONS are where the Garage pods
+  may run, worked out with the platform's "system" strategy: nodes with the
+  module's own role (node-role.deckhouse.io/system-s3) if the cluster has any,
+  system nodes if it has those instead, any node otherwise. The controller builds
+  the data plane, but the chart has the per-role node counts from discovery and
+  lib-helm owns the rule, so the chart renders the answer as JSON and the
+  controller applies it as it is.
+
   CONTROLLER_IMAGE is this same image. The object copier of a migration between
   two Garage clusters is this binary with a different argument, run as a Job, and
   a running pod cannot find out the reference it was pulled from — so the chart,
@@ -81,6 +89,8 @@
     (dict "name" "STS_CERT_SECRET" "value" "webhooks-https-certs")
     (dict "name" "GARAGE_TLS_SECRET" "value" "garage-tls")
     (dict "name" "GARAGE_TLS_CA_FILE" "value" "/etc/garage-tls/ca.crt")
+    (dict "name" "DATA_PLANE_NODE_SELECTOR" "value" ((include "helm_lib_node_selector" (tuple . "system") | fromYaml).nodeSelector | default dict | toJson))
+    (dict "name" "DATA_PLANE_TOLERATIONS" "value" ((include "helm_lib_tolerations" (tuple . "system") | fromYaml).tolerations | default list | toJson))
   )
   "additionalControllerVolumeMounts" (list
     (dict "name" "webhook-certs" "mountPath" "/etc/sts-certs" "readOnly" true)

@@ -241,7 +241,7 @@ func TestPlacementGivesUpAfterRepeatedIdenticalMoves(t *testing.T) {
 	// gone.
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
 		Name:   "m0",
-		Labels: map[string]string{controlPlaneNodeLabel: "", hostnameTopologyKey: "m0"},
+		Labels: map[string]string{hostnameTopologyKey: "m0"},
 	}}
 	pv := pinnedPV("replica-pv", "gone")
 	cfg := &corev1.ConfigMap{

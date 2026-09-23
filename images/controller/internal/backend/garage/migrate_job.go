@@ -21,6 +21,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -342,9 +344,10 @@ func (d *Driver) buildCopyJob(
 					AutomountServiceAccountToken: ptr.To(false),
 					// Where the data plane may run, the copier may run: it talks to
 					// both clusters over the cluster network and wants to be near
-					// them rather than anywhere else.
-					Affinity:         copierAffinity(),
-					Tolerations:      dataPlaneTolerations(),
+					// them rather than anywhere else. No spreading rules: there is one
+					// copier and nothing for it to spread against.
+					NodeSelector:     maps.Clone(d.placement.NodeSelector),
+					Tolerations:      slices.Clone(d.placement.Tolerations),
 					ImagePullSecrets: []corev1.LocalObjectReference{{Name: registryPullSecret}},
 					Containers: []corev1.Container{{
 						Name:            "copier",
@@ -432,13 +435,4 @@ func (d *Driver) removeCopierCredentials(ctx context.Context, serving *backend.S
 		return fmt.Errorf("remove the copier's credentials: %w", err)
 	}
 	return nil
-}
-
-// copierAffinity puts the copier on the same kind of node as the data plane —
-// a master — and without the spreading rules: there is one copier and nothing
-// for it to spread against.
-func copierAffinity() *corev1.Affinity {
-	spec := &corev1.PodSpec{}
-	dataPlanePlacement(spec)
-	return spec.Affinity
 }

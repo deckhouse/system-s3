@@ -18,6 +18,7 @@ package garage
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -69,102 +70,137 @@ func TestNextPlacementAction(t *testing.T) {
 	const replicas = int32(3)
 
 	cases := []struct {
-		name    string
-		cpNodes []string
-		replica map[int32]string
-		healthy bool
-		wantAct bool
-		wantOrd int32
+		name     string
+		eligible []string
+		replica  map[int32]string
+		healthy  bool
+		wantAct  bool
+		wantOrd  int32
 	}{
-		// SPREAD (>=3 masters)
+		// SPREAD (>=3 eligible nodes)
 		{
-			name:    "spread: already 1-per-master -> no action",
-			cpNodes: []string{"m0", "m1", "m2"},
-			replica: map[int32]string{0: "m0", 1: "m1", 2: "m2"},
-			healthy: true,
-			wantAct: false,
+			name:     "spread: already 1-per-node -> no action",
+			eligible: []string{"m0", "m1", "m2"},
+			replica:  map[int32]string{0: "m0", 1: "m1", 2: "m2"},
+			healthy:  true,
+			wantAct:  false,
 		},
 		{
-			name:    "spread: co-located + healthy -> recycle the co-located replica",
-			cpNodes: []string{"m0", "m1", "m2"},
-			replica: map[int32]string{0: "m0", 1: "m0", 2: "m0"},
-			healthy: true,
-			wantAct: true,
-			wantOrd: 0, // first replica sharing m0
+			name:     "spread: co-located + healthy -> recycle the co-located replica",
+			eligible: []string{"m0", "m1", "m2"},
+			replica:  map[int32]string{0: "m0", 1: "m0", 2: "m0"},
+			healthy:  true,
+			wantAct:  true,
+			wantOrd:  0, // first replica sharing m0
 		},
 		{
-			name:    "spread: co-located but NOT healthy -> gated, no action",
-			cpNodes: []string{"m0", "m1", "m2"},
-			replica: map[int32]string{0: "m0", 1: "m0", 2: "m0"},
-			healthy: false,
-			wantAct: false,
+			name:     "spread: co-located but NOT healthy -> gated, no action",
+			eligible: []string{"m0", "m1", "m2"},
+			replica:  map[int32]string{0: "m0", 1: "m0", 2: "m0"},
+			healthy:  false,
+			wantAct:  false,
 		},
 		{
-			name:    "spread: replica bound to a removed node + healthy -> recycle it",
-			cpNodes: []string{"m0", "m1", "m2"},
-			replica: map[int32]string{0: "m0", 1: "m1", 2: "gone"},
-			healthy: true,
-			wantAct: true,
-			wantOrd: 2,
+			name:     "spread: replica bound to a removed node + healthy -> recycle it",
+			eligible: []string{"m0", "m1", "m2"},
+			replica:  map[int32]string{0: "m0", 1: "m1", 2: "gone"},
+			healthy:  true,
+			wantAct:  true,
+			wantOrd:  2,
 		},
 		{
-			name:    "spread: unbound replica (still binding) -> left alone",
-			cpNodes: []string{"m0", "m1", "m2"},
-			replica: map[int32]string{0: "m0", 1: "m1", 2: ""},
-			healthy: true,
-			wantAct: false,
+			name:     "spread: unbound replica (still binding) -> left alone",
+			eligible: []string{"m0", "m1", "m2"},
+			replica:  map[int32]string{0: "m0", 1: "m1", 2: ""},
+			healthy:  true,
+			wantAct:  false,
 		},
-		// CONSOLIDATE (exactly 1 master)
+		// CONSOLIDATE (exactly 1 eligible node)
 		{
-			name:    "consolidate: all on target -> no action",
-			cpNodes: []string{"m0"},
-			replica: map[int32]string{0: "m0", 1: "m0", 2: "m0"},
-			healthy: false,
-			wantAct: false,
-		},
-		{
-			name:    "consolidate: replicas bound to removed masters -> recycle first (anchor untouched)",
-			cpNodes: []string{"m0"},
-			replica: map[int32]string{0: "m0", 1: "gone1", 2: "gone2"},
-			healthy: false,
-			wantAct: true,
-			wantOrd: 1,
+			name:     "consolidate: all on target -> no action",
+			eligible: []string{"m0"},
+			replica:  map[int32]string{0: "m0", 1: "m0", 2: "m0"},
+			healthy:  false,
+			wantAct:  false,
 		},
 		{
-			name:    "consolidate: unbound replica (still binding) -> left alone",
-			cpNodes: []string{"m0"},
-			replica: map[int32]string{0: "m0", 1: "", 2: "m0"},
-			healthy: false,
-			wantAct: false,
+			name:     "consolidate: replicas bound to removed nodes -> recycle first, no gate (anchor untouched)",
+			eligible: []string{"m0"},
+			replica:  map[int32]string{0: "m0", 1: "gone1", 2: "gone2"},
+			healthy:  false,
+			wantAct:  true,
+			wantOrd:  1,
 		},
 		{
-			name:    "consolidate: replica on a stale node -> recycle it",
-			cpNodes: []string{"m0"},
-			replica: map[int32]string{0: "m0", 1: "m0", 2: "m2"},
-			healthy: false,
-			wantAct: true,
-			wantOrd: 2,
-		},
-		// IGNORE (2 or 0 masters)
-		{
-			name:    "two masters -> ignored even when replicas are messy",
-			cpNodes: []string{"m0", "m1"},
-			replica: map[int32]string{0: "m0", 1: "", 2: "gone"},
-			healthy: true,
-			wantAct: false,
+			name:     "consolidate: unbound replica (still binding) -> left alone",
+			eligible: []string{"m0"},
+			replica:  map[int32]string{0: "m0", 1: "", 2: "m0"},
+			healthy:  false,
+			wantAct:  false,
 		},
 		{
-			name:    "zero masters -> no action",
-			cpNodes: []string{},
-			replica: map[int32]string{0: "", 1: "", 2: ""},
-			healthy: false,
-			wantAct: false,
+			name:     "consolidate: replica on a node that exists but is no longer eligible + healthy -> recycle it",
+			eligible: []string{"m0"},
+			replica:  map[int32]string{0: "m0", 1: "m0", 2: "m2"},
+			healthy:  true,
+			wantAct:  true,
+			wantOrd:  2,
+		},
+		{
+			name:     "consolidate: replica on a node that exists, NOT healthy -> gated, it holds a live copy",
+			eligible: []string{"m0"},
+			replica:  map[int32]string{0: "m0", 1: "m0", 2: "m2"},
+			healthy:  false,
+			wantAct:  false,
+		},
+		{
+			// The role given to a node none of the replicas is on. Every replica
+			// holds a live copy; recycling them without the gate would, on a
+			// node-pinned class, throw away every copy of the data.
+			name:     "consolidate: no replica on the target, all on live nodes, NOT healthy -> no action",
+			eligible: []string{"s0"},
+			replica:  map[int32]string{0: "w0", 1: "w1", 2: "w2"},
+			healthy:  false,
+			wantAct:  false,
+		},
+		{
+			name:     "consolidate: no replica on the target, all on live nodes + healthy -> one at a time",
+			eligible: []string{"s0"},
+			replica:  map[int32]string{0: "w0", 1: "w1", 2: "w2"},
+			healthy:  true,
+			wantAct:  true,
+			wantOrd:  0,
+		},
+		// IGNORE (2 or 0 eligible nodes)
+		{
+			name:     "two eligible nodes -> ignored even when replicas are messy",
+			eligible: []string{"m0", "m1"},
+			replica:  map[int32]string{0: "m0", 1: "", 2: "gone"},
+			healthy:  true,
+			wantAct:  false,
+		},
+		{
+			name:     "zero eligible nodes -> no action",
+			eligible: []string{},
+			replica:  map[int32]string{0: "", 1: "", 2: ""},
+			healthy:  false,
+			wantAct:  false,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := nextPlacementAction(tc.cpNodes, spotsOn(tc.replica), replicas, tc.healthy)
+			// Every node the fixture names exists, except the ones called gone*.
+			present := map[string]bool{}
+			for _, n := range tc.eligible {
+				present[n] = true
+			}
+			for _, n := range tc.replica {
+				if n != "" && !strings.HasPrefix(n, "gone") {
+					present[n] = true
+				}
+			}
+			got := nextPlacementAction(tc.eligible, present, spotsOn(tc.replica), replicas, tc.healthy)
 			if got.act != tc.wantAct {
 				t.Fatalf("act=%v, want %v (reason=%q)", got.act, tc.wantAct, got.reason)
 			}
@@ -187,7 +223,7 @@ func TestReconcilePlacementNonHA(t *testing.T) {
 		t.Helper()
 		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
 			Name:   "m0",
-			Labels: map[string]string{controlPlaneNodeLabel: "", hostnameTopologyKey: "m0"},
+			Labels: map[string]string{hostnameTopologyKey: "m0"},
 		}}
 		pv := pinnedPV("replica-pv", "gone")
 		pvc := &corev1.PersistentVolumeClaim{
@@ -571,55 +607,84 @@ func TestPVNodeName(t *testing.T) {
 	}
 }
 
-// TestCandidateHostnamesAreTheMasters: the replicas are spread across the
-// masters and nothing else. The set has to be the one the scheduler is given in
-// dataPlanePlacement — count a node the pods may not have, and the reconcile
+// TestCandidateHostnamesAreWhatThePlacementAdmits: the replicas are spread across
+// the nodes the placement allows and nothing else. The set has to be the one the
+// scheduler works from — count a node the pods may not have, and the reconcile
 // moves a replica towards a node it will never be scheduled on, throwing away
 // that replica's data on every attempt.
-func TestCandidateHostnamesAreTheMasters(t *testing.T) {
-	// The label the data plane used to prefer. It exists here and nowhere in the
-	// package: a node carrying it is a node like any other, and the only thing
-	// that makes one eligible is being a master.
-	const systemNodeLabel = "node-role.deckhouse.io/system"
-
-	ctx := context.Background()
-	node := func(name string, labels ...string) *corev1.Node {
-		n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{}}}
+func TestCandidateHostnamesAreWhatThePlacementAdmits(t *testing.T) {
+	const (
+		roleLabel   = "node-role.deckhouse.io/system-s3"
+		systemLabel = "node-role.deckhouse.io/system"
+		masterLabel = "node-role.kubernetes.io/control-plane"
+	)
+	dedicated := func(value string) corev1.Taint {
+		return corev1.Taint{Key: "dedicated.deckhouse.io", Value: value, Effect: corev1.TaintEffectNoExecute}
+	}
+	node := func(name string, taints []corev1.Taint, unschedulable bool, labels ...string) *corev1.Node {
+		n := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{}},
+			Spec:       corev1.NodeSpec{Taints: taints, Unschedulable: unschedulable},
+		}
 		for _, l := range labels {
 			n.Labels[l] = ""
 		}
 		return n
 	}
-	c := fake.NewClientBuilder().WithScheme(coreScheme(t)).WithObjects(
-		node("sys-0", systemNodeLabel),
-		node("sys-1", systemNodeLabel),
-		node("master-0", controlPlaneNodeLabel),
-		// Labelled both: it is a master, and a master is a place to put a replica.
-		node("both-0", systemNodeLabel, controlPlaneNodeLabel),
-		node("worker-0"),
-	).Build()
-	d := &Driver{client: c, apiReader: c, namespace: "d8-system-s3"}
-
-	got, err := d.candidateHostnames(ctx)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	objects := []client.Object{
+		node("s3-0", []corev1.Taint{dedicated("system-s3")}, false, roleLabel),
+		node("s3-1", nil, false, roleLabel),
+		node("s3-cordoned", nil, true, roleLabel),
+		// Carries the role, but a taint nobody tolerates keeps pods off it.
+		node("s3-tainted", []corev1.Taint{{Key: "example.com/maintenance", Effect: corev1.TaintEffectNoSchedule}}, false, roleLabel),
+		// PreferNoSchedule keeps nothing off.
+		node("s3-prefer", []corev1.Taint{{Key: "example.com/busy", Effect: corev1.TaintEffectPreferNoSchedule}}, false, roleLabel),
+		node("sys-0", []corev1.Taint{dedicated("system")}, false, systemLabel),
+		node("master-0", []corev1.Taint{{Key: masterLabel, Effect: corev1.TaintEffectNoSchedule}}, false, masterLabel),
+		node("worker-0", nil, false),
+	}
+	tolerations := []corev1.Toleration{
+		{Key: "dedicated.deckhouse.io", Operator: corev1.TolerationOpEqual, Value: "system-s3"},
+		{Key: "dedicated.deckhouse.io", Operator: corev1.TolerationOpEqual, Value: "system"},
 	}
 
-	want := map[string]bool{"master-0": false, "both-0": false}
-	for _, name := range got {
-		if _, ok := want[name]; !ok {
-			t.Errorf("%q is a candidate for the data plane and should not be", name)
-			continue
-		}
-		if want[name] {
-			t.Errorf("%q is counted twice: a node that is both is still one place to put a replica", name)
-		}
-		want[name] = true
+	cases := []struct {
+		name      string
+		placement Placement
+		want      []string
+	}{
+		{
+			name:      "the module's own role",
+			placement: Placement{NodeSelector: map[string]string{roleLabel: ""}, Tolerations: tolerations},
+			want:      []string{"s3-0", "s3-1", "s3-prefer"},
+		},
+		{
+			name:      "the system role",
+			placement: Placement{NodeSelector: map[string]string{systemLabel: ""}, Tolerations: tolerations},
+			want:      []string{"sys-0"},
+		},
+		{
+			// Neither role in the cluster: any node the pods can land on — which
+			// is not a tainted master.
+			name:      "no role",
+			placement: Placement{Tolerations: tolerations},
+			want:      []string{"s3-0", "s3-1", "s3-prefer", "sys-0", "worker-0"},
+		},
 	}
-	for name, found := range want {
-		if !found {
-			t.Errorf("%q is not a candidate and should be", name)
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(coreScheme(t)).WithObjects(objects...).Build()
+			d := (&Driver{client: c, apiReader: c, namespace: "d8-system-s3"}).WithPlacement(tc.placement)
+
+			got, err := d.candidateHostnames(context.Background())
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			slices.Sort(got)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("candidates=%v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

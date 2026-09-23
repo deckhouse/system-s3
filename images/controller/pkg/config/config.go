@@ -17,10 +17,13 @@ limitations under the License.
 package config
 
 import (
+	"encoding/json"
 	"log"
 	"os"
 	"strconv"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/sds-common-lib/monitoring"
@@ -79,6 +82,11 @@ const (
 
 	StorageClassEnv  = "STORAGE_CLASS"
 	ClusterDomainEnv = "CLUSTER_DOMAIN"
+
+	// Where the data plane may run, as the chart works it out with the platform's
+	// "system" strategy: a JSON node selector and a JSON list of tolerations.
+	DataPlaneNodeSelectorEnv = "DATA_PLANE_NODE_SELECTOR"
+	DataPlaneTolerationsEnv  = "DATA_PLANE_TOLERATIONS"
 
 	DefaultControllerNamespace     = "d8-system-s3"
 	DefaultControllerName          = "system-s3-controller"
@@ -181,6 +189,13 @@ type Options struct {
 	// injected via CLUSTER_DOMAIN from global.discovery.clusterDomain. Used to
 	// build in-cluster Service FQDNs.
 	ClusterDomain string
+
+	// DataPlaneNodeSelector and DataPlaneTolerations are where the data plane
+	// may run. Empty is any node without a taint, which is also what the chart
+	// renders for a cluster with neither the module's node role nor the system
+	// one.
+	DataPlaneNodeSelector map[string]string
+	DataPlaneTolerations  []corev1.Toleration
 }
 
 // defaultMetricsBindAddress keeps the endpoint on loopback when the chart says
@@ -241,7 +256,29 @@ func NewConfig() *Options {
 		opts.ClusterDomain = DefaultClusterDomain
 	}
 
+	jsonFromEnv(DataPlaneNodeSelectorEnv, &opts.DataPlaneNodeSelector)
+	jsonFromEnv(DataPlaneTolerationsEnv, &opts.DataPlaneTolerations)
+
 	return &opts
+}
+
+// jsonFromEnv decodes a JSON value, leaving out untouched when the variable is
+// empty.
+//
+// Unlike the helpers below it has no default to fall back to, and it stops the
+// process instead. The values it reads say where the data plane runs, and every
+// fallback there is a placement nobody chose: an empty selector puts replicas on
+// whatever node is free, and their volumes, on a class pinned to nodes, stay
+// there. A controller that refuses to start says what is wrong in the one place
+// an operator is already looking.
+func jsonFromEnv(name string, out any) {
+	v := os.Getenv(name)
+	if v == "" {
+		return
+	}
+	if err := json.Unmarshal([]byte(v), out); err != nil {
+		log.Fatalf("%s=%q is not valid JSON: %v", name, v, err)
+	}
 }
 
 // The three helpers below share one rule: a value that cannot be used is

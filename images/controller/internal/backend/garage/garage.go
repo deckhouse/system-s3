@@ -18,8 +18,8 @@ limitations under the License.
 // object storage.
 //
 // It reconciles the data plane — the ServiceAccount, RPC/admin secret,
-// garage.toml ConfigMap, a StatefulSet with a fixed replica count on
-// control-plane nodes over node-sticky local PersistentVolumes, and the S3/RPC
+// garage.toml ConfigMap, a StatefulSet with a fixed replica count on the nodes
+// the chart's placement allows (see placement.go), and the S3/RPC
 // Services — then connects the RPC peers and assigns the Garage cluster layout
 // via the admin API (see mesh.go), and provisions buckets and access keys
 // (buckets.go, access.go).
@@ -84,6 +84,10 @@ type Driver struct {
 	// garageCA the controller's own mount of its CA (see tls.go and WithTLS).
 	tlsSecret string
 	garageCA  *tlsclient.CA
+
+	// placement is where the data plane may run (see placement.go and
+	// WithPlacement). The chart renders it; the zero value is any untainted node.
+	placement Placement
 
 	// The exec clientset is built once. Capturing node identities execs into
 	// every replica on every pass, and a clientset per exec is a set of REST
@@ -259,8 +263,8 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 	if err != nil {
 		return state, fmt.Errorf("ensure node identities: %w", err)
 	}
-	// Converge replica placement onto the target topology as the master count
-	// changes (spread across 3 masters, consolidate onto 1). One health-gated
+	// Converge replica placement onto the target topology as the set of eligible
+	// nodes changes (spread across three, consolidate onto one). One health-gated
 	// PVC recycle per reconcile; when it acts, report progress and requeue so
 	// the move settles before the next one.
 	acted, placementMsg, err := d.reconcilePlacement(ctx, store)
@@ -525,9 +529,8 @@ func (d *Driver) ensureSecret(ctx context.Context, store *backend.Store) error {
 	return d.client.Create(ctx, secret)
 }
 
-// ensureWorkload creates/updates the StatefulSet — a fixed replica count on
-// control-plane nodes over node-sticky local volumes — and reports whether its
-// pods are ready.
+// ensureWorkload creates/updates the StatefulSet — a fixed replica count on the
+// nodes the placement allows — and reports whether its pods are ready.
 func (d *Driver) ensureWorkload(ctx context.Context, store *backend.Store, cfgHash string, volumeSize resource.Quantity) (bool, string, error) {
 	// A volumeClaimTemplate cannot be updated, so a workload asking for the old
 	// size is deleted with its pods left running and created again below. The data
@@ -546,6 +549,7 @@ func (d *Driver) ensureWorkload(ctx context.Context, store *backend.Store, cfgHa
 	}
 
 	sts := buildStatefulSet(store, d.namespace, d.image, cfgHash, volumeSize)
+	withPlacement(sts, d.placement)
 	withTLSTerminator(sts, d.copierImage, d.tlsSecret)
 	if err := d.apply(ctx, sts); err != nil {
 		return false, "", fmt.Errorf("ensure statefulset: %w", err)

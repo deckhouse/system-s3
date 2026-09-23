@@ -186,15 +186,10 @@ func TestBuildSystemStatefulSet(t *testing.T) {
 		}
 	}
 
-	// System nodes if there are any, masters otherwise — and never a plain
-	// worker. A nodeSelector would be one or the other, so there must not be one.
-	if spec.NodeSelector != nil {
-		t.Errorf("nodeSelector=%v: a selector cannot express a preference, so there must not be one", spec.NodeSelector)
-	}
-	assertDataPlanePlacement(t, spec)
+	assertNoNodeSelection(t, spec)
 
 	// Soft (preferred, not required) anti-affinity so all replicas still run on a
-	// single master.
+	// single node.
 	if spec.Affinity == nil || spec.Affinity.PodAntiAffinity == nil {
 		t.Fatalf("expected pod anti-affinity")
 	}
@@ -272,10 +267,10 @@ func TestBuildNonHASystemStatefulSet(t *testing.T) {
 	if sts.Spec.Replicas == nil || *sts.Spec.Replicas != replicasNonHA {
 		t.Fatalf("replicas=%v, want %d", sts.Spec.Replicas, replicasNonHA)
 	}
-	// Everything else is as usual: the same placement and one claim per replica
-	// from the configured StorageClass.
+	// Everything else is as usual: no node selection of its own and one claim per
+	// replica from the configured StorageClass.
 	spec := sts.Spec.Template.Spec
-	assertDataPlanePlacement(t, spec)
+	assertNoNodeSelection(t, spec)
 	if len(sts.Spec.VolumeClaimTemplates) != 1 ||
 		sts.Spec.VolumeClaimTemplates[0].Spec.StorageClassName == nil ||
 		*sts.Spec.VolumeClaimTemplates[0].Spec.StorageClassName != localSC {
@@ -522,56 +517,19 @@ func TestEachPlaneSpreadsOnlyAgainstItself(t *testing.T) {
 	}
 }
 
-// assertDataPlanePlacement pins the placement policy: the data plane runs on the
-// masters, on nothing else, and tolerates what a master is tainted with.
-//
-// One required term and no preferred one. The store holds the data a cluster
-// needs while it is being repaired, so it lives where the cluster's own
-// availability lives; a system node belongs to a NodeGroup that grows, shrinks
-// and replaces its members, and a replica that follows one rebuilds itself every
-// time that happens.
-func assertDataPlanePlacement(t *testing.T, spec corev1.PodSpec) {
+// assertNoNodeSelection pins that buildStatefulSet decides nothing about nodes:
+// no selector, no node affinity, no tolerations. Where the data plane runs is
+// the chart's placement, put on by the driver (see withPlacement); a rule left
+// in here would be ANDed with it and quietly narrow what the chart allowed.
+func assertNoNodeSelection(t *testing.T, spec corev1.PodSpec) {
 	t.Helper()
-
-	if spec.Affinity == nil || spec.Affinity.NodeAffinity == nil {
-		t.Fatalf("no node affinity: the data plane would schedule on any node at all")
+	if spec.NodeSelector != nil {
+		t.Errorf("nodeSelector=%v: node selection is the placement's, not the StatefulSet's", spec.NodeSelector)
 	}
-	na := spec.Affinity.NodeAffinity
-
-	required := na.RequiredDuringSchedulingIgnoredDuringExecution
-	if required == nil || len(required.NodeSelectorTerms) != 1 {
-		t.Fatalf("required node affinity=%+v, want one term (control-plane)", required)
+	if spec.Affinity != nil && spec.Affinity.NodeAffinity != nil {
+		t.Errorf("node affinity=%+v: node selection is the placement's, not the StatefulSet's", spec.Affinity.NodeAffinity)
 	}
-	term := required.NodeSelectorTerms[0]
-	if len(term.MatchExpressions) != 1 {
-		t.Fatalf("term=%+v, want one expression", term)
-	}
-	expr := term.MatchExpressions[0]
-	if expr.Key != controlPlaneNodeLabel {
-		t.Errorf("the data plane may run on %q, which is not a master", expr.Key)
-	}
-	if expr.Operator != corev1.NodeSelectorOpExists {
-		t.Errorf("term for %q uses %q, want Exists: the label carries no value", expr.Key, expr.Operator)
-	}
-
-	if preferred := na.PreferredDuringSchedulingIgnoredDuringExecution; len(preferred) != 0 {
-		t.Errorf("preferred node affinity=%+v, want none: there is one kind of node to have", preferred)
-	}
-
-	tolerated := map[string]bool{}
-	for _, tol := range spec.Tolerations {
-		tolerated[tol.Key+"="+tol.Value] = true
-	}
-	for _, want := range []string{
-		"node-role.kubernetes.io/control-plane=",
-		"node-role.kubernetes.io/master=",
-		"dedicated.deckhouse.io=system-s3",
-	} {
-		if !tolerated[want] {
-			t.Errorf("taint %q is not tolerated: %+v", want, spec.Tolerations)
-		}
-	}
-	if tolerated["dedicated.deckhouse.io=system"] {
-		t.Errorf("the system-node taint is tolerated: the data plane does not run there, and tolerating it reads as if it might: %+v", spec.Tolerations)
+	if len(spec.Tolerations) != 0 {
+		t.Errorf("tolerations=%+v: they come with the placement", spec.Tolerations)
 	}
 }

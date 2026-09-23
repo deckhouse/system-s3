@@ -24,6 +24,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -39,48 +40,52 @@ type placementAction struct {
 }
 
 // nextPlacementAction decides the one replica to relocate to converge the System
-// replicas onto the target topology, given the live control-plane hostnames, the
+// replicas onto the target topology, given the live eligible hostnames, the
 // node each replica's local PV is pinned to (replicaNode[ordinal]; "" when the
 // replica's PVC is unbound — still binding, e.g. during initial bring-up) and
 // whether Garage is currently healthy. An "" (settling) replica is never
 // migrated; only a replica bound to a wrong or removed node is moved. A replica
-// left Pending after its master was removed keeps its PVC bound to the old PV
+// left Pending after its node was removed keeps its PVC bound to the old PV
 // (Retain), so it reads back as that removed node — not "" — and is migrated.
 //
-// Topology rules (the 2-master state is intentionally left untouched — a
+// Topology rules (the 2-node state is intentionally left untouched — a
 // mid-shrink transient we neither spread across nor consolidate from):
-//   - control-plane nodes >= replicas: SPREAD — one replica per master. A
-//     replica that is co-located (shares its node) or sits on a node that is no
-//     longer a control-plane node is relocated onto an empty master. Gated on
+//   - eligible nodes >= replicas: SPREAD — one replica per node. A replica that
+//     is co-located (shares its node) or sits on a node that is no longer
+//     eligible is relocated onto an empty eligible node. Gated on
 //     Garage being healthy so the other replicas have re-replicated before the
 //     next move (re-replication only completes once the StatefulSet is whole).
 //     The gate is kept even where the volume follows the pod and no
 //     re-replication is needed: a move is still one replica down, and taking a
 //     second one down while the cluster is degraded is what the gate prevents.
-//   - exactly one control-plane node: CONSOLIDATE — every replica onto that
-//     node. Replicas not already pinned there (Pending because their master was
-//     removed, or on a wrong node) are relocated; the surviving replica on the
-//     target is the data anchor and is never recycled. No health gate: the
-//     replicas being moved hold no reachable data (their node is gone), so
-//     recycling them only restores quorum.
+//   - exactly one eligible node: CONSOLIDATE — every replica onto that
+//     node. Replicas not already pinned there (Pending because their node was
+//     removed, or on a node that is no longer eligible) are relocated; a replica
+//     already on the target is never recycled. A replica whose node is gone is
+//     moved without a health gate: it holds no reachable data, so recycling it
+//     only restores quorum. A replica whose node still exists holds a live copy
+//     — the case a node role produces, when the role is given to a node the
+//     replicas are not on — and is moved only while Garage is healthy, one at a
+//     time, exactly like SPREAD; moving them all at once would recycle every
+//     copy of the data on a node-pinned class.
 //   - otherwise (0 or 2 nodes): no action.
 //
 // It returns at most one action; the caller performs it and requeues, so the
 // rebalance advances one replica per reconcile.
-func nextPlacementAction(cpNodes []string, spots map[int32]replicaSpot, replicas int32, healthy bool) placementAction {
-	cpSet := make(map[string]struct{}, len(cpNodes))
-	for _, n := range cpNodes {
-		cpSet[n] = struct{}{}
+func nextPlacementAction(eligible []string, present map[string]bool, spots map[int32]replicaSpot, replicas int32, healthy bool) placementAction {
+	eligibleSet := make(map[string]struct{}, len(eligible))
+	for _, n := range eligible {
+		eligibleSet[n] = struct{}{}
 	}
 
 	switch {
-	case int32(len(cpNodes)) >= replicas: // SPREAD
+	case int32(len(eligible)) >= replicas: // SPREAD
 		if !healthy {
 			return placementAction{} // wait: let the previous move re-replicate
 		}
 		perNode := map[string]int{}
 		for _, spot := range spots {
-			if _, ok := cpSet[spot.node]; ok {
+			if _, ok := eligibleSet[spot.node]; ok {
 				perNode[spot.node]++
 			}
 		}
@@ -89,8 +94,8 @@ func nextPlacementAction(cpNodes []string, spots map[int32]replicaSpot, replicas
 			if n == "" {
 				continue // PVC still binding — let it settle, do not disturb
 			}
-			if _, onCP := cpSet[n]; !onCP {
-				return placementAction{act: true, ordinal: ord, reason: "spread: replica off a control-plane node"}
+			if _, onCP := eligibleSet[n]; !onCP {
+				return placementAction{act: true, ordinal: ord, reason: "spread: replica off an eligible node"}
 			}
 			if perNode[n] > 1 {
 				return placementAction{act: true, ordinal: ord, reason: "spread: replica co-located on " + n}
@@ -98,20 +103,24 @@ func nextPlacementAction(cpNodes []string, spots map[int32]replicaSpot, replicas
 		}
 		return placementAction{}
 
-	case len(cpNodes) == 1: // CONSOLIDATE
-		target := cpNodes[0]
+	case len(eligible) == 1: // CONSOLIDATE
+		target := eligible[0]
 		for ord := int32(0); ord < replicas; ord++ {
 			n := spots[ord].node
 			if n == "" {
 				continue // PVC still binding (e.g. initial bring-up) — leave it
 			}
-			if n != target {
-				return placementAction{act: true, ordinal: ord, reason: "consolidate onto " + target}
+			if n == target {
+				continue
 			}
+			if present[n] && !healthy {
+				return placementAction{} // a live copy: wait for the previous move to settle
+			}
+			return placementAction{act: true, ordinal: ord, reason: "consolidate onto " + target}
 		}
 		return placementAction{}
 
-	default: // 0 or 2 control-plane nodes: ignore
+	default: // 0 or 2 eligible nodes: ignore
 		return placementAction{}
 	}
 }
@@ -119,7 +128,7 @@ func nextPlacementAction(cpNodes []string, spots map[int32]replicaSpot, replicas
 // reconcilePlacement performs at most one placement migration per reconcile: it
 // reads the live topology, decides the next
 // action (nextPlacementAction) and, when one is due, recycles that replica's PVC
-// so the StatefulSet re-homes it onto the correct master. It returns a
+// so the StatefulSet re-homes it onto the correct node. It returns a
 // human-readable message and whether it acted (the caller then reports "not
 // ready" and requeues so the move can settle before the next one).
 //
@@ -132,8 +141,8 @@ func (d *Driver) reconcilePlacement(ctx context.Context, store *backend.Store) (
 	// A store outside the high-availability mode never migrates. A relocation
 	// recycles the replica's PVC and lets it re-replicate from the surviving
 	// copies — with one replica there are none, so the move would silently discard
-	// the whole store. The replica therefore stays on the master its local PV bound
-	// to, and goes Pending (data intact on that node's disk) if the master is
+	// the whole store. The replica therefore stays on the node its local PV bound
+	// to, and goes Pending (data intact on that node's disk) if the node is
 	// removed: bringing it back or recreating the store empty is an operator
 	// decision.
 	if !store.HighAvailability {
@@ -149,14 +158,20 @@ func (d *Driver) reconcilePlacement(ctx context.Context, store *backend.Store) (
 		return false, "", fmt.Errorf("read replica placement: %w", err)
 	}
 
-	// The health gate only matters for SPREAD; querying it is skipped otherwise.
+	present, err := d.presentNodes(ctx)
+	if err != nil {
+		return false, "", fmt.Errorf("list nodes: %w", err)
+	}
+
+	// The health gate matters for SPREAD and for CONSOLIDATE off a live node;
+	// with no eligible node or two there is nothing to decide, and it is skipped.
 	replicas := desiredReplicas(store)
 	healthy := false
-	if int32(len(candidates)) >= replicas {
+	if int32(len(candidates)) >= replicas || len(candidates) == 1 {
 		healthy = d.garageHealthy(ctx, store)
 	}
 
-	action := nextPlacementAction(candidates, spots, replicas, healthy)
+	action := nextPlacementAction(candidates, present, spots, replicas, healthy)
 	if !action.act {
 		// Converged (or nothing to do): forget the bookkeeping, so a later,
 		// legitimate migration starts from a clean count.
@@ -301,7 +316,7 @@ type replicaSpot struct {
 // consulted, for two things — whether it is pinned, and, when the pod has no node
 // (Pending, because the node it was pinned to is gone), which node it is pinned
 // to. That second case is the one that has to keep working: a replica left
-// Pending after its master was removed must read back as that removed node, or
+// Pending after its node was removed must read back as that removed node, or
 // nothing would ever move it.
 func (d *Driver) replicaPlacement(ctx context.Context, store *backend.Store) (map[int32]replicaSpot, error) {
 	replicas := desiredReplicas(store)
@@ -397,26 +412,46 @@ func namesANode(key string) bool {
 	return key == hostnameTopologyKey || strings.HasSuffix(key, "/node")
 }
 
-// candidateHostnames lists the nodes the data plane may run on — the masters —
-// and returns their names.
+// candidateHostnames lists the nodes the data plane may run on — the ones the
+// placement admits — and returns their names.
 //
-// This is the set the replicas are spread across, and it has to be the same set
-// the scheduler is given in dataPlanePlacement. A placement reconcile that
+// This is the set the replicas are spread across, and it has to be the set the
+// scheduler works from, which is why it is the same Placement the pods carry. A
+// placement reconcile that
 // counted nodes the pods may not have would keep moving a replica towards a node
 // the scheduler will never give it, recycling a replica's data on every attempt
 // until the attempt cap stops it.
 //
 // Uncached, on a path that runs every 30 seconds and only for a store in the
 // highly available mode: a cached Node informer would have to hold every Node in
-// the cluster to answer one filtered question.
+// the cluster to answer one filtered question. The selector narrows the list on
+// the server; taints and cordons are checked here, since no field selector can.
 func (d *Driver) candidateHostnames(ctx context.Context) ([]string, error) {
 	nodes := &corev1.NodeList{}
-	if err := d.apiReader.List(ctx, nodes, client.HasLabels{controlPlaneNodeLabel}); err != nil {
+	if err := d.apiReader.List(ctx, nodes, client.MatchingLabels(d.placement.NodeSelector)); err != nil {
 		return nil, err
 	}
 	out := make([]string, 0, len(nodes.Items))
 	for i := range nodes.Items {
-		out = append(out, nodes.Items[i].Name)
+		if d.placement.admits(&nodes.Items[i]) {
+			out = append(out, nodes.Items[i].Name)
+		}
+	}
+	return out, nil
+}
+
+// presentNodes returns the names of every node that exists, eligible or not. A
+// replica on a node in this set holds a copy the store can still read; one on a
+// node outside it holds nothing reachable.
+func (d *Driver) presentNodes(ctx context.Context) (map[string]bool, error) {
+	nodes := &metav1.PartialObjectMetadataList{}
+	nodes.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("NodeList"))
+	if err := d.apiReader.List(ctx, nodes); err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(nodes.Items))
+	for i := range nodes.Items {
+		out[nodes.Items[i].Name] = true
 	}
 	return out, nil
 }

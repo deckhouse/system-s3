@@ -56,10 +56,6 @@ const (
 	// carries no credentials for a separate ModuleSource.
 	registryPullSecret = "system-s3-module-registry"
 
-	// controlPlaneNodeLabel marks the nodes the data plane may run on: the
-	// masters, and only those (see dataPlanePlacement).
-	controlPlaneNodeLabel = backend.ControlPlaneNodeLabel
-
 	// hostnameTopologyKey is the node label carrying the hostname, used for the
 	// soft pod anti-affinity that spreads the replicas.
 	hostnameTopologyKey = "kubernetes.io/hostname"
@@ -76,16 +72,17 @@ const (
 )
 
 // replicasHA is the number of Garage replicas the highly available store runs,
-// independent of the control-plane node count. Keeping it constant
-// (rather than one pod per master) keeps the pinned replication factor and the
-// Garage quorum stable across master-count changes: three replicas always run —
-// spread across control-plane nodes when several exist, co-located on the single
-// master otherwise.
+// independent of how many nodes the placement allows. Keeping it constant
+// (rather than one pod per eligible node) keeps the pinned replication factor and
+// the Garage quorum stable as nodes come and go: three replicas always run —
+// spread across the eligible nodes when several exist, co-located on one
+// otherwise.
 //
-// The master-count changes this has to survive, and what happens on each:
+// The changes in the number of eligible nodes this has to survive, and what
+// happens on each:
 //   - 1 -> 3: the replicas stay where they are and the placement reconcile moves
 //     them out one at a time, health-gated, so the store keeps serving.
-//   - 3 -> 1: the two replicas whose masters are gone are consolidated onto the
+//   - 3 -> 1: the two replicas whose nodes are gone are consolidated onto the
 //     survivor; they hold no reachable data, so recycling them restores quorum
 //     rather than risking it.
 //   - 3 -> 2 (and 2 -> 3): left alone. It is a transient of a shrink or a grow,
@@ -97,14 +94,14 @@ const replicasHA int32 = 3
 
 // replicasNonHA is the replica count outside the high-availability mode: one
 // Garage replica with replication_factor 1. It gives up all redundancy — the
-// store is unavailable while its pod is down and lost with its master's disk —
+// store is unavailable while its pod is down and lost with its node's disk —
 // in exchange for a third of the footprint, and it never migrates between
-// masters (see reconcilePlacement).
+// nodes (see reconcilePlacement).
 const replicasNonHA int32 = 1
 
 // desiredReplicas is the number of Garage data-plane pods: replicasHA in the
 // high-availability mode, replicasNonHA otherwise. Both counts are independent of
-// the control-plane node count. It also drives the initial replication factor
+// how many nodes the placement allows. It also drives the initial replication factor
 // (clamped to this count) and the layout reconcile.
 //
 // This is desired state, and for an existing store it is not necessarily what
@@ -146,8 +143,8 @@ const (
 // A migration recycles the replica's PVC, which throws away that replica's copy
 // of the data and makes Garage re-replicate it by anti-entropy. The move is only
 // worth it because the scheduler is expected to place the replica on a different
-// master — but that is a preference, not a guarantee: the pod anti-affinity is
-// preferred (it has to be, or replicas could not run on a single master) and the
+// node — but that is a preference, not a guarantee: the pod anti-affinity is
+// preferred (it has to be, or replicas could not run on a single node) and the
 // pool holds a free PV on every node, so the scheduler may legally return the
 // replica to the node it just left. Without a cap that is an unbounded retry
 // (Nygard, Release It!, 2nd ed., ch. 4): every few minutes one replica loses its
@@ -663,7 +660,7 @@ func hardenedRoot() *corev1.SecurityContext {
 
 // nodeIdentitySecretName is the Secret holding each replica's persisted Garage
 // node identity (keys node-<ord> and node-<ord>.pub), so a replica
-// recycled onto another master keeps its stable node ID instead of generating a
+// recycled onto another node keeps its stable node ID instead of generating a
 // fresh one (which would strand the old ID as a dead node and churn the layout).
 func nodeIdentitySecretName(store *backend.Store) string {
 	return resourceName(store) + "-node-identity"
@@ -672,7 +669,7 @@ func nodeIdentitySecretName(store *backend.Store) string {
 // restoreNodeKeyScript runs in the restore-node-key initContainer.
 // It restores this ordinal's persisted Garage node identity (node_key /
 // node_key.pub) from the mounted identity Secret into the metadata dir before
-// Garage starts, so a replica recycled onto another master (fresh empty PV)
+// Garage starts, so a replica recycled onto another node (fresh empty PV)
 // rejoins with its stable node ID and re-syncs via anti-entropy. The Secret is
 // optional: on the very first boot no key exists yet, so Garage generates one
 // (which the controller then captures into the Secret).
@@ -692,97 +689,44 @@ fi
 `, dataMountPath, nodeIdentityMountPath)
 
 // buildStatefulSet returns the data-plane StatefulSet: a desiredReplicas count
-// on control-plane nodes, each replica with a PersistentVolumeClaim of its own
-// from the module's StorageClass.
+// of replicas, each with a PersistentVolumeClaim of its own from the module's
+// StorageClass. Which nodes they may run on is not decided here: the driver puts
+// the chart's placement on the result (see placement.go).
 //
-// The replica count is independent of the master count — replicas spread
-// one-per-node when several control-plane nodes exist (soft anti-affinity and a
-// soft spread constraint, both scoped to this data plane) and co-locate on the
-// single master otherwise; outside the high-availability mode the one pod simply
-// lands on whichever master the scheduler picks. Pods start in parallel (no
-// ordinal barrier). This keeps a constant replication factor and Garage quorum
-// across master-count changes; the layout is reconciled in mesh.go as replicas
-// move and rejoin.
+// The replica count is independent of how many nodes the placement allows —
+// replicas spread one-per-node when there are several (soft anti-affinity and a
+// soft spread constraint, both scoped to this data plane) and co-locate on one
+// node otherwise. Pods start in parallel (no ordinal barrier). This keeps a
+// constant replication factor and Garage quorum as nodes come and go; the layout
+// is reconciled in mesh.go as replicas move and rejoin.
 //
 // What the volume does when a replica moves is the StorageClass's business, not
 // this module's: a class whose volumes follow the pod carries the replica's data
 // with it, and a node-pinned class leaves it behind to be rebuilt by anti-entropy
 // from the other replicas. The placement reconcile reads which of the two it is
 // from the bound volume and moves replicas accordingly (see rebalance.go).
-// dataPlanePlacement says where the data plane may run: control-plane nodes,
-// and nothing else.
-//
-// It used to be system nodes for preference and masters for the rest, on the
-// reasoning that a cluster with system nodes should not spend its control plane
-// on object storage. That was the wrong way round for this store. What lives in
-// it is the platform's own data — the thing a cluster has to be able to read
-// while it is being repaired — so it belongs on the nodes whose availability the
-// cluster already guarantees, and not next to the tenant-facing workloads a
-// system node is sized and scaled for. The practical half of the same argument:
-// system nodes come and go with a NodeGroup, and a store that follows them
-// re-replicates itself every time one is replaced.
-//
-// So the required affinity is one term now, and there is no preferred term to go
-// with it: there is one kind of node the data plane may have, and a cluster
-// always has at least one of them. A node that is labelled both a master and a
-// system node is still a master and still eligible — the rule is about which
-// nodes may be used, not about which labels a node is allowed to carry.
-//
-// The tolerations are what a master is tainted with, plus a taint dedicating a
-// node to this module by name, for an operator who wants one master carrying the
-// store and the others left alone. Tolerating a taint is not asking for the node:
-// where the pod actually lands is the affinity's business.
-//
-// What this does NOT do is decide how many replicas there are. That follows the
-// high-availability mode (see desiredReplicas); adding masters to a cluster
-// spreads the replicas, it does not create them.
-func dataPlanePlacement(spec *corev1.PodSpec) {
-	spec.NodeSelector = nil
-	spec.Affinity = &corev1.Affinity{
-		NodeAffinity: &corev1.NodeAffinity{
-			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
-				NodeSelectorTerms: []corev1.NodeSelectorTerm{
-					{MatchExpressions: []corev1.NodeSelectorRequirement{
-						{Key: controlPlaneNodeLabel, Operator: corev1.NodeSelectorOpExists},
-					}},
-				},
-			},
-		},
-	}
-	spec.Tolerations = dataPlaneTolerations()
-}
-
-// dataPlaneTolerations is what the data plane has to tolerate to land on a
-// master.
-func dataPlaneTolerations() []corev1.Toleration {
-	return []corev1.Toleration{
-		{Key: "node-role.kubernetes.io/control-plane", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
-		{Key: "node-role.kubernetes.io/master", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
-		{Key: "dedicated.deckhouse.io", Operator: corev1.TolerationOpEqual, Value: "system-s3"},
-	}
-}
-
 func buildStatefulSet(store *backend.Store, namespace, image, cfgHash string, volumeSize resource.Quantity) *appsv1.StatefulSet {
 	spec := podSpec(store, image) // data comes from volumeClaimTemplates
 
-	// Where the data plane may run: the masters, and nothing else.
-	dataPlanePlacement(&spec)
+	// Where the data plane may run is the placement's (see withPlacement); the
+	// affinity carries only the spreading rules below.
+	spec.Affinity = &corev1.Affinity{}
 
-	// Spread the replicas across the masters, as far as the cluster allows.
+	// Spread the replicas across the eligible nodes, as far as the cluster allows.
 	//
 	// Both rules below select on planeLabels — the store's labels AND its
 	// incarnation — and that scoping is the load-bearing part, not a detail. A
-	// migration runs two Garage clusters side by side on the same masters for as
+	// migration runs two Garage clusters side by side on the same nodes for as
 	// long as the copy takes, and each has to spread over the same small set of
 	// nodes. A rule that selected on the store alone would make the two planes
-	// repel each other: the second plane's replicas would score every master as
+	// repel each other: the second plane's replicas would score every node as
 	// occupied, pile onto one node, or with a hard rule not schedule at all —
 	// and the migration, which is how this module replaces a data plane, would
 	// deadlock on its own placement policy. Each plane spreads itself; neither
 	// has an opinion about the other.
 	//
 	// Both rules are soft, for the same reason they are two. A cluster with one
-	// master runs three replicas on it: that is a degraded store, not a refusal
+	// eligible node runs three replicas on it: that is a degraded store, not a refusal
 	// to run, and the node-pinned volumes it comes back to are what it rebuilds
 	// from. Nothing here may ever leave a replica Pending.
 	//
@@ -790,9 +734,9 @@ func buildStatefulSet(store *backend.Store, namespace, image, cfgHash string, vo
 	// repulsion, evaluated per pod, which is what keeps the first replicas apart.
 	// The spread constraint says "keep the counts per node within one", which is
 	// the same intent stated over the whole set: it is what stops three replicas
-	// landing 2+1 on three masters when the scheduler scores two of them equally.
+	// landing 2+1 on three nodes when the scheduler scores two of them equally.
 	// Honouring node affinity and taints makes the skew count only the nodes this
-	// pod could actually land on — the masters — instead of every node in the
+	// pod could actually land on — the placement's — instead of every node in the
 	// cluster, which would make the constraint satisfiable while doing nothing.
 	spec.Affinity.PodAntiAffinity = &corev1.PodAntiAffinity{
 		PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
@@ -813,7 +757,7 @@ func buildStatefulSet(store *backend.Store, namespace, image, cfgHash string, vo
 	}}
 
 	// Persist each replica's Garage node identity. When placement recycles a
-	// replica onto another master its PVC is recreated empty, so without this the
+	// replica onto another node its PVC is recreated empty, so without this the
 	// pod would generate a brand-new node ID — stranding the old one as a dead
 	// node and churning the layout (multi-version migrations that Garage cannot
 	// always recover from). The initContainer restores node_key from the

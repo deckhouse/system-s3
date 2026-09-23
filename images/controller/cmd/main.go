@@ -211,11 +211,10 @@ func main() {
 				// Nodes are deliberately NOT cached, and neither are
 				// PersistentVolumes.
 				//
-				// The nodes the data plane may run on are the control-plane nodes,
-				// and they are read on one path: the placement reconcile, every 30
-				// seconds and only for a store in the highly available mode. One
-				// filtered list there costs less than a watch kept warm for it (see
-				// candidateHostnames).
+				// The nodes the data plane may run on are read on one path: the
+				// placement reconcile, every 30 seconds and only for a store in the
+				// highly available mode. One filtered list there costs less than a
+				// watch kept warm for it (see candidateHostnames).
 				//
 				// PersistentVolumes for the same kind of reason: the module creates
 				// none, and the one thing it reads them for — whether a bound volume is
@@ -236,7 +235,11 @@ func main() {
 
 	driver := garage.New(mgr.GetClient(), mgr.GetAPIReader(), mgr.GetConfig(), baseLog,
 		cfgParams.ControllerNamespace, cfgParams.GarageImage, cfgParams.ControllerImage, cfgParams.ClusterDomain).
-		WithTLS(cfgParams.GarageTLSSecret, cfgParams.GarageTLSCAFile)
+		WithTLS(cfgParams.GarageTLSSecret, cfgParams.GarageTLSCAFile).
+		WithPlacement(garage.Placement{
+			NodeSelector: cfgParams.DataPlaneNodeSelector,
+			Tolerations:  cfgParams.DataPlaneTolerations,
+		})
 
 	// The data plane converges from the background loop as well as from every
 	// SystemBucket reconcile, so a cluster with no consumer yet still gets its
