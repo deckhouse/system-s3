@@ -13,11 +13,12 @@ disable:
   message: |
     Attention!
 
-    Disabling this module stops the controller that runs the system object storage and removes its data plane. Platform components that keep their data in system buckets (S3 credentials Secrets issued for SystemBucket resources) lose access to it, and the stored objects are lost.
+    Disabling this module deletes the system object storage. The Garage data plane goes with the module namespace, and so do the claims of its volumes; the stored objects go with the volumes unless the StorageClass keeps released volumes (reclaimPolicy: Retain). Platform components that have a SystemBucket lose access to their data at once: the S3 endpoint and the credentials endpoint stop answering.
 
-    Before disabling the module, be sure to do the following:
+    Before disabling the module:
 
-    - Make sure no Deckhouse component still consumes a system bucket, then delete the SystemBucket resources and wait until the controller has removed the buckets and revoked their access keys.
-    - Check for remaining resources with: `kubectl get systembuckets.storage.deckhouse.io -A` (short name: `sb`). If any objects are listed, remove them before deactivating the module.
+    - List the buckets with `kubectl get systembuckets.storage.deckhouse.io -A` (short name: `sb`). Every component listed keeps data in the system object storage.
+    - Make sure none of them still needs it: disable those components or delete their SystemBucket resources first.
+    - If the data has to be kept, copy it out with an S3 client first. A re-enabled module does not reattach retained volumes: it starts with an empty store.
 
-    Failure to do so may result in data loss for the platform components that use the system object storage.
+    SystemBucket resources are not deleted with the module. They stay, with their connection ConfigMaps, and when the module is enabled again their buckets are created again — empty.

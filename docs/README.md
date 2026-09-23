@@ -76,14 +76,19 @@ Garage is used as-is, through its standard admin API. It is AGPL-licensed, which
 
 ## Removing the module
 
-Disabling the module deletes its namespace, and with it the Garage workload, its
-configuration and its Secrets. Two things it does not delete, and both matter.
+Disabling the module asks for confirmation, and it deletes the system object
+storage. The module namespace goes, and with it the Garage workload, its
+configuration, its Secrets and the claims of its volumes. What happens to the
+volumes behind the claims is the StorageClass's reclaim policy: `Delete` removes
+them with the objects in them, `Retain` keeps them. A re-enabled module does not
+reattach retained volumes — it starts with an empty store — so data that has to
+survive is copied out with an S3 client before the module is disabled.
 
-The local `PersistentVolume` pool is cluster-scoped, so the namespace does not
-take it — the module removes it explicitly when it is disabled.
+`SystemBucket` resources are not deleted. The module releases its finalizer on
+them so that they can be deleted later without it, and they stay with their
+connection ConfigMaps. When the module is enabled again, their buckets are created
+again, empty.
 
-The directories those volumes point at, `/var/lib/deckhouse/system-s3/garage/` on
-every control-plane node, are **left in place**: the module has no node agent and
-cannot reach them. They still hold the objects that were in the system storage.
-Remove them by hand if the data is not wanted, and remember they are there before
-re-enabling the module.
+Before disabling the module, list the buckets with `kubectl get sb -A`: every
+component listed keeps data in the system object storage and loses access to it
+the moment the module goes.
