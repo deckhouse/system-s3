@@ -71,17 +71,17 @@ spec:
                   minLength: 3
                   maxLength: 63
                   pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-                quota:
+                size:
                   type: string
                   default: "1Gi"
                   pattern: '^[0-9]+(\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki)?$'
                   description: |
-                    How much the bucket may hold, as a Kubernetes quantity.
+                    How much the bucket asks for, as a Kubernetes quantity.
 
                     It becomes the bucket's quota in the backend — a write past
                     it is refused — and it is what the data plane sizes its
                     volumes from: the store provisions the sum of every
-                    SystemBucket's quota, so asking for more here is what makes
+                    SystemBucket's size, so asking for more here is what makes
                     the volumes grow.
 
                     The default is deliberately small: a system bucket is a
@@ -140,7 +140,7 @@ spec:
                   format: int64
                   description: |
                     Quota the backend enforces on this bucket, derived from
-                    `spec.quota`. Reported back rather than echoed from the spec:
+                    `spec.size`. Reported back rather than echoed from the spec:
                     what stops a write is what the backend holds.
                 usedBytes:
                   type: integer
@@ -213,8 +213,8 @@ spec:
         - jsonPath: .status.bucketName
           name: Bucket
           type: string
-        - jsonPath: .spec.quota
-          name: Quota
+        - jsonPath: .spec.size
+          name: Size
           type: string
         - jsonPath: .status.usedBytes
           name: Used

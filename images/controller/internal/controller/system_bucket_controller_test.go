@@ -59,16 +59,16 @@ func (f *fakeConverger) Ensure(context.Context) (backend.StoreState, error) {
 type fakeDriver struct {
 	calls []string
 
-	// quotas records the quota each EnsureBucket was asked for, so a spec.quota
-	// that never reaches the backend fails a test rather than a cluster.
-	quotas []int64
+	// sizes records the quota each EnsureBucket was asked for, so a spec.size that
+	// never reaches the backend fails a test rather than a cluster.
+	sizes []int64
 	// usage is what the driver reports back about the bucket.
 	usage backend.BucketUsage
 }
 
-func (f *fakeDriver) EnsureBucket(_ context.Context, _ *backend.Store, name, owner string, quota int64) (backend.BucketState, backend.BucketUsage, error) {
+func (f *fakeDriver) EnsureBucket(_ context.Context, _ *backend.Store, name, owner string, size int64) (backend.BucketState, backend.BucketUsage, error) {
 	f.calls = append(f.calls, "EnsureBucket:"+name+":"+owner)
-	f.quotas = append(f.quotas, quota)
+	f.sizes = append(f.sizes, size)
 	return backend.BucketState{Ready: true, BucketName: name}, f.usage, nil
 }
 

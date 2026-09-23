@@ -14,10 +14,10 @@ metadata:
   name: loki
   namespace: d8-monitoring
 spec:
-  quota: 10Gi
+  size: 10Gi
 ```
 
-`quota` is how much the bucket may hold. The default (`1Gi`) fits a component that stores a little; ask for more explicitly when you need it. It is also what the system storage sizes itself from — it provisions the sum of every `SystemBucket`'s quota — so raising it here is what makes the volumes grow. A write past `quota` is refused by the backend.
+`size` is how much the bucket asks for. The default (`1Gi`) fits a component that stores a little; ask for more explicitly when you need it. It is also what the system storage sizes itself from — it provisions the sum of every `SystemBucket`'s size — so raising it here is what makes the volumes grow. A write past `size` is refused by the backend.
 
 The controller creates the bucket in the system storage and writes a `ConfigMap` next to the resource with everything needed to reach it:
 

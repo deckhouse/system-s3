@@ -63,7 +63,7 @@
 
           ```
           d8 k -n {{ $labels.namespace }} patch systembucket {{ $labels.name }} \
-            --type=merge -p '{"spec":{"quota":"<new quota>"}}'
+            --type=merge -p '{"spec":{"size":"<new size>"}}'
           ```
 
           The volumes grow only if the `StorageClass` allows expansion; if it does not, the
@@ -87,4 +87,4 @@
           is refusing writes to it with `QuotaExceeded`.
 
           Whatever component owns this bucket is losing whatever it was trying to store.
-          Raise `spec.quota` on the `SystemBucket`, or free space in the bucket.
+          Raise `spec.size` on the `SystemBucket`, or free space in the bucket.

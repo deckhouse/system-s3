@@ -82,10 +82,10 @@ func capacityScheme(t *testing.T) *runtime.Scheme {
 
 // What counts towards the store's size, and what does not.
 func TestDesiredBucketBytes(t *testing.T) {
-	bucket := func(ns, name, quota string, deleting bool) *v1alpha1.SystemBucket {
+	bucket := func(ns, name, size string, deleting bool) *v1alpha1.SystemBucket {
 		b := &v1alpha1.SystemBucket{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-			Spec:       v1alpha1.SystemBucketSpec{Quota: quota},
+			Spec:       v1alpha1.SystemBucketSpec{Size: size},
 		}
 		if deleting {
 			now := metav1.Now()
@@ -102,10 +102,10 @@ func TestDesiredBucketBytes(t *testing.T) {
 		// a consumer that no longer exists keeps the volume big forever.
 		bucket("d8-old", "leaving", "100Gi", true),
 		// Written by a client that stripped the defaulted field.
-		bucket("d8-weird", "no-quota", "", false),
+		bucket("d8-weird", "no-size", "", false),
 		// Past the schema's pattern somehow: counted as nothing, and the resource's
 		// own reconcile is what reports it.
-		bucket("d8-weird", "bad-quota", "twenty gigabytes", false),
+		bucket("d8-weird", "bad-size", "twenty gigabytes", false),
 	).Build()
 	d := &Driver{client: c, apiReader: c, namespace: "d8-system-s3", log: testGarageLogger(t)}
 

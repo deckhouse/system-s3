@@ -29,7 +29,7 @@ import (
 )
 
 // EnsureBucket creates the named bucket in Garage on behalf of owner
-// ("namespace/name" of the SystemBucket), applies quota as the bucket's quota and
+// ("namespace/name" of the SystemBucket), applies size as the bucket's quota and
 // reports what the bucket holds. Idempotent: a bucket this owner already holds is
 // reused.
 //
@@ -39,7 +39,7 @@ import (
 //
 // Credentials are not issued here — EnsureAccess mints the key pair the
 // SystemBucket hands to its consumer.
-func (d *Driver) EnsureBucket(ctx context.Context, store *backend.Store, name, owner string, quota int64) (backend.BucketState, backend.BucketUsage, error) {
+func (d *Driver) EnsureBucket(ctx context.Context, store *backend.Store, name, owner string, size int64) (backend.BucketState, backend.BucketUsage, error) {
 	store, _, err := d.servingPlane(ctx, store)
 	if err != nil {
 		return backend.BucketState{}, backend.BucketUsage{}, err
@@ -75,10 +75,10 @@ func (d *Driver) EnsureBucket(ctx context.Context, store *backend.Store, name, o
 
 	// The quota is applied on every pass, not only at creation. It is the one
 	// piece of the bucket an operator can change on a live resource, and a quota
-	// that only followed spec.quota at creation would mean raising it did nothing
+	// that only followed spec.size at creation would mean raising it did nothing
 	// until somebody deleted the bucket.
-	if quota > 0 && (b.Quotas.MaxSize == nil || *b.Quotas.MaxSize != quota) {
-		if err := svc.setBucketQuota(ctx, b.ID, quota); err != nil {
+	if size > 0 && (b.Quotas.MaxSize == nil || *b.Quotas.MaxSize != size) {
+		if err := svc.setBucketQuota(ctx, b.ID, size); err != nil {
 			return backend.BucketState{}, backend.BucketUsage{}, fmt.Errorf("set the quota of bucket %q: %w", name, err)
 		}
 		// Re-read rather than assume: what the status publishes has to be what the

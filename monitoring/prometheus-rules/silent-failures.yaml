@@ -60,8 +60,8 @@
         summary: The system object storage cannot grow to the size its buckets ask for.
         description: |
           The volumes of `{{ $labels.store }}` have been smaller than the sum of the
-          `SystemBucket` quotas for half an hour. Until this clears, a bucket that fills up
-          is a bucket that stops accepting writes, and no amount of raising `spec.quota`
+          `SystemBucket` sizes for half an hour. Until this clears, a bucket that fills up
+          is a bucket that stops accepting writes, and no amount of raising `spec.size`
           will help.
 
           Which half of it is stuck is the difference between two series:

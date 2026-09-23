@@ -34,7 +34,7 @@ import (
 )
 
 // The store sizes itself from what its consumers asked for: the sum of every
-// SystemBucket's spec.quota, plus room for the things a sum of quotas does not
+// SystemBucket's spec.size, plus room for the things a sum of quotas does not
 // count.
 //
 //   - headroomPercent covers what a bucket occupies beyond the bytes of its
@@ -80,9 +80,9 @@ func volumeSizeFor(sumBytes int64) resource.Quantity {
 	return *resource.NewQuantity(want, resource.BinarySI)
 }
 
-// desiredBucketBytes sums spec.quota over every SystemBucket in the cluster.
+// desiredBucketBytes sums spec.size over every SystemBucket in the cluster.
 //
-// A resource whose quota does not parse is counted as zero and named in the
+// A resource whose size does not parse is counted as zero and named in the
 // returned error's stead — it is not fatal here, because the reconciler that owns
 // that resource reports it on the resource itself, and one malformed field must
 // not stop the store from sizing itself for the other consumers.
@@ -99,13 +99,13 @@ func (d *Driver) desiredBucketBytes(ctx context.Context) (int64, error) {
 			// would keep the volume sized for a consumer that no longer exists.
 			continue
 		}
-		if b.Spec.Quota == "" {
+		if b.Spec.Size == "" {
 			continue
 		}
-		q, err := resource.ParseQuantity(b.Spec.Quota)
+		q, err := resource.ParseQuantity(b.Spec.Size)
 		if err != nil {
-			d.log.Warn("ignoring a SystemBucket whose quota is not a quantity when sizing the store",
-				"systemBucket", b.Namespace+"/"+b.Name, "quota", b.Spec.Quota)
+			d.log.Warn("ignoring a SystemBucket whose size is not a quantity when sizing the store",
+				"systemBucket", b.Namespace+"/"+b.Name, "size", b.Spec.Size)
 			continue
 		}
 		sum += q.Value()
@@ -120,7 +120,7 @@ func (d *Driver) desiredBucketBytes(ctx context.Context) (int64, error) {
 //
 // Shrinking is never attempted. A PersistentVolumeClaim cannot shrink, and a
 // smaller sum means somebody deleted a bucket — the volume stays the size it
-// reached, which is documented on spec.quota.
+// reached, which is documented on spec.size.
 //
 // The claims are patched one by one rather than through the StatefulSet, because
 // a StatefulSet's volumeClaimTemplates are immutable: the template is brought up

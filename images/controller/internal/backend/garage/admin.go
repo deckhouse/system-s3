@@ -502,7 +502,7 @@ func (c *adminClient) createBucket(ctx context.Context, alias string) (*bucketIn
 // object-count quota alone.
 //
 // Garage enforces it on write: a PUT that would take the bucket past maxSize is
-// refused with QuotaExceeded. That is the whole point of carrying spec.quota into
+// refused with QuotaExceeded. That is the whole point of carrying spec.size into
 // the backend rather than only into the volume sizing — without it a single
 // consumer could fill the store and every other platform component would start
 // failing writes for a reason none of them could see.

@@ -72,7 +72,7 @@ import (
 // +kubebuilder:subresource:status
 // +kubebuilder:metadata:labels={"heritage=deckhouse","module=system-s3","backup.deckhouse.io/cluster-config=true"}
 // +kubebuilder:printcolumn:name="Bucket",type="string",JSONPath=`.status.bucketName`
-// +kubebuilder:printcolumn:name="Quota",type="string",JSONPath=`.spec.quota`
+// +kubebuilder:printcolumn:name="Size",type="string",JSONPath=`.spec.size`
 // +kubebuilder:printcolumn:name="Used",type="integer",JSONPath=`.status.usedBytes`
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Secret",type="string",JSONPath=`.status.secretRef.name`
@@ -118,15 +118,11 @@ type SystemBucketSpec struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	BucketName string `json:"bucketName,omitempty"`
 
-	// Quota is how much the bucket may hold, as a Kubernetes quantity. It becomes
+	// Size is how much the bucket asks for, as a Kubernetes quantity. It becomes
 	// the bucket's quota in the backend — a write past it is refused — and it is
 	// what the data plane sizes its volumes from: the store provisions the sum of
-	// every SystemBucket's quota, so asking for more here is what makes the
-	// volumes grow.
-	//
-	// It is named after what it does. The field used to be called size, which
-	// read as a reservation — something the bucket is given and holds — while
-	// what it has always been is a ceiling the backend enforces per write.
+	// every SystemBucket's size, so asking for more here is what makes the volumes
+	// grow.
 	//
 	// The default is deliberately small. A system bucket is a platform
 	// component's working set, not a data lake, and a default that fits a
@@ -140,7 +136,7 @@ type SystemBucketSpec struct {
 	// +optional
 	// +kubebuilder:default="1Gi"
 	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki)?$`
-	Quota string `json:"quota,omitempty"`
+	Size string `json:"size,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true
@@ -174,7 +170,7 @@ type SystemBucketStatus struct {
 	ConnectionRef *LocalObjectReference `json:"connectionRef,omitempty"`
 
 	// QuotaBytes is the quota the backend enforces on this bucket, derived from
-	// spec.quota. Reported back rather than echoed from the spec: what stops a
+	// spec.size. Reported back rather than echoed from the spec: what stops a
 	// write is what the backend holds, and the two differ while a reconcile is
 	// still to come.
 	// +optional
@@ -182,7 +178,7 @@ type SystemBucketStatus struct {
 
 	// UsedBytes and Objects are what the bucket currently holds, as the backend
 	// counts it. They are the only place a consumer can see how close it is to
-	// its quota, and the only input an operator has for raising spec.quota before
+	// its quota, and the only input an operator has for raising spec.size before
 	// writes start failing.
 	// +optional
 	UsedBytes int64 `json:"usedBytes,omitempty"`

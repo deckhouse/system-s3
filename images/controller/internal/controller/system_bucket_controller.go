@@ -93,7 +93,7 @@ type StoreConverger interface {
 // Driver is the backend surface the reconciler needs. It is an interface so the
 // reconciler can be tested without a Garage instance.
 type Driver interface {
-	EnsureBucket(ctx context.Context, store *backend.Store, name, owner string, quota int64) (backend.BucketState, backend.BucketUsage, error)
+	EnsureBucket(ctx context.Context, store *backend.Store, name, owner string, size int64) (backend.BucketState, backend.BucketUsage, error)
 	DeleteBucket(ctx context.Context, store *backend.Store, name, owner string) error
 }
 
@@ -269,20 +269,20 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 		return r.finish(ctx, bucket, status, observed, nil)
 	}
 
-	quota, quotaErr := requestedQuota(bucket)
-	if quotaErr != nil {
+	size, sizeErr := requestedSize(bucket)
+	if sizeErr != nil {
 		// A quantity the schema's pattern let through but resource.ParseQuantity
 		// does not accept. Terminal for this resource — nothing moves until the
 		// field is fixed — so it is reported where the bucket's own failures are
 		// reported, and the reconcile stops here rather than creating a bucket with
 		// no quota.
 		status.Advance(v1alpha1.SystemBucketConditionBucketReady, false,
-			fmt.Sprintf("spec.quota %q is not a Kubernetes quantity: %v", bucket.Spec.Quota, quotaErr), nil)
+			fmt.Sprintf("spec.size %q is not a Kubernetes quantity: %v", bucket.Spec.Size, sizeErr), nil)
 		status.GateAfter(v1alpha1.SystemBucketConditionBucketReady)
 		return r.finish(ctx, bucket, status, observed, nil)
 	}
 
-	bstate, usage, err := r.Driver.EnsureBucket(ctx, store, name, bucketOwnerRef(bucket), quota)
+	bstate, usage, err := r.Driver.EnsureBucket(ctx, store, name, bucketOwnerRef(bucket), size)
 	if bstate.BucketName != "" {
 		observed.bucketName = bstate.BucketName
 	}
@@ -329,15 +329,15 @@ func (r *SystemBucketReconciler) platformNamespace(ctx context.Context, name str
 	return ns.Labels[v1alpha1.LabelHeritage] == v1alpha1.HeritageDeckhouse, nil
 }
 
-// requestedQuota is spec.quota in bytes. An empty field reads as zero, which the
+// requestedSize is spec.size in bytes. An empty field reads as zero, which the
 // driver takes as "do not touch the quota": the schema defaults the field, so an
 // empty one is a resource created before the field existed or written by a client
 // that stripped it, and neither is a reason to remove a quota that is in force.
-func requestedQuota(bucket *v1alpha1.SystemBucket) (int64, error) {
-	if bucket.Spec.Quota == "" {
+func requestedSize(bucket *v1alpha1.SystemBucket) (int64, error) {
+	if bucket.Spec.Size == "" {
 		return 0, nil
 	}
-	q, err := resource.ParseQuantity(bucket.Spec.Quota)
+	q, err := resource.ParseQuantity(bucket.Spec.Size)
 	if err != nil {
 		return 0, err
 	}
