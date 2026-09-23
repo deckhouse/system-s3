@@ -18,6 +18,8 @@ package garage
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -141,7 +143,8 @@ func TestEnsureVolumeCapacityGrowsOnly(t *testing.T) {
 			WithObjects(claim("data-system-garage-0", "10Gi")).Build()
 		d := &Driver{client: c, apiReader: c, namespace: ns, log: testGarageLogger(t)}
 
-		grown, msg := d.ensureVolumeCapacity(ctx, store, resource.MustParse("30Gi"))
+		grown, capacity := d.ensureVolumeCapacity(ctx, store, resource.MustParse("30Gi"))
+		msg := capacity.Problem
 		if msg != "" {
 			t.Fatalf("ensureVolumeCapacity: msg=%q", msg)
 		}
@@ -157,6 +160,29 @@ func TestEnsureVolumeCapacityGrowsOnly(t *testing.T) {
 		}
 	})
 
+	t.Run("reports how big the volumes are and why they could not grow", func(t *testing.T) {
+		pvc := claim("data-system-garage-0", "10Gi")
+		pvc.Status.Capacity = corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")}
+		c := fake.NewClientBuilder().WithScheme(capacityScheme(t)).WithObjects(pvc).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Update: func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error {
+					return errors.New("only dynamically provisioned pvc can be resized and the storageclass that provisions the pvc must support resize")
+				},
+			}).Build()
+		d := &Driver{client: c, apiReader: c, namespace: ns, log: testGarageLogger(t)}
+
+		grown, capacity := d.ensureVolumeCapacity(ctx, store, resource.MustParse("30Gi"))
+		if grown {
+			t.Error("grown=true although the claim could not be patched")
+		}
+		if capacity.WantBytes != 30<<30 || capacity.HaveBytes != 10<<30 {
+			t.Errorf("capacity want=%d have=%d, want 30Gi and 10Gi", capacity.WantBytes, capacity.HaveBytes)
+		}
+		if !strings.Contains(capacity.Problem, "allowVolumeExpansion") {
+			t.Errorf("problem %q does not say what to change", capacity.Problem)
+		}
+	})
+
 	t.Run("leaves a claim that is already larger alone", func(t *testing.T) {
 		writes := 0
 		c := fake.NewClientBuilder().WithScheme(capacityScheme(t)).
@@ -169,7 +195,8 @@ func TestEnsureVolumeCapacityGrowsOnly(t *testing.T) {
 			}).Build()
 		d := &Driver{client: c, apiReader: c, namespace: ns, log: testGarageLogger(t)}
 
-		grown, msg := d.ensureVolumeCapacity(ctx, store, resource.MustParse("30Gi"))
+		grown, capacity := d.ensureVolumeCapacity(ctx, store, resource.MustParse("30Gi"))
+		msg := capacity.Problem
 		if msg != "" {
 			t.Fatalf("ensureVolumeCapacity: msg=%q", msg)
 		}
@@ -253,5 +280,51 @@ func TestWorkloadIsNotRecreatedWhenTheSizeIsUnchanged(t *testing.T) {
 	}
 	if deletes != 0 {
 		t.Errorf("%d delete(s) for an unchanged volume size", deletes)
+	}
+}
+
+// TestResizeStateReadsWhereAGrowthIsStuck: "growing" alone does not tell an
+// operator whether to wait or to act. The claim says which, and a refusal is a
+// problem to report, not a growth to wait for.
+func TestResizeStateReadsWhereAGrowthIsStuck(t *testing.T) {
+	claim := func(status corev1.ClaimResourceStatus, conds ...corev1.PersistentVolumeClaimCondition) *corev1.PersistentVolumeClaim {
+		pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data-system-garage-0"}}
+		if status != "" {
+			pvc.Status.AllocatedResourceStatuses = map[corev1.ResourceName]corev1.ClaimResourceStatus{corev1.ResourceStorage: status}
+		}
+		pvc.Status.Conditions = conds
+		return pvc
+	}
+	cond := func(t corev1.PersistentVolumeClaimConditionType, msg string) corev1.PersistentVolumeClaimCondition {
+		return corev1.PersistentVolumeClaimCondition{Type: t, Status: corev1.ConditionTrue, Message: msg}
+	}
+
+	cases := []struct {
+		name        string
+		pvc         *corev1.PersistentVolumeClaim
+		wantDetail  string
+		wantRefused string
+	}{
+		{name: "nothing reported", pvc: claim("")},
+		{name: "resizer at work", pvc: claim("", cond(corev1.PersistentVolumeClaimResizing, "")), wantDetail: "resizer is growing"},
+		{name: "file system pending", pvc: claim("", cond(corev1.PersistentVolumeClaimFileSystemResizePending, "")), wantDetail: "next mounted"},
+		{name: "node pending", pvc: claim(corev1.PersistentVolumeClaimNodeResizePending), wantDetail: "file system"},
+		{name: "infeasible", pvc: claim(corev1.PersistentVolumeClaimControllerResizeInfeasible), wantRefused: "infeasible"},
+		{
+			name:        "controller error",
+			pvc:         claim("", cond(corev1.PersistentVolumeClaimControllerResizeError, "array refused: no space")),
+			wantRefused: "no space",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			detail, refused := resizeState(tc.pvc)
+			if (tc.wantDetail == "") != (detail == "") || !strings.Contains(detail, tc.wantDetail) {
+				t.Errorf("detail=%q, want it to mention %q", detail, tc.wantDetail)
+			}
+			if (tc.wantRefused == "") != (refused == "") || !strings.Contains(refused, tc.wantRefused) {
+				t.Errorf("refused=%q, want it to mention %q", refused, tc.wantRefused)
+			}
+		})
 	}
 }

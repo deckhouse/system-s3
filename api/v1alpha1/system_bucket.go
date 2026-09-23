@@ -99,6 +99,7 @@ type SystemBucketList struct {
 }
 
 // +k8s:deepcopy-gen=true
+// +kubebuilder:validation:XValidation:rule="oldSelf == null || !has(oldSelf.size) || !has(self.size) || quantity(self.size).compareTo(quantity(oldSelf.size)) >= 0",message="spec.size cannot be lowered: the volumes the store provisioned for it cannot shrink, and a quota below what the bucket holds would only make its writes fail."
 // +kubebuilder:validation:XValidation:rule="oldSelf == null || !has(self.bucketName) && !has(oldSelf.bucketName) || has(self.bucketName) && has(oldSelf.bucketName) && self.bucketName == oldSelf.bucketName",message="spec.bucketName is immutable after creation."
 // +kubebuilder:validation:XValidation:rule="oldSelf == null || !has(self.credentialsSecretName) && !has(oldSelf.credentialsSecretName) || has(self.credentialsSecretName) && has(oldSelf.credentialsSecretName) && self.credentialsSecretName == oldSelf.credentialsSecretName",message="spec.credentialsSecretName is immutable after creation: renaming it would leave the old Secret behind — it is owned by this resource, so nothing else removes it while this one lives — and the new one starts empty, which the controller reads as a lost secret key and answers with a rotation. Delete the SystemBucket and create it with the name you want."
 type SystemBucketSpec struct {
@@ -129,10 +130,10 @@ type SystemBucketSpec struct {
 	// component which never says how much it needs is better than one that
 	// reserves tens of gigabytes per consumer on a control-plane volume.
 	//
-	// It can be raised at any time. Lowering it is accepted but does not shrink
-	// anything: the quota follows, so writes stop at the new value, while the
-	// volumes the store already provisioned stay the size they are — a
-	// PersistentVolumeClaim cannot shrink.
+	// It can be raised at any time, and the SizeApplied condition says when the
+	// new value has taken effect. It cannot be lowered: the volumes a larger
+	// value made the store provision cannot shrink, and a quota below what the
+	// bucket already holds would only make its writes fail.
 	// +optional
 	// +kubebuilder:default="1Gi"
 	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki)?$`
@@ -186,7 +187,7 @@ type SystemBucketStatus struct {
 	Objects int64 `json:"objects,omitempty"`
 
 	// Conditions hold the latest stage states. Known types: StorageReady,
-	// BucketReady, ConnectionReady, Ready.
+	// BucketReady, ConnectionReady, Ready, SizeApplied.
 	// +optional
 	// +patchMergeKey=type
 	// +patchStrategy=merge
@@ -221,6 +222,26 @@ const (
 
 	// SystemBucketConditionReady is the aggregate.
 	SystemBucketConditionReady = "Ready"
+
+	// SystemBucketConditionSizeApplied reports whether spec.size has taken
+	// effect: the backend enforces it as the bucket's quota, and the store's
+	// volumes have grown to fit the sum of every bucket's size. It is not part
+	// of Ready — a bucket whose growth is still under way serves as before — and
+	// it is the place to look after raising spec.size.
+	SystemBucketConditionSizeApplied = "SizeApplied"
+)
+
+// Reasons of the SizeApplied condition.
+const (
+	// SizeReasonApplied: the quota is spec.size and the volumes fit.
+	SizeReasonApplied = "Applied"
+	// SizeReasonQuotaPending: the backend still enforces another quota.
+	SizeReasonQuotaPending = "QuotaPending"
+	// SizeReasonGrowing: the volumes are being grown to fit.
+	SizeReasonGrowing = "Growing"
+	// SizeReasonCannotGrow: the volumes cannot be grown; the message says why
+	// and what to change.
+	SizeReasonCannotGrow = "CannotGrow"
 )
 
 // SystemBucketConditionTypes is every condition type a SystemBucket publishes.
@@ -234,6 +255,7 @@ var SystemBucketConditionTypes = []string{
 	SystemBucketConditionBucketReady,
 	SystemBucketConditionConnectionReady,
 	SystemBucketConditionReady,
+	SystemBucketConditionSizeApplied,
 }
 
 // ManagedByLabel and ManagedByValue mark every object this module creates,

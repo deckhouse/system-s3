@@ -145,6 +145,25 @@ type StoreState struct {
 	// SystemBucket's condition and hoping somebody wrote down when it started.
 	MigrationPhase     string
 	MigrationStartedAt time.Time
+
+	// Capacity is how the data plane's volumes compare with what the buckets ask
+	// for. Zero when the pass did not get as far as sizing them.
+	Capacity StoreCapacity
+}
+
+// StoreCapacity is the size one replica's volume should have for the sum of the
+// SystemBucket sizes, the size the smallest of them has, and why they could not
+// be grown when they could not. It is what tells a SystemBucket whether a raised
+// spec.size has taken effect.
+//
+// Detail is what the claims say about a growth that is under way — the resizer
+// working, or the node yet to grow the file system — so that "growing" comes
+// with where it is stuck when it is.
+type StoreCapacity struct {
+	WantBytes int64
+	HaveBytes int64
+	Problem   string
+	Detail    string
 }
 
 // The values that cross the driver seam — what the driver reports back about a

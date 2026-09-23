@@ -114,6 +114,11 @@ type bucketObserved struct {
 	// consumer reading "how full am I" wants the last known answer rather than an
 	// empty field.
 	usage backend.BucketUsage
+
+	// sizeApplied is the SizeApplied condition, when this pass could work it out
+	// (see sizeCondition). It sits outside the stage builder: it is not a stage,
+	// and a bucket whose volumes are still growing is Ready all the same.
+	sizeApplied *metav1.Condition
 }
 
 // AddSystemBucketReconcilerToManager wires the SystemBucket reconciler.
@@ -293,6 +298,7 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 	if !status.Advance(v1alpha1.SystemBucketConditionBucketReady, bstate.Ready, bstate.Message, err) {
 		return r.finish(ctx, bucket, status, observed, err)
 	}
+	observed.sizeApplied = sizeCondition(size, usage, state.Capacity)
 
 	// Nothing is minted here and nothing secret is written. What the consumer
 	// gets is a ConfigMap saying where the storage is, what its bucket is called
@@ -529,6 +535,12 @@ func (r *SystemBucketReconciler) finish(
 	if reconcileErr != nil {
 		return ctrl.Result{}, reconcileErr
 	}
+	if status.Ready() && observed.sizeApplied != nil && observed.sizeApplied.Status != metav1.ConditionTrue {
+		// Ready, but a raised size has not taken effect yet. Growing volumes is
+		// minutes, not the resync interval: come back at the plain cadence, so
+		// SizeApplied turns True close to when it does.
+		return ctrl.Result{RequeueAfter: r.Cfg.RequeueInterval}, nil
+	}
 	if status.Ready() {
 		// Re-drive even when Ready, so a bucket or key removed behind the
 		// controller's back (directly in Garage) is restored within minutes rather
@@ -589,6 +601,11 @@ func (r *SystemBucketReconciler) updateStatus(
 		}
 
 		for _, cond := range sb.Conditions() {
+			conditions.Set(&latest.Status.Conditions, cond)
+		}
+		if observed.sizeApplied != nil {
+			cond := *observed.sizeApplied
+			cond.ObservedGeneration = bucket.Generation
 			conditions.Set(&latest.Status.Conditions, cond)
 		}
 		latest.Status.ObservedGeneration = bucket.Generation

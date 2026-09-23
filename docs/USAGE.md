@@ -19,6 +19,12 @@ spec:
 
 `size` is how much the bucket asks for. The default (`1Gi`) fits a component that stores a little; ask for more explicitly when you need it. It is also what the system storage sizes itself from — it provisions the sum of every `SystemBucket`'s size — so raising it here is what makes the volumes grow. A write past `size` is refused by the backend.
 
+`size` can be raised at any time and cannot be lowered — the API server refuses it: the volumes a larger size made the store provision cannot shrink, and a quota below what the bucket holds would only break its writes. Whether a raised size has taken effect is the `SizeApplied` condition: `True` once the backend enforces the new quota and the store's volumes have grown to fit; `Growing` while they grow; `CannotGrow` when they cannot (usually a StorageClass without `allowVolumeExpansion`), with what to change in the message. The bucket stays `Ready` meanwhile.
+
+```console
+$ kubectl -n d8-monitoring get sb loki -o jsonpath='{.status.conditions[?(@.type=="SizeApplied")]}'
+```
+
 The controller creates the bucket in the system storage and writes a `ConfigMap` next to the resource with everything needed to reach it:
 
 ```console

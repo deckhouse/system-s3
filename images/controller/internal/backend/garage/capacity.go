@@ -131,14 +131,11 @@ func (d *Driver) desiredBucketBytes(ctx context.Context) (int64, error) {
 // It returns no error, and that is the contract rather than an oversight: every
 // way this can fail is a fact about the cluster an operator has to be told —
 // a class that does not allow expansion, a quota — and none of them is a reason
-// to stop reconciling a store that is serving. The failure comes back as the
-// message.
-func (d *Driver) ensureVolumeCapacity(ctx context.Context, store *backend.Store, want resource.Quantity) (recreate bool, msg string) {
+// to stop reconciling a store that is serving. The failure comes back in the
+// capacity's Problem, next to how big the volumes are and should be.
+func (d *Driver) ensureVolumeCapacity(ctx context.Context, store *backend.Store, want resource.Quantity) (recreate bool, capacity backend.StoreCapacity) {
 	replicas := desiredReplicas(store)
-	// On every exit, including the failing one: a store that cannot grow is
-	// precisely the store whose sizes somebody needs to be able to see.
-	defer d.publishVolumeSizes(ctx, store, want, replicas)
-
+	capacity.WantBytes = want.Value()
 	for ord := int32(0); ord < replicas; ord++ {
 		name := fmt.Sprintf("data-%s-%d", resourceName(store), ord)
 		grown, err := d.growClaim(ctx, name, want)
@@ -147,23 +144,66 @@ func (d *Driver) ensureVolumeCapacity(ctx context.Context, store *backend.Store,
 			// an operator-visible fact rather than a controller failure: the store
 			// keeps serving at the size it has, and the buckets that do not fit stay
 			// unable to write.
-			return false, fmt.Sprintf(
+			capacity.Problem = fmt.Sprintf(
 				"unable to grow the data plane's volume %s to %s (the sum of the SystemBucket sizes): %v — "+
 					"a StorageClass with allowVolumeExpansion is required to grow the system object storage",
 				name, want.String(), err)
+			break
 		}
 		recreate = recreate || grown
 	}
-	return recreate, ""
+	// On every exit, including the failing one: a store that cannot grow is
+	// precisely the store whose sizes somebody needs to be able to see.
+	have, detail, refused := d.publishVolumeSizes(ctx, store, want, replicas)
+	capacity.HaveBytes, capacity.Detail = have, detail
+	if capacity.Problem == "" {
+		capacity.Problem = refused
+	}
+	return recreate && capacity.Problem == "", capacity
+}
+
+// resizeState reads what a claim says about its own growth: a refusal the
+// resizer or the kubelet reported, or where a growth under way has got to. Both
+// are empty for a claim that is not growing.
+func resizeState(pvc *corev1.PersistentVolumeClaim) (detail, refused string) {
+	switch pvc.Status.AllocatedResourceStatuses[corev1.ResourceStorage] {
+	case corev1.PersistentVolumeClaimControllerResizeInfeasible, corev1.PersistentVolumeClaimNodeResizeInfeasible:
+		refused = fmt.Sprintf("the resize of claim %s was refused as infeasible", pvc.Name)
+	case corev1.PersistentVolumeClaimNodeResizePending:
+		detail = fmt.Sprintf("claim %s: the volume is grown and the node has yet to grow its file system", pvc.Name)
+	case corev1.PersistentVolumeClaimControllerResizeInProgress, corev1.PersistentVolumeClaimNodeResizeInProgress:
+		detail = fmt.Sprintf("claim %s: the resize is in progress", pvc.Name)
+	}
+	for _, c := range pvc.Status.Conditions {
+		if c.Status != corev1.ConditionTrue {
+			continue
+		}
+		switch c.Type {
+		case corev1.PersistentVolumeClaimControllerResizeError, corev1.PersistentVolumeClaimNodeResizeError:
+			refused = fmt.Sprintf("the resize of claim %s failed: %s", pvc.Name, c.Message)
+		case corev1.PersistentVolumeClaimFileSystemResizePending:
+			if detail == "" {
+				detail = fmt.Sprintf("claim %s: the volume is grown and the node has yet to grow its file system "+
+					"(a driver that cannot do it online does it when the volume is next mounted)", pvc.Name)
+			}
+		case corev1.PersistentVolumeClaimResizing:
+			if detail == "" {
+				detail = fmt.Sprintf("claim %s: the resizer is growing the volume", pvc.Name)
+			}
+		}
+	}
+	return detail, refused
 }
 
 // publishVolumeSizes reports what one replica's volume should be, what its claim
-// asks for and what it actually has.
+// asks for and what it actually has. It returns the last of the three, together
+// with what the claims say about a growth under way or refused (see
+// resizeState).
 //
 // The smallest across the replicas rather than an average: the store is only as
 // grown as its least grown replica, and an average would hide one claim stuck at
 // the old size behind two that moved.
-func (d *Driver) publishVolumeSizes(ctx context.Context, store *backend.Store, want resource.Quantity, replicas int32) {
+func (d *Driver) publishVolumeSizes(ctx context.Context, store *backend.Store, want resource.Quantity, replicas int32) (have int64, detail, refused string) {
 	var requested, capacity int64
 	seen := false
 	for ord := int32(0); ord < replicas; ord++ {
@@ -176,19 +216,29 @@ func (d *Driver) publishVolumeSizes(ctx context.Context, store *backend.Store, w
 			continue
 		}
 		req := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
-		have := pvc.Status.Capacity[corev1.ResourceStorage]
+		got := pvc.Status.Capacity[corev1.ResourceStorage]
 		if !seen || req.Value() < requested {
 			requested = req.Value()
 		}
-		if !seen || have.Value() < capacity {
-			capacity = have.Value()
+		if !seen || got.Value() < capacity {
+			capacity = got.Value()
 		}
 		seen = true
+		if got.Value() < want.Value() {
+			claimDetail, claimRefused := resizeState(pvc)
+			if detail == "" {
+				detail = claimDetail
+			}
+			if refused == "" {
+				refused = claimRefused
+			}
+		}
 	}
 	if !seen {
-		return
+		return 0, "", ""
 	}
 	monitoring.StoreVolumes(store.Name, want.Value(), requested, capacity)
+	return capacity, detail, refused
 }
 
 // growClaim raises one claim's request to want, and reports whether it changed

@@ -294,8 +294,9 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 	// Claims first, workload second. The claims are what actually hold the space;
 	// the template is brought in line below so a replica created later asks for the
 	// same size.
-	_, growMsg := d.ensureVolumeCapacity(ctx, store, volumeSize)
-	if growMsg != "" {
+	_, capacity := d.ensureVolumeCapacity(ctx, store, volumeSize)
+	state.Capacity = capacity
+	if growMsg := capacity.Problem; growMsg != "" {
 		d.log.Error("the data plane volumes could not be grown", "store", store.Name, "reason", growMsg)
 		defer func() {
 			if err != nil {

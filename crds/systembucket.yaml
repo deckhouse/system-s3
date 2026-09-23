@@ -59,6 +59,8 @@ spec:
               x-kubernetes-validations:
                 - rule: "oldSelf == null || !has(self.bucketName) && !has(oldSelf.bucketName) || has(self.bucketName) && has(oldSelf.bucketName) && self.bucketName == oldSelf.bucketName"
                   message: "spec.bucketName is immutable after creation."
+                - rule: "oldSelf == null || !has(oldSelf.size) || !has(self.size) || quantity(self.size).compareTo(quantity(oldSelf.size)) >= 0"
+                  message: "spec.size cannot be lowered: the volumes the store provisioned for it cannot shrink, and a quota below what the bucket holds would only make its writes fail."
               properties:
                 bucketName:
                   type: string
@@ -87,11 +89,13 @@ spec:
                     The default is deliberately small: a system bucket is a
                     platform component's working set, not a data lake.
 
-                    It can be raised at any time. Lowering it is accepted but
-                    shrinks nothing — the quota follows, so writes stop at the
-                    new value, while the volumes the store already provisioned
-                    stay the size they are (a PersistentVolumeClaim cannot
-                    shrink).
+                    It can be raised at any time; the `SizeApplied` condition
+                    says when the new value has taken effect — the quota is
+                    enforced and the store's volumes have grown to fit. It
+                    cannot be lowered: the volumes the store provisioned for it
+                    cannot shrink (a PersistentVolumeClaim cannot), and a quota
+                    below what the bucket holds would only make its writes
+                    fail.
             status:
               type: object
               description: |
@@ -160,7 +164,12 @@ spec:
                     - type
                   description: |
                     Per-stage conditions: `StorageReady`, `BucketReady`,
-                    `ConnectionReady`, and the aggregate `Ready`.
+                    `ConnectionReady`, and the aggregate `Ready`. Besides them,
+                    `SizeApplied` says whether `spec.size` has taken effect:
+                    `Applied`, or `QuotaPending`, `Growing` (the store's volumes
+                    are being grown) and `CannotGrow` (they cannot be — the
+                    message says why and what to change). It is not part of
+                    `Ready`: a bucket keeps serving while it grows.
                   items:
                     type: object
                     required:
