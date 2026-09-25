@@ -74,9 +74,10 @@ func effectiveBucketName(u *unstructured.Unstructured) string {
 	return u.GetNamespace() + "-" + u.GetName()
 }
 
-// What a bucket name has to look like. Mirrors the schema of spec.bucketName in
-// crds/systembucket.yaml, deliberately: the point is that a derived name is held
-// to exactly what an explicit one is held to.
+// What a bucket name has to look like. Mirrors the schema of spec.bucketName (the
+// markers on SystemBucketSpec.BucketName in api/v1alpha1, rendered into crds/),
+// deliberately: the point is that a derived name is held to exactly what an
+// explicit one is held to.
 const (
 	bucketNameMinLength = 3
 	bucketNameMaxLength = 63

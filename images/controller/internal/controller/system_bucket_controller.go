@@ -357,9 +357,10 @@ func bucketOwnerRef(bucket *v1alpha1.SystemBucket) string {
 	return bucket.Namespace + "/" + bucket.Name
 }
 
-// What a bucket name has to look like. Mirrors the schema of spec.bucketName in
-// crds/systembucket.yaml: the point of checking here is that a derived name is
-// held to exactly what an explicit one is held to.
+// What a bucket name has to look like. Mirrors the schema of spec.bucketName (the
+// markers on SystemBucketSpec.BucketName in api/v1alpha1, rendered into crds/): the
+// point of checking here is that a derived name is held to exactly what an
+// explicit one is held to.
 const (
 	bucketNameMinLength = 3
 	bucketNameMaxLength = 63

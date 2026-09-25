@@ -20,19 +20,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// SystemBucket is a namespaced CR with which a Deckhouse component asks for a
-// bucket in the platform's system object storage. The controller creates the
-// bucket in the system backend and writes a ConfigMap with the S3 connection
-// parameters in the same namespace (status.connectionRef).
-//
-// No credentials are written anywhere, and none are long-lived: a consumer
-// exchanges its ServiceAccount token at the credentials endpoint for a key that
-// the backend stops honouring an hour later. Kubernetes RBAC decides who may do
-// that, per bucket, through the virtual systembuckets/read and /write
-// subresources.
-//
-// It is deliberately the dumbest resource the module could ship, and every
-// omission is a decision:
+// SystemBucket is deliberately the dumbest resource the module could ship, and
+// every omission is a decision:
 //
 //   - No access resource, and no credentials object of any kind. Who may reach a
 //     bucket is an ordinary RBAC grant, which is the answer an administrator
@@ -51,22 +40,32 @@ import (
 //     namespace) and carries no user-facing RBAC, which is what keeps the
 //     system storage out of tenant hands without matching namespace names
 //     against a pattern.
+
+// SystemBucket asks for a bucket in the platform's system object
+// storage. The controller creates the bucket in the system backend and
+// writes a ConfigMap in the same namespace (see
+// `status.connectionRef`) with the S3 connection parameters.
 //
-// The markers below are not rendered. crds/systembucket.yaml is written by
-// hand, and hack/generate_code.sh generates deepcopy only — so this is a record
-// of what the shipped manifest enforces, kept next to the fields it constrains,
-// and the manifest is the thing that has to be edited with them. They were
-// added because the type carried none of it: a reader of this package saw two
-// unconstrained strings and no immutability at all, which is a laxer resource
-// than the one a cluster actually has.
+// The resource is for Deckhouse components only. It is admitted
+// exclusively in namespaces labelled `heritage: deckhouse`, and no
+// user-facing RBAC is granted for it.
 //
-// The markers below are not rendered. crds/systembucket.yaml is written by
-// hand, and hack/generate_code.sh generates deepcopy only — so this is a record
-// of what the shipped manifest enforces, kept next to the fields it constrains,
-// and the manifest is the thing that has to be edited with them. They were
-// added because the type carried none of it: a reader of this package saw two
-// unconstrained strings and no immutability at all, which is a laxer resource
-// than the one a cluster actually has.
+// There is no reclaim policy: **deleting a SystemBucket deletes the
+// bucket and every object in it.**
+//
+// **No credentials are written anywhere, and none are long-lived.** A
+// consumer exchanges its ServiceAccount token at the credentials
+// endpoint (`S3_STS_ENDPOINT` in the ConfigMap) for a key pair the
+// backend stops honouring an hour later. Who may do that, for which
+// bucket, is an ordinary Kubernetes RBAC grant on the virtual
+// `systembuckets/read` and `systembuckets/write` subresources — so
+// access is granted and revoked like any other permission, and nothing
+// has to be rotated when it is taken away.
+//
+// **The consumer has to renew its credentials.** Ask for a key near the
+// end of its lifetime rather than on every request — every request
+// mints a key, and a bucket is allowed at most 50 unexpired ones at a
+// time.
 //
 // +kubebuilder:resource:scope=Namespaced,shortName=sb
 // +kubebuilder:subresource:status
@@ -75,17 +74,22 @@ import (
 // +kubebuilder:printcolumn:name="Size",type="string",JSONPath=`.spec.size`
 // +kubebuilder:printcolumn:name="Used",type="integer",JSONPath=`.status.usedBytes`
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=`.status.phase`
-// +kubebuilder:printcolumn:name="Secret",type="string",JSONPath=`.status.secretRef.name`
+// +kubebuilder:printcolumn:name="Connection",type="string",JSONPath=`.status.connectionRef.name`
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:object:root=true
 // +k8s:deepcopy-gen=true
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +crd-enricher:crd:minimal=true
+// +crd-enricher:crd:preserveUnknownFields=false
 type SystemBucket struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   SystemBucketSpec    `json:"spec"`
+	// Desired state of the bucket.
+	Spec SystemBucketSpec `json:"spec"`
+
+	// Observed state of the bucket.
 	Status *SystemBucketStatus `json:"status,omitempty"`
 }
 
@@ -99,41 +103,48 @@ type SystemBucketList struct {
 }
 
 // +k8s:deepcopy-gen=true
-// +kubebuilder:validation:XValidation:rule="oldSelf == null || !has(oldSelf.size) || !has(self.size) || quantity(self.size).compareTo(quantity(oldSelf.size)) >= 0",message="spec.size cannot be lowered: the volumes the store provisioned for it cannot shrink, and a quota below what the bucket holds would only make its writes fail."
 // +kubebuilder:validation:XValidation:rule="oldSelf == null || !has(self.bucketName) && !has(oldSelf.bucketName) || has(self.bucketName) && has(oldSelf.bucketName) && self.bucketName == oldSelf.bucketName",message="spec.bucketName is immutable after creation."
-// +kubebuilder:validation:XValidation:rule="oldSelf == null || !has(self.credentialsSecretName) && !has(oldSelf.credentialsSecretName) || has(self.credentialsSecretName) && has(oldSelf.credentialsSecretName) && self.credentialsSecretName == oldSelf.credentialsSecretName",message="spec.credentialsSecretName is immutable after creation: renaming it would leave the old Secret behind — it is owned by this resource, so nothing else removes it while this one lives — and the new one starts empty, which the controller reads as a lost secret key and answers with a rotation. Delete the SystemBucket and create it with the name you want."
+// +kubebuilder:validation:XValidation:rule="oldSelf == null || !has(oldSelf.size) || !has(self.size) || quantity(self.size).compareTo(quantity(oldSelf.size)) >= 0",message="spec.size cannot be lowered: the volumes the store provisioned for it cannot shrink, and a quota below what the bucket holds would only make its writes fail."
 type SystemBucketSpec struct {
-	// BucketName is the name of the bucket in S3. Defaults to
-	// <metadata.namespace>-<metadata.name> when omitted, because the backend
-	// bucket namespace is flat while SystemBuckets are namespaced. Immutable
-	// after creation.
-	//
 	// The schema bounds it the way S3 does — 3 to 63 characters, lower-case
 	// letters, digits and dashes, starting and ending with a letter or a digit.
 	// The derived form is bounded too, but not by the schema, which cannot see
 	// it: a namespace and a name compose to as much as 127 characters, so the
 	// admission webhook and the controller both refuse a name S3 would not take.
+
+	// Name of the bucket in S3. Defaults to
+	// `<metadata.namespace>-<metadata.name>` when omitted: the
+	// backend bucket namespace is flat, while SystemBuckets are
+	// namespaced, so the default keeps two components from
+	// colliding on a bucket name. Immutable after creation.
 	// +optional
 	// +kubebuilder:validation:MinLength=3
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	BucketName string `json:"bucketName,omitempty"`
 
-	// Size is how much the bucket asks for, as a Kubernetes quantity. It becomes
-	// the bucket's quota in the backend — a write past it is refused — and it is
-	// what the data plane sizes its volumes from: the store provisions the sum of
-	// every SystemBucket's size, so asking for more here is what makes the volumes
-	// grow.
+	// The default is small because a default that fits a component which never
+	// says how much it needs is better than one that reserves tens of gigabytes
+	// per consumer on a control-plane volume.
+
+	// How much the bucket asks for, as a Kubernetes quantity.
 	//
-	// The default is deliberately small. A system bucket is a platform
-	// component's working set, not a data lake, and a default that fits a
-	// component which never says how much it needs is better than one that
-	// reserves tens of gigabytes per consumer on a control-plane volume.
+	// It becomes the bucket's quota in the backend — a write past
+	// it is refused — and it is what the data plane sizes its
+	// volumes from: the store provisions the sum of every
+	// SystemBucket's size, so asking for more here is what makes
+	// the volumes grow.
 	//
-	// It can be raised at any time, and the SizeApplied condition says when the
-	// new value has taken effect. It cannot be lowered: the volumes a larger
-	// value made the store provision cannot shrink, and a quota below what the
-	// bucket already holds would only make its writes fail.
+	// The default is deliberately small: a system bucket is a
+	// platform component's working set, not a data lake.
+	//
+	// It can be raised at any time; the `SizeApplied` condition
+	// says when the new value has taken effect — the quota is
+	// enforced and the store's volumes have grown to fit. It
+	// cannot be lowered: the volumes the store provisioned for it
+	// cannot shrink (a PersistentVolumeClaim cannot), and a quota
+	// below what the bucket holds would only make its writes
+	// fail.
 	// +optional
 	// +kubebuilder:default="1Gi"
 	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki)?$`
@@ -142,57 +153,72 @@ type SystemBucketSpec struct {
 
 // +k8s:deepcopy-gen=true
 type SystemBucketStatus struct {
-	// ObservedGeneration is the most recent .metadata.generation reconciled
-	// by the controller.
+	// Most recent `metadata.generation` reconciled by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// Phase is a coarse-grained summary derived from Conditions.
+	// Coarse-grained summary derived from Conditions.
 	// +kubebuilder:validation:Enum=Pending;InProgress;Ready;Error
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
-	// Endpoint is the in-cluster S3 endpoint URL of the system storage.
+	// In-cluster S3 endpoint URL of the system object storage.
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
 
-	// BucketName is the effective bucket name created in the backend.
+	// Effective bucket name created in the backend.
 	// +optional
 	BucketName string `json:"bucketName,omitempty"`
 
-	// ConnectionRef references the ConfigMap (in this bucket's namespace) holding
-	// the S3 connection parameters: where the storage is, what the bucket is
-	// called, and how to exchange a ServiceAccount token for credentials.
+	// Reference to the ConfigMap (in this bucket's namespace) with
+	// the S3 connection parameters: `S3_ENDPOINT` (https),
+	// `S3_REGION`, `S3_BUCKET`, `S3_CA_CERT` (the CA that verifies
+	// the endpoint), and — for asking for credentials —
+	// `S3_STS_ENDPOINT`, `S3_STS_AUDIENCE`, `S3_STS_CA_CERT`.
 	//
-	// A ConfigMap and not a Secret because nothing in it is secret. There is no
-	// long-lived key to keep: credentials are minted per consumer, for an hour,
-	// against a token Kubernetes issued and RBAC approved.
+	// A ConfigMap and not a Secret: there is no key pair in it,
+	// because the module issues none. Credentials are minted per
+	// consumer, for an hour, against a ServiceAccount token.
 	// +optional
+	// +crd-enricher:unset:properties.name.description
 	ConnectionRef *LocalObjectReference `json:"connectionRef,omitempty"`
 
-	// QuotaBytes is the quota the backend enforces on this bucket, derived from
-	// spec.size. Reported back rather than echoed from the spec: what stops a
-	// write is what the backend holds, and the two differ while a reconcile is
-	// still to come.
+	// Quota the backend enforces on this bucket, derived from
+	// `spec.size`. Reported back rather than echoed from the spec:
+	// what stops a write is what the backend holds.
 	// +optional
 	QuotaBytes int64 `json:"quotaBytes,omitempty"`
 
-	// UsedBytes and Objects are what the bucket currently holds, as the backend
-	// counts it. They are the only place a consumer can see how close it is to
-	// its quota, and the only input an operator has for raising spec.size before
-	// writes start failing.
+	// UsedBytes and Objects are the only place a consumer can see how close it is
+	// to its quota, and the only input an operator has for raising spec.size
+	// before writes start failing.
+
+	// Bytes the bucket currently holds, as the backend counts them.
 	// +optional
 	UsedBytes int64 `json:"usedBytes,omitempty"`
+	// Number of objects in the bucket, as the backend counts them.
 	// +optional
 	Objects int64 `json:"objects,omitempty"`
 
-	// Conditions hold the latest stage states. Known types: StorageReady,
-	// BucketReady, ConnectionReady, Ready, SizeApplied.
+	// Per-stage conditions: `StorageReady`, `BucketReady`,
+	// `ConnectionReady`, and the aggregate `Ready`. Besides them,
+	// `SizeApplied` says whether `spec.size` has taken effect:
+	// `Applied`, or `QuotaPending`, `Growing` (the store's volumes
+	// are being grown) and `CannotGrow` (they cannot be — the
+	// message says why and what to change). It is not part of
+	// `Ready`: a bucket keeps serving while it grows.
 	// +optional
 	// +patchMergeKey=type
 	// +patchStrategy=merge
 	// +listType=map
 	// +listMapKey=type
+	// +crd-enricher:raw:items.properties.lastTransitionTime.description="Timestamp of the last status transition for this condition."
+	// +crd-enricher:raw:items.properties.message.description="Human-readable explanation of the current status."
+	// +crd-enricher:raw:items.properties.observedGeneration.description="Value of `metadata.generation` the condition was last set against."
+	// +crd-enricher:raw:items.properties.reason.description="Machine-readable reason for the current status, suitable for\nlog filtering."
+	// +crd-enricher:raw:items.properties.status.description="Current status of the condition."
+	// +crd-enricher:raw:items.properties.type.description="Condition type, for example `Ready`, `StorageReady`,\n`BucketReady`, or `ConnectionReady`."
+	// +crd-enricher:unset:items.description
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
