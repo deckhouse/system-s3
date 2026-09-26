@@ -28,7 +28,7 @@ That is the whole API, and each omission is deliberate:
 
 `SystemBucket` is admitted only in namespaces labelled `heritage: deckhouse` — the label Deckhouse puts on the namespace of every module. The check is on the label rather than on a `d8-*` name, because a name is a convention any tenant could imitate.
 
-No user-facing RBAC is granted for the resource: only cluster and storage administrators (the `d8:manage:permission:module:system-s3:*` roles) can see or edit it.
+No user-facing RBAC is granted for the resource: only cluster and storage administrators (the `d8:system-capability:system-s3:*` capabilities on DKP 1.78 and later, the `d8:manage:permission:module:system-s3:*` roles below 1.78) can see or edit it.
 
 ## The data plane
 
