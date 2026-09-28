@@ -59,6 +59,14 @@ properties:
       replica does not. A class whose volumes follow the pod (a network class)
       keeps the data across a node's replacement.
 
+      On a local class, where the replicas run decides where their data lives.
+      They run on nodes with the `node-role.deckhouse.io/system-s3` role if the
+      cluster has any, on system nodes otherwise, and on any node without a taint
+      when it has neither. Giving the role to a NodeGroup made for the store, with
+      disks sized for it, keeps the data off nodes that a NodeGroup grows, shrinks
+      and replaces for other workloads — each such replacement costs a replica its
+      copy on a local class.
+
       Changing it on an installation that already holds data is performed as the
       same migration a change of `highAvailability` is, because the volumes of a
       running store cannot be re-ordered from another class in place. Putting the
