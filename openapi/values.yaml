@@ -53,6 +53,13 @@ properties:
           OpenSSL refuses — the issuer name equals the subject name, so openssl
           calls the certificate self-issued and stops at depth 0. Consumers
           verifying the credentials endpoint with anything but Go would fail.
+
+          It is also rendered into the Secret system-s3-ca, from which the
+          certificate hooks restore it when Deckhouse starts with empty values;
+          otherwise every start of Deckhouse would issue a new CA.
+        x-required-for-helm:
+          - crt
+          - key
         properties:
           crt:
             type: string

@@ -22,6 +22,7 @@ import (
 	tlscertificate "github.com/deckhouse/module-sdk/common-hooks/tls-certificate"
 
 	consts "github.com/deckhouse/system-s3/hooks/go/consts"
+	"github.com/deckhouse/system-s3/hooks/go/persistedca"
 )
 
 // The CA is kept in values of its own, and that is not a detail.
@@ -38,7 +39,9 @@ import (
 //
 // With the path set, the CA is generated once under CommonCACanonicalName,
 // distinct from the certificate's CN, and the chain verifies everywhere.
-var _ = tlscertificate.RegisterInternalTLSHookEM(tlscertificate.GenSelfSignedTLSHookConf{
+// Registered through persistedca so that the common CA survives a restart of
+// Deckhouse (see the package).
+var _ = persistedca.Register(tlscertificate.GenSelfSignedTLSHookConf{
 	CommonCAValuesPath:    fmt.Sprintf("%s.internal.customWebhookCA", consts.ModuleName),
 	CommonCACanonicalName: fmt.Sprintf("%s-%s", consts.ModulePluralName, consts.WebhookCertCn),
 	CN:                    consts.WebhookCertCn,

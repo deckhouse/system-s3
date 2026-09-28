@@ -49,6 +49,9 @@ systemS3:
       ca: Zm9v
       crt: Zm9v
       key: Zm9v
+    customWebhookCA:
+      crt: Zm9v
+      key: Zm9v
     garageCert:
       ca: Zm9v
       crt: Zm9v

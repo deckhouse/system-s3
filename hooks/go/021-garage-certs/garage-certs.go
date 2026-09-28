@@ -22,6 +22,7 @@ import (
 	tlscertificate "github.com/deckhouse/module-sdk/common-hooks/tls-certificate"
 
 	consts "github.com/deckhouse/system-s3/hooks/go/consts"
+	"github.com/deckhouse/system-s3/hooks/go/persistedca"
 )
 
 // The certificate the data plane's TLS terminator serves.
@@ -42,7 +43,9 @@ import (
 // and incarnations are created at run time, long after this certificate.
 // Clients that reach a node by its pod IP verify the endpoint Service's name
 // explicitly, since no certificate can name addresses assigned at scheduling.
-var _ = tlscertificate.RegisterInternalTLSHookEM(tlscertificate.GenSelfSignedTLSHookConf{
+// Registered through persistedca so that the common CA survives a restart of
+// Deckhouse (see the package).
+var _ = persistedca.Register(tlscertificate.GenSelfSignedTLSHookConf{
 	CommonCAValuesPath:    fmt.Sprintf("%s.internal.customWebhookCA", consts.ModuleName),
 	CommonCACanonicalName: fmt.Sprintf("%s-%s", consts.ModulePluralName, consts.WebhookCertCn),
 	CN:                    consts.GarageServiceName,
