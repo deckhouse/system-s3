@@ -21,7 +21,6 @@
 module system-s3-codegen-tools
 
 go 1.27.1
-
 tool (
 	github.com/deckhouse/deckhouse/pkg/crd-enricher/cmd/crd-enricher
 	sigs.k8s.io/controller-tools/cmd/controller-gen
