@@ -50,3 +50,21 @@ func TestStoreCapacityBytesForgetsWhatItCannotSee(t *testing.T) {
 		t.Errorf("store_capacity_bytes=%v after an absent reading, want 0", got)
 	}
 }
+
+// A reason that is gone must not keep a series: the alert names the reason, and
+// a QuotaPending series left at 0 after the quota landed would keep firing.
+func TestBucketSizeAppliedKeepsOnlyTheCurrentReason(t *testing.T) {
+	BucketSizeApplied("ns", "b", "QuotaPending", false)
+	BucketSizeApplied("ns", "b", "Applied", true)
+	if n := testutil.CollectAndCount(bucketSizeApplied); n != 1 {
+		t.Fatalf("%d series, want only the current reason's", n)
+	}
+	if got := testutil.ToFloat64(bucketSizeApplied.WithLabelValues("ns", "b", "Applied")); got != 1 {
+		t.Errorf("bucket_size_applied{reason=Applied}=%v, want 1", got)
+	}
+
+	ForgetBucket("ns", "b", "bucket")
+	if n := testutil.CollectAndCount(bucketSizeApplied); n != 0 {
+		t.Errorf("%d series after the bucket was forgotten, want none", n)
+	}
+}

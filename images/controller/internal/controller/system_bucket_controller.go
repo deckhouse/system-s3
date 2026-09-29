@@ -532,6 +532,11 @@ func (r *SystemBucketReconciler) finish(
 	// including the ones that stop early: a bucket that never gets past its own
 	// failure is exactly the one worth a series.
 	monitoring.BucketReady(bucket.Namespace, bucket.Name, status.Ready())
+	if c := observed.sizeApplied; c != nil {
+		// Only when this pass worked it out: a pass that stopped before sizing
+		// the volumes leaves the last answer, as the condition itself does.
+		monitoring.BucketSizeApplied(bucket.Namespace, bucket.Name, c.Reason, c.Status == metav1.ConditionTrue)
+	}
 
 	if reconcileErr != nil {
 		return ctrl.Result{}, reconcileErr
