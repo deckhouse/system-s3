@@ -78,13 +78,14 @@ var (
 	// cannot write. An alert that has to distinguish them wants to name one, and a
 	// number would make it guess.
 	//
-	// Both series exist only while a migration is in flight. A store with one data
-	// plane publishes neither, so a dashboard showing them shows a store that is
-	// moving, and nothing else.
+	// Both series exist only while a migration or an in-place change of the
+	// replica count is in flight. A store that is doing neither publishes
+	// neither, so a dashboard showing them shows a store that is changing shape,
+	// and nothing else.
 	migrationPhase = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "migration_phase",
-		Help:      "1 for the phase a migration between two Garage clusters is currently in.",
+		Help:      "1 for the phase a migration between two Garage clusters, or an in-place change of the replica count, is currently in.",
 	}, []string{"store", "phase"})
 
 	migrationStartedSeconds = prometheus.NewGaugeVec(prometheus.GaugeOpts{

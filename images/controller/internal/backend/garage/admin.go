@@ -286,6 +286,48 @@ func (c *adminClient) skipDeadNodes(ctx context.Context, version int64, allowMis
 	return &out, nil
 }
 
+// nodeStatistics is one node's answer to GET /v2/GetNodeStatistics: the
+// structured half of it, which Garage v2.4 fills in next to the free-form text.
+// A node that leaves either half out is an older one this module cannot judge.
+type nodeStatistics struct {
+	TableStats []struct {
+		TableName      string `json:"tableName"`
+		MerkleQueueLen int64  `json:"merkleQueueLen"`
+		InsertQueueLen int64  `json:"insertQueueLen"`
+	} `json:"tableStats"`
+	BlockManagerStats *struct {
+		RCEntries      int64 `json:"rcEntries"`
+		ResyncQueueLen int64 `json:"resyncQueueLen"`
+		ResyncErrors   int64 `json:"resyncErrors"`
+	} `json:"blockManagerStats"`
+}
+
+// nodeStatisticsResponse is the MultiResponse of GetNodeStatistics?node=*.
+type nodeStatisticsResponse struct {
+	Success map[string]nodeStatistics `json:"success"`
+	Error   map[string]string         `json:"error"`
+}
+
+// nodeStatistics asks every node of the cluster for its statistics.
+func (c *adminClient) nodeStatistics(ctx context.Context) (*nodeStatisticsResponse, error) {
+	var out nodeStatisticsResponse
+	if err := c.do(ctx, http.MethodGet, "/v2/GetNodeStatistics?node=*", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// repairBlocks launches the "blocks" repair on every node: each node walks its
+// block references and queues every block for resync with no delay.
+//
+// It is what makes a new replica fill up in minutes rather than after a pause.
+// A node that learns of a block through a table sync schedules its resync
+// 2 × rpc_timeout later (ten minutes by default) whatever the amount of data;
+// the repair puts it in front of that (Garage block/repair.rs).
+func (c *adminClient) repairBlocks(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/v2/LaunchRepairOperation?node=*", map[string]string{"repairType": "blocks"}, nil)
+}
+
 // --- Bucket / key management ------------------------------------------------
 
 // keyInfo is the response of POST /v2/CreateKey and GET /v2/GetKeyInfo.

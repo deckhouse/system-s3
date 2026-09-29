@@ -192,10 +192,15 @@ func TestMigrationStartRecordsWhatItIsBuilding(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(coreScheme(t)).Build()
 	d := &Driver{client: c, apiReader: c, namespace: "d8-system-s3", copierImage: "controller:test", log: testGarageLogger(t)}
 
+	// The mode and the class together: the class cannot change in place, so this
+	// is a move to a second cluster (the mode alone is an in-place change, see
+	// TestAModeChangeAloneIsMadeInPlace).
+	const otherSC = "huawei-storage-stable"
 	serving := systemStore() // high availability, on the local class
 	serving.Incarnation = 1
 	desired := systemStore()
 	desired.HighAvailability = false
+	desired.StorageClass = otherSC
 	// Written by an operator, not derived from a cluster that lost masters: the
 	// derived version of this change is refused (see
 	// TestAShrinkingClusterDoesNotShrinkTheStore).
@@ -208,8 +213,8 @@ func TestMigrationStartRecordsWhatItIsBuilding(t *testing.T) {
 	if got.phase != phaseProvisioning || got.other != 2 || got.serving != 1 {
 		t.Errorf("state=%+v, want plane 2 being provisioned while 1 serves", got)
 	}
-	if got.ha || got.storageClass != localSC {
-		t.Errorf("the recorded shape is %v/%q, want the settings' non-HA on %q", got.ha, got.storageClass, localSC)
+	if got.ha || got.storageClass != otherSC {
+		t.Errorf("the recorded shape is %v/%q, want the settings' non-HA on %q", got.ha, got.storageClass, otherSC)
 	}
 	if !strings.Contains(msg, "high-availability mode") {
 		t.Errorf("message=%q, want the reason in it", msg)
@@ -237,8 +242,7 @@ func TestMigrationStartRefusesWithNothingToCopyWith(t *testing.T) {
 	serving := systemStore()
 	serving.Incarnation = 1
 	desired := systemStore()
-	desired.HighAvailability = false
-	desired.HighAvailabilityExplicit = true
+	desired.StorageClass = "huawei-storage-stable" // a class change needs the copier
 
 	got, msg, err := d.migrationStart(ctx, desired, serving, localSC, migrationState{serving: 1, phase: phaseConverged})
 	if err != nil {

@@ -18,6 +18,7 @@ package garage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
@@ -65,7 +66,40 @@ const (
 	// not serving" is the same work whether the migration finished or was called
 	// off.
 	phaseDecommission migrationPhase = "Decommission"
+
+	// The in-place change of the replica count (see resize.go). There is one
+	// data plane throughout: the same cluster is stopped, its layout is purged
+	// and it comes back with the other replication factor.
+	//
+	// phaseResizeFreeze (shrinking only): writes are refused and the cluster is
+	// waited on until every node holds everything, so that the replica that
+	// stays holds everything.
+	phaseResizeFreeze migrationPhase = "ResizeFreeze"
+	// phaseResizeStop: the data plane is scaled to zero.
+	phaseResizeStop migrationPhase = "ResizeStop"
+	// phaseResizePurge: cluster_layout is removed from the volume of the replica
+	// that carries the data over, and garage.toml gets the new factor.
+	phaseResizePurge migrationPhase = "ResizePurge"
+	// phaseResizeSync: the cluster runs with the new factor and a new layout;
+	// the replicas are filled up (growing) or the extra volumes are released
+	// (shrinking), and writes are given back.
+	phaseResizeSync migrationPhase = "ResizeSync"
 )
+
+// writesFrozen reports whether writes are refused right now: in the cutover of
+// a move, and in an in-place shrink from the freeze until writes are given back.
+func (s migrationState) writesFrozen() bool {
+	return s.phase == phaseCutover || (s.phase.resizing() && !s.frozenAt.IsZero())
+}
+
+// resizing reports whether the phase is one of the in-place change.
+func (p migrationPhase) resizing() bool {
+	switch p {
+	case phaseResizeFreeze, phaseResizeStop, phaseResizePurge, phaseResizeSync:
+		return true
+	}
+	return false
+}
 
 // There is deliberately no failed phase.
 //
@@ -94,6 +128,11 @@ const (
 	migrationKeyStartedAt  = "started-at"
 	migrationKeyFrozenAt   = "frozen-at"
 	migrationKeyCutoverAt  = "cutover-at"
+	// Of the in-place change: the keys whose write access the freeze took away,
+	// to be given it back on the same cluster, and when the block repair was
+	// launched.
+	migrationKeyFrozenKeys = "frozen-keys"
+	migrationKeyRepairAt   = "repair-launched-at"
 )
 
 // migrationStateName is the ConfigMap the phase lives in. It belongs to the
@@ -133,6 +172,13 @@ type migrationState struct {
 	// cutoverAt is when the endpoint moved, which starts the clock on keeping the
 	// cluster it moved away from.
 	cutoverAt time.Time
+	// frozenKeys are the bucket keys whose write access an in-place change took
+	// away. A cutover never gives write access back — the endpoint moves to a
+	// cluster where the keys do not exist — but an in-place change stays on the
+	// same cluster, and has to give it back to exactly the keys that had it.
+	frozenKeys []frozenKey
+	// repairAt is when the in-place growth launched the block repair.
+	repairAt time.Time
 	// recorded reports whether the state was read from an object that exists,
 	// i.e. whether this store has ever had a second data plane. It is not part of
 	// the state and is never written: it is how the endpoint's selector knows
@@ -216,6 +262,8 @@ func parseMigrationState(data map[string]string) migrationState {
 		startedAt:    parseTime(data[migrationKeyStartedAt]),
 		frozenAt:     parseTime(data[migrationKeyFrozenAt]),
 		cutoverAt:    parseTime(data[migrationKeyCutoverAt]),
+		repairAt:     parseTime(data[migrationKeyRepairAt]),
+		frozenKeys:   parseFrozenKeys(data[migrationKeyFrozenKeys]),
 	}
 	// Any real plane, the first one included. It is the first one exactly half the
 	// time: before a cutover the other plane is the one being built, after it the
@@ -237,6 +285,12 @@ func parseMigrationState(data map[string]string) migrationState {
 		// that is serving.
 		state.other = 0
 	}
+	if state.phase.resizing() {
+		// The in-place change has one plane and no other: it is the one kind of
+		// phase that is not a move between two.
+		state.other = 0
+		return state
+	}
 	if state.phase != phaseConverged && state.other == 0 {
 		// A phase with no plane to move to is not a phase. Reading it as converged
 		// leaves the serving plane serving and lets the next pass start the
@@ -252,10 +306,39 @@ func parseMigrationState(data map[string]string) migrationState {
 func knownPhase(p migrationPhase) bool {
 	switch p {
 	case phaseConverged, phaseProvisioning, phaseCopying, phaseVerifying,
-		phaseCutover, phaseDraining, phaseDecommission:
+		phaseCutover, phaseDraining, phaseDecommission,
+		phaseResizeFreeze, phaseResizeStop, phaseResizePurge, phaseResizeSync:
 		return true
 	}
 	return false
+}
+
+// frozenKey is one key's write access to one bucket, taken away by a freeze.
+type frozenKey struct {
+	Bucket string `json:"bucket"`
+	Key    string `json:"key"`
+}
+
+func parseFrozenKeys(value string) []frozenKey {
+	if value == "" {
+		return nil
+	}
+	var keys []frozenKey
+	if err := json.Unmarshal([]byte(value), &keys); err != nil {
+		// Unreadable means "none recorded": a key left without write access
+		// gets it back from its next credentials request (a fresh key), which
+		// is what a consumer does anyway when a key stops working.
+		return nil
+	}
+	return keys
+}
+
+func formatFrozenKeys(keys []frozenKey) string {
+	raw, err := json.Marshal(keys)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
 }
 
 func parseTime(value string) time.Time {
@@ -282,10 +365,18 @@ func (d *Driver) saveMigrationState(ctx context.Context, store *backend.Store, s
 		migrationKeyServing: strconv.FormatInt(int64(state.serving), 10),
 		migrationKeyPhase:   string(state.phase),
 	}
-	if state.other != 0 {
-		data[migrationKeyOther] = strconv.FormatInt(int64(state.other), 10)
+	if state.other != 0 || state.phase.resizing() {
+		if state.other != 0 {
+			data[migrationKeyOther] = strconv.FormatInt(int64(state.other), 10)
+		}
 		data[migrationKeyOtherHA] = strconv.FormatBool(state.ha)
 		data[migrationKeyOtherClass] = state.storageClass
+	}
+	if len(state.frozenKeys) > 0 {
+		data[migrationKeyFrozenKeys] = formatFrozenKeys(state.frozenKeys)
+	}
+	if s := formatTime(state.repairAt); s != "" {
+		data[migrationKeyRepairAt] = s
 	}
 	if s := formatTime(state.startedAt); s != "" {
 		data[migrationKeyStartedAt] = s
@@ -372,7 +463,7 @@ func (d *Driver) servingPlane(ctx context.Context, store *backend.Store) (*backe
 // was working on it; a phase that changed in the last second of the pass is the
 // next pass's news.
 func reportedMigration(state migrationState) (string, time.Time) {
-	if !state.migrating() {
+	if !state.migrating() && !state.phase.resizing() {
 		return "", time.Time{}
 	}
 	return string(state.phase), state.startedAt

@@ -186,12 +186,13 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 		return state, fmt.Errorf("read pinned store state: %w", err)
 	}
 
-	// The high-availability mode and the StorageClass cannot be changed where the
-	// data plane stands: Garage refuses a replication_factor change on a live
-	// cluster, and a bound claim cannot be re-ordered from another class. Either
-	// change is therefore a migration to a second Garage cluster, which this pass
-	// starts and advances at the end, once it has found the cluster it is moving
-	// away from healthy (see reconcileMigration).
+	// The high-availability mode and the StorageClass cannot be changed while the
+	// data plane runs: Garage refuses a replication_factor change on a live
+	// cluster, and a bound claim cannot be re-ordered from another class. The mode
+	// alone is changed on the same cluster, stopped and restarted with the other
+	// factor (see resize.go); a class is a migration to a second Garage cluster.
+	// Either is started and advanced at the end of this pass, once it has found
+	// the cluster healthy (see reconcileMigration).
 	//
 	// What the configured class is compared against is the class the claims were
 	// actually created with, which is the only record of it — the module keeps no
@@ -205,8 +206,8 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 	// run. The pinned replication factor is the shape of the live cluster — the
 	// replica count, the layout, the placement rules and the volumes all follow it
 	// — and a mode that was edited must not move any of them: what moves the store
-	// to the new mode is the migration, in its own time, and this cluster keeps
-	// serving unchanged until the endpoint is switched.
+	// to the new mode is the change of the replica count, in its own time, and
+	// this cluster keeps serving unchanged until then.
 	//
 	// Without this the refusal was only half true: the message said the factor
 	// stays at 1, and the workload was scaled to the three replicas the new mode
@@ -253,6 +254,20 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 
 	state.Endpoint = s3Endpoint(store, d.namespace, d.clusterDomain)
 	state.Region = "garage"
+
+	// The two phases of an in-place change of the replica count in which the
+	// data plane does not run. Everything below needs its pods, so they are
+	// advanced here and the pass ends with what they say (see resize.go).
+	if migration.phase == phaseResizeStop || migration.phase == phaseResizePurge {
+		msg, err := d.advanceResizeOffline(ctx, store, migration)
+		if err != nil {
+			return state, err
+		}
+		migrationAdvanced = true
+		state.Message = msg
+		state.MigrationPhase, state.MigrationStartedAt = reportedMigration(migration)
+		return state, nil
+	}
 
 	// Persist each replica's Garage node identity before any placement move, so a
 	// replica that comes back on an empty volume (a move of a node-pinned volume)

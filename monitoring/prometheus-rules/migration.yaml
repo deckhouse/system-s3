@@ -1,7 +1,8 @@
 - name: d8.system-s3.migration
   rules:
     # Both series exist only while a store is being moved to a second Garage
-    # cluster, so these rules are silent on every cluster that is not migrating.
+    # cluster or its replica count is being changed in place, so these rules are
+    # silent on every cluster that is doing neither.
 
     - alert: D8SystemS3MigrationStalled
       # Six hours is not a deadline for a migration — copying a terabyte can take
@@ -19,13 +20,15 @@
         plk_protocol_version: "1"
         summary: A system object storage migration has been running for hours.
         description: |
-          The move of `{{ $labels.store }}` to a second Garage cluster has been going for more
-          than six hours.
+          The migration of `{{ $labels.store }}` has been going for more than six hours.
 
-          That is not a failure by itself: the copy takes as long as the data takes. What it
-          does mean is that two data planes are running side by side, and the storage the
-          second one holds is storage the cluster cannot use for anything else until this
-          finishes.
+          For a move to a second Garage cluster that is not a failure by itself: the copy takes
+          as long as the data takes. What it does mean is that two data planes are running
+          side by side, and the storage the second one holds is storage the cluster cannot use
+          for anything else until this finishes.
+
+          For a change of the replica count in place (a phase whose name starts with `Resize`)
+          six hours is too long: the replicas are not getting in sync.
 
           Where it is stuck is on every `SystemBucket`'s `StorageReady` condition, and the
           phase is in the store's own state:

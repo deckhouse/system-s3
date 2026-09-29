@@ -105,10 +105,9 @@ const replicasNonHA int32 = 1
 // (clamped to this count) and the layout reconcile.
 //
 // This is desired state, and for an existing store it is not necessarily what
-// runs: the mode cannot be switched in place (Garage refuses a
-// replication_factor change on a live cluster), so a store built in one mode
-// keeps its replica count until a migration rebuilds it in the other. EnsureStore
-// reports the disagreement instead of acting on it.
+// runs: Garage refuses a replication_factor change on a live cluster, so a store
+// built in one mode keeps its replica count until the change of the replica
+// count (see resize.go) restarts it in the other.
 func desiredReplicas(store *backend.Store) int32 {
 	if store.HighAvailability {
 		return replicasHA

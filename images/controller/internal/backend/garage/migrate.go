@@ -61,15 +61,19 @@ const cutoverDeadline = 30 * time.Minute
 type migrationPlan struct {
 	reason string
 	start  bool
+	// inPlace: the difference is the mode alone, made on the same cluster by
+	// restarting it with the other replication factor (see resize.go).
+	inPlace bool
 }
 
 // migrationTrigger says whether the running plane still matches the settings,
 // and whether the difference is one to act on.
 //
 // The two differences it can find are the same kind of fact: something about the
-// data plane that cannot be changed where it stands. Garage refuses a
+// data plane that cannot be changed while it runs. Garage refuses a
 // replication_factor change on a live cluster, and a bound claim cannot be
-// re-ordered from another class. Either is a migration.
+// re-ordered from another class. The mode alone is changed on the same cluster,
+// restarted with the other factor; a class is a migration to a second one.
 //
 // One of them is not acted on by itself, and it is the reason this returns a
 // decision rather than a string. The high-availability mode is DERIVED when
@@ -80,7 +84,7 @@ type migrationPlan struct {
 // only ever shrinks when the setting says so out loud.
 //
 // The other direction is not guarded. Masters coming back is good news, the store
-// gains a copy, and the cost is a migration that runs while everything is healthy.
+// gains a copy, and the cost is a restart that runs while everything is healthy.
 func migrationTrigger(desired, serving *backend.Store, boundClass string) migrationPlan {
 	switch {
 	case desired.HighAvailability != serving.HighAvailability:
@@ -99,7 +103,7 @@ func migrationTrigger(desired, serving *backend.Store, boundClass string) migrat
 				start: false,
 			}
 		}
-		return migrationPlan{reason: reason, start: true}
+		return migrationPlan{reason: reason, start: true, inPlace: resizeInPlace(desired, serving, boundClass)}
 	case boundClass != "" && desired.StorageClass != "" && boundClass != desired.StorageClass:
 		return migrationPlan{
 			reason: fmt.Sprintf("the StorageClass changed (%q -> %q)", boundClass, desired.StorageClass),
@@ -141,7 +145,13 @@ func (d *Driver) reconcileMigration(
 		return d.migrationDrain(ctx, serving, state)
 	case phaseDecommission:
 		return d.migrationDecommission(ctx, serving, state)
+	case phaseResizeFreeze:
+		return d.resizeFreeze(ctx, desired, serving, state)
+	case phaseResizeSync:
+		return d.resizeSync(ctx, serving, state)
 	default:
+		// ResizeStop and ResizePurge run before the workload is built (see
+		// advanceResizeOffline); a healthy pass never finds them.
 		return state, "", nil
 	}
 }
@@ -164,6 +174,11 @@ func (d *Driver) migrationStart(
 		return state, plan.reason, nil
 	}
 	reason := plan.reason
+	if plan.inPlace {
+		// The mode alone: the same cluster, restarted with the other factor.
+		// No second cluster, no copy (see resize.go).
+		return d.startResize(ctx, desired, serving, reason)
+	}
 	if d.copierImage == "" {
 		// Said rather than started. A migration that provisioned a second cluster
 		// and then discovered it had nothing to copy with would have doubled the
@@ -792,7 +807,7 @@ func (d *Driver) advanceMigration(
 ) (string, error) {
 	_, msg, err := d.reconcileMigration(ctx, desired, serving, boundClass, state, sumBytes)
 	if err != nil {
-		return "", fmt.Errorf("advance the migration to a new Garage cluster: %w", err)
+		return "", fmt.Errorf("advance the migration: %w", err)
 	}
 	return msg, nil
 }
@@ -808,10 +823,18 @@ func pendingMigrationNote(plan migrationPlan, state migrationState) string {
 		return fmt.Sprintf("a migration to a new Garage cluster is in progress (%s); "+
 			"the endpoint and the consumers' credentials do not change", state.phase)
 	}
+	if state.phase.resizing() {
+		return fmt.Sprintf("the replica count is being changed in place (%s); "+
+			"the endpoint and the consumers' credentials do not change", state.phase)
+	}
 	if !plan.start {
 		// A disagreement the module will not resolve on its own. It is said whole,
 		// without the "starts as soon as" that would be a promise it is not making.
 		return plan.reason
+	}
+	if plan.inPlace {
+		return fmt.Sprintf("%s, which cannot be applied to a running Garage cluster: "+
+			"the cluster is restarted with the new replica count as soon as it is healthy", plan.reason)
 	}
 	return fmt.Sprintf("%s, which cannot be applied to a running Garage cluster: "+
 		"a migration to a new one starts as soon as the current one is healthy", plan.reason)

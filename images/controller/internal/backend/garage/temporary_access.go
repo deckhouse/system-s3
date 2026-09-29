@@ -74,7 +74,7 @@ func (d *Driver) IssueTemporaryAccess(
 	if err != nil {
 		return TemporaryCredentials{}, err
 	}
-	if write && migration.phase == phaseCutover {
+	if write && migration.writesFrozen() {
 		// The freeze is not a suggestion. A key minted with write access during the
 		// cutover would write into the cluster whose contents are being compared
 		// with the new one, and the difference would be copied over or lost.

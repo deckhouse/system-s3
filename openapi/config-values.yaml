@@ -26,17 +26,25 @@ properties:
       replica only when this setting says so out loud. The other direction needs
       no asking: masters coming back grows the store on its own.
 
-      Changing the mode on an installation that already holds data is performed
-      as a migration, because Garage cannot change its replication factor on a
-      live cluster: the module builds a second Garage cluster beside the first,
-      copies the objects into it and moves the endpoint onto it. Both clusters
-      exist at once for the length of it, so the storage it needs is up to twice
-      the usual. What consumers see is a few minutes, during the switch itself,
-      in which writes are refused while reads keep working — the endpoint keeps
-      its address and every key keeps working, so no credentials `Secret` has to
-      be re-read. Progress is reported in every `SystemBucket`'s `StorageReady`
-      condition, and the cluster migrated away from is kept read-only for 24
-      hours afterwards.
+      Changing the mode on an installation that already holds data is done on
+      the same Garage cluster, on the same volumes. Garage cannot change its
+      replication factor while it runs, so the module stops the data plane,
+      removes the saved cluster layout and starts it again with the other
+      replica count; no objects are copied and no second cluster is built.
+
+      Going from one replica to three, the store is unavailable from the stop
+      until the three replicas are up — usually under a minute, longer if the new
+      volumes are slow to be provisioned. The new replicas are filled in the
+      background while the store serves. Going from three to one, writes are
+      refused first, until every replica holds everything (reads keep working);
+      if that does not happen within 10 minutes, writes are given back and the
+      change is tried again later. Then the store is unavailable for about a
+      minute while it restarts on one replica, and the volumes of the two
+      replicas that are gone are released.
+
+      The endpoint keeps its address and every key keeps working, so no
+      credentials `Secret` has to be re-read. Progress is reported in every
+      `SystemBucket`'s `StorageReady` condition.
   storageClass:
     type: string
     x-examples: ["ceph-csi-rbd", "localpath-system"]
@@ -67,11 +75,17 @@ properties:
       and replaces for other workloads — each such replacement costs a replica its
       copy on a local class.
 
-      Changing it on an installation that already holds data is performed as the
-      same migration a change of `highAvailability` is, because the volumes of a
-      running store cannot be re-ordered from another class in place. Putting the
+      Changing it on an installation that already holds data is performed as a
+      migration, because the volumes of a running store cannot be re-ordered from
+      another class in place: the module builds a second Garage cluster on the
+      new class, copies the objects into it and moves the endpoint onto it. Both
+      clusters exist at once for the length of it, so the storage it needs is up
+      to twice the usual. What consumers see is a few minutes, during the switch
+      itself, in which writes are refused while reads keep working. The cluster
+      migrated away from is kept read-only for 24 hours afterwards. Putting the
       setting back before the switch happens calls the migration off and removes
-      the half-built cluster.
+      the half-built cluster. A change of `highAvailability` made together with
+      it is carried out by the same migration.
   logLevel:
     type: string
     enum:
