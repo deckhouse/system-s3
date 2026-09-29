@@ -18,6 +18,10 @@ package garage
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -723,6 +727,49 @@ func TestAVolumePinnedByACSIDriversOwnTopologyIsStillPinned(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if got := pvNodeName(tc.pv); got != tc.want {
 				t.Errorf("pvNodeName = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAPlacementMoveWaitsForTheReplicasToBeInSync: healthy is the cluster being
+// connected, not the data being there. A replica that has just come back on an
+// empty volume is healthy long before it holds its copy, and the next move has
+// to wait for that too.
+func TestAPlacementMoveWaitsForTheReplicasToBeInSync(t *testing.T) {
+	stats := func(queue int) string {
+		node := fmt.Sprintf(`{"tableStats":[{"tableName":"object","merkleQueueLen":0,"insertQueueLen":0}],`+
+			`"blockManagerStats":{"rcEntries":10,"resyncQueueLen":%d,"resyncErrors":0}}`, queue)
+		return `{"success":{"a":` + node + `,"b":` + node + `,"c":` + node + `},"error":{}}`
+	}
+	cases := []struct {
+		name      string
+		health    string
+		stats     string
+		wantReady bool
+		wantWhy   string
+	}{
+		{"healthy and in sync", garageStatusHealthy, stats(0), true, ""},
+		{"healthy, a replica still filling", garageStatusHealthy, stats(2488), false, "block(s) queued for resync"},
+		{"degraded", "degraded", stats(0), false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v2/GetClusterHealth":
+					_, _ = fmt.Fprintf(w, `{"status":%q}`, tc.health)
+				case "/v2/GetNodeStatistics":
+					_, _ = io.WriteString(w, tc.stats)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			ready, why := readyToMove(context.Background(), newAdminClient(srv.URL, "token"), 3)
+			if ready != tc.wantReady || !strings.Contains(why, tc.wantWhy) {
+				t.Errorf("ready=%v why=%q, want %v and %q", ready, why, tc.wantReady, tc.wantWhy)
 			}
 		})
 	}

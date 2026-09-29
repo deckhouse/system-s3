@@ -166,12 +166,18 @@ func (d *Driver) reconcilePlacement(ctx context.Context, store *backend.Store) (
 	// The health gate matters for SPREAD and for CONSOLIDATE off a live node;
 	// with no eligible node or two there is nothing to decide, and it is skipped.
 	replicas := desiredReplicas(store)
-	healthy := false
+	ready, why := false, ""
 	if int32(len(candidates)) >= replicas || len(candidates) == 1 {
-		healthy = d.garageHealthy(ctx, store)
+		ready, why = d.garageReadyToMove(ctx, store, replicas)
 	}
 
-	action := nextPlacementAction(candidates, present, spots, replicas, healthy)
+	action := nextPlacementAction(candidates, present, spots, replicas, ready)
+	if !action.act && why != "" && nextPlacementAction(candidates, present, spots, replicas, true).act {
+		// A move is due and the cluster is up, but a replica is still being
+		// filled. Said, so an operator watching a store that will not spread
+		// knows it is waiting and on what.
+		return false, "rebalancing System placement: the next move waits for the replicas to be in sync (" + why + ")", nil
+	}
 	if !action.act {
 		// Converged (or nothing to do): forget the bookkeeping, so a later,
 		// legitimate migration starts from a clean count.
@@ -501,19 +507,37 @@ func (d *Driver) moveReplica(ctx context.Context, store *backend.Store, ordinal 
 	return nil
 }
 
-// garageHealthy reports whether the Garage admin API considers the cluster
-// healthy (all storage nodes ok / data re-replicated). Any error (token missing,
-// endpoint not answering, degraded) yields false, so a placement move is only
-// started from a known-good state.
-func (d *Driver) garageHealthy(ctx context.Context, store *backend.Store) bool {
+// garageReadyToMove reports whether the next placement move may start: the
+// Garage admin API considers the cluster healthy and every node holds what it
+// should. Any error (token missing, endpoint not answering, degraded) yields
+// false, so a placement move is only started from a known-good state.
+//
+// Healthy is not enough to move the next replica. Garage reads healthy as soon
+// as every node is connected and the layout is whole, and a replica that has
+// just come back on an empty volume is connected long before it holds its copy
+// of the data: its blocks are resynced with a delay of 2 × rpc_timeout (ten
+// minutes, block/manager.rs). Recycling the next one inside that window leaves
+// one full copy where the gate was meant to leave two. So the move also waits
+// for the cluster to be in sync (clusterInSync, the same check the in-place
+// change of the replica count uses), and why reports what it waits on when the
+// cluster is healthy but not yet in sync.
+func (d *Driver) garageReadyToMove(ctx context.Context, store *backend.Store, replicas int32) (ready bool, why string) {
 	token, err := d.adminToken(ctx, store)
 	if err != nil || token == "" {
-		return false
+		return false, ""
 	}
-	svc := d.admin(store, adminEndpoint(store, d.namespace, d.clusterDomain), token)
+	return readyToMove(ctx, d.admin(store, adminEndpoint(store, d.namespace, d.clusterDomain), token), replicas)
+}
+
+// readyToMove is the judgement half of garageReadyToMove, on a client.
+func readyToMove(ctx context.Context, svc *adminClient, replicas int32) (ready bool, why string) {
 	h, err := svc.health(ctx)
-	if err != nil {
-		return false
+	if err != nil || h.Status != garageStatusHealthy {
+		return false, ""
 	}
-	return h.Status == garageStatusHealthy
+	synced, why, err := clusterInSync(ctx, svc, replicas)
+	if err != nil {
+		return false, err.Error()
+	}
+	return synced, why
 }
