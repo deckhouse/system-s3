@@ -335,6 +335,30 @@ const (
 	ConnectionKeySTSCACert   = "S3_STS_CA_CERT"
 )
 
+// The same connection, in the names the AWS SDKs read on their own.
+//
+// With these in the environment an SDK that implements the web identity flow —
+// the AWS CLI, boto3, aws-sdk-go-v2, the Java and JavaScript SDKs — asks the
+// credentials endpoint for a key and renews it without a line of code. What
+// stays with the consumer is what depends on its Pod rather than on the bucket:
+// AWS_WEB_IDENTITY_TOKEN_FILE, the path of a projected ServiceAccount token for
+// the S3_STS_AUDIENCE audience, and AWS_CA_BUNDLE, the path the CA is mounted at.
+//
+// AWS_ROLE_ARN names the bucket in the one ARN spelling the endpoint accepts
+// (see RoleARNPrefix); there is no role behind it. The two endpoint keys and the
+// region are written only while the credentials endpoint is served, like the
+// S3_STS_* keys: without it an SDK given AWS_ROLE_ARN would have nowhere to go.
+const (
+	ConnectionKeyAWSRoleARN     = "AWS_ROLE_ARN"
+	ConnectionKeyAWSEndpointSTS = "AWS_ENDPOINT_URL_STS"
+	ConnectionKeyAWSEndpointS3  = "AWS_ENDPOINT_URL_S3"
+	ConnectionKeyAWSRegion      = "AWS_REGION"
+
+	// RoleARNPrefix is what AWS_ROLE_ARN starts with; the rest is
+	// "<namespace>/<name>" of the SystemBucket.
+	RoleARNPrefix = "arn:deckhouse:system-s3:::systembucket/"
+)
+
 // Status.phase values.
 //
 // Declared here on purpose, even though sds-common-lib's conditions package has

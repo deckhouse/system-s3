@@ -342,3 +342,42 @@ func TestTheConsumerGetsConnectionParametersAndNoCredentials(t *testing.T) {
 		t.Errorf("status.connectionRef = %v, want %s", live.Status.ConnectionRef, cm.Name)
 	}
 }
+
+// TestTheConnectionSpeaksTheSDKsNames: an SDK with the web identity flow needs
+// the role, the two endpoints and the region under its own names, and must not
+// be handed a role while there is no endpoint to exchange it at.
+func TestTheConnectionSpeaksTheSDKsNames(t *testing.T) {
+	const ns, name = "d8-monitoring", "loki"
+	for _, sts := range []string{"", "https://system-s3-sts.d8-system-s3.svc"} {
+		t.Run("sts="+sts, func(t *testing.T) {
+			r, c := newReconciler(t, &fakeDriver{}, platformNS(ns), bucketFor(ns, name))
+			r.Cfg.STSEndpoint = sts
+			ctx := context.Background()
+			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKey{Namespace: ns, Name: name}}); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			cm := &corev1.ConfigMap{}
+			if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: connectionConfigMapName(bucketFor(ns, name))}, cm); err != nil {
+				t.Fatalf("get: %v", err)
+			}
+
+			want := map[string]string{}
+			if sts != "" {
+				want = map[string]string{
+					v1alpha1.ConnectionKeyAWSRoleARN:     "arn:deckhouse:system-s3:::systembucket/d8-monitoring/loki",
+					v1alpha1.ConnectionKeyAWSEndpointSTS: sts,
+					v1alpha1.ConnectionKeyAWSEndpointS3:  "http://system-garage:3900",
+					v1alpha1.ConnectionKeyAWSRegion:      "garage",
+				}
+			}
+			for _, k := range []string{
+				v1alpha1.ConnectionKeyAWSRoleARN, v1alpha1.ConnectionKeyAWSEndpointSTS,
+				v1alpha1.ConnectionKeyAWSEndpointS3, v1alpha1.ConnectionKeyAWSRegion,
+			} {
+				if got := cm.Data[k]; got != want[k] {
+					t.Errorf("%s=%q, want %q", k, got, want[k])
+				}
+			}
+		})
+	}
+}

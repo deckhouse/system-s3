@@ -42,6 +42,7 @@ loki   d8-monitoring-loki   Ready   loki-s3-connection   True    30s
 | `S3_STS_ENDPOINT` | Where to exchange a ServiceAccount token for credentials. |
 | `S3_STS_AUDIENCE` | The `audience` to request for the ServiceAccount token the pod presents at `S3_STS_ENDPOINT` — always `system-s3-sts`. It goes into the pod spec, in the projected token volume (see below): Kubernetes cannot take it from a ConfigMap. The endpoint accepts only tokens issued for this audience, so the pod's default token is refused, and a token issued for it does not authenticate to the API server — if leaked, it can only be used to ask for the credentials its ServiceAccount is allowed anyway. |
 | `S3_STS_CA_CERT` | CA that signs the credentials endpoint. It is the module's own, so nothing in the cluster trusts it by default. |
+| `AWS_ROLE_ARN`, `AWS_ENDPOINT_URL_STS`, `AWS_ENDPOINT_URL_S3`, `AWS_REGION` | The same connection under the names the AWS SDKs read on their own: the bucket as `arn:deckhouse:system-s3:::systembucket/<namespace>/<name>`, the credentials endpoint, the S3 endpoint and the region. See [AWS SDKs without code](#aws-sdks-without-code). |
 
 **There are no credentials in it, and none anywhere else.** The module issues no
 long-lived key for a bucket — not for its owner either. Every consumer, including
@@ -124,6 +125,29 @@ The endpoint returns a key pair that Garage stops honouring at the expiry in the
 response (an hour by default, `DurationSeconds` between 15 minutes and 12 hours).
 There is no session token: the credentials are a real key pair, and S3 requests
 signed with them need nothing else.
+
+### AWS SDKs without code
+
+The AWS CLI, boto3, aws-sdk-go-v2 and the other AWS SDKs implement this exchange
+themselves: given a role, a token file and an STS endpoint, they ask for a key
+before the first request and ask again before it expires. The ConfigMap already
+carries the role and both endpoints under the SDKs' names, so a consumer adds
+only the two paths that belong to its pod:
+
+```yaml
+    envFrom:
+      - configMapRef:
+          name: loki-s3-connection
+    env:
+      - name: AWS_WEB_IDENTITY_TOKEN_FILE
+        value: /var/run/secrets/system-s3/token
+      - name: AWS_CA_BUNDLE               # one CA signs both endpoints today
+        value: /etc/system-s3/ca/s3-ca.crt
+```
+
+with the same `s3-token` and `s3-ca` volumes as above. `aws s3 cp` then works
+without `--endpoint-url` and without keys in the environment. The four `AWS_*`
+keys are in the ConfigMap only while the module serves the credentials endpoint.
 
 **Being allowed to ask is an RBAC grant**, and the component that created the
 `SystemBucket` needs it like anyone else — owning the resource is permission to

@@ -460,6 +460,12 @@ func (r *SystemBucketReconciler) ensureConnectionConfigMap(
 			if ca := r.stsCA(ctx); len(ca) > 0 {
 				cm.Data[v1alpha1.ConnectionKeySTSCACert] = string(ca)
 			}
+			// The same, for the SDKs' own web identity flow (see
+			// ConnectionKeyAWSRoleARN).
+			cm.Data[v1alpha1.ConnectionKeyAWSRoleARN] = v1alpha1.RoleARNPrefix + bucket.Namespace + "/" + bucket.Name
+			cm.Data[v1alpha1.ConnectionKeyAWSEndpointSTS] = endpoint
+			cm.Data[v1alpha1.ConnectionKeyAWSEndpointS3] = state.Endpoint
+			cm.Data[v1alpha1.ConnectionKeyAWSRegion] = state.Region
 		}
 		return controllerutil.SetControllerReference(bucket, cm, r.Scheme)
 	})

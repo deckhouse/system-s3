@@ -265,8 +265,9 @@ func bucketFromRequest(r *http.Request) (namespace, name string, err error) {
 }
 
 // RoleARNPrefix is the ARN spelling this module accepts, for clients that cannot
-// put the bucket in the path.
-const RoleARNPrefix = "arn:deckhouse:system-s3:::systembucket/"
+// put the bucket in the path. It is part of the public API because the
+// connection ConfigMap hands it to the SDKs as AWS_ROLE_ARN.
+const RoleARNPrefix = v1alpha1.RoleARNPrefix
 
 func splitBucketPath(p string) (namespace, name string, ok bool) {
 	parts := strings.Split(strings.Trim(p, "/"), "/")
