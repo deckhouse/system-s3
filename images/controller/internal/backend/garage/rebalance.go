@@ -519,23 +519,24 @@ func (d *Driver) moveReplica(ctx context.Context, store *backend.Store, ordinal 
 // minutes, block/manager.rs). Recycling the next one inside that window leaves
 // one full copy where the gate was meant to leave two. So the move also waits
 // for the cluster to be in sync (clusterInSync, the same check the in-place
-// change of the replica count uses), and why reports what it waits on when the
-// cluster is healthy but not yet in sync.
+// change of the replica count uses: every node has a file for every block it
+// counts), and why reports what it waits on when the cluster is healthy but not
+// yet in sync.
 func (d *Driver) garageReadyToMove(ctx context.Context, store *backend.Store, replicas int32) (ready bool, why string) {
 	token, err := d.adminToken(ctx, store)
 	if err != nil || token == "" {
 		return false, ""
 	}
-	return readyToMove(ctx, d.admin(store, adminEndpoint(store, d.namespace, d.clusterDomain), token), replicas)
+	return readyToMove(ctx, d.admin(store, adminEndpoint(store, d.namespace, d.clusterDomain), token), replicas, d.blocksOnDisk(store))
 }
 
 // readyToMove is the judgement half of garageReadyToMove, on a client.
-func readyToMove(ctx context.Context, svc *adminClient, replicas int32) (ready bool, why string) {
+func readyToMove(ctx context.Context, svc *adminClient, replicas int32, held heldBlocks) (ready bool, why string) {
 	h, err := svc.health(ctx)
 	if err != nil || h.Status != garageStatusHealthy {
 		return false, ""
 	}
-	synced, why, err := clusterInSync(ctx, svc, replicas)
+	synced, why, err := clusterInSync(ctx, svc, replicas, held)
 	if err != nil {
 		return false, err.Error()
 	}

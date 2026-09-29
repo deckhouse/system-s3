@@ -742,16 +742,21 @@ func TestAPlacementMoveWaitsForTheReplicasToBeInSync(t *testing.T) {
 			`"blockManagerStats":{"rcEntries":10,"resyncQueueLen":%d,"resyncErrors":0}}`, queue)
 		return `{"success":{"a":` + node + `,"b":` + node + `,"c":` + node + `},"error":{}}`
 	}
+	full := map[string]int64{"a": 10, "b": 10, "c": 10}
+	filling := map[string]int64{"a": 10, "b": 10, "c": 0}
 	cases := []struct {
 		name      string
 		health    string
 		stats     string
+		held      map[string]int64
 		wantReady bool
 		wantWhy   string
 	}{
-		{"healthy and in sync", garageStatusHealthy, stats(0), true, ""},
-		{"healthy, a replica still filling", garageStatusHealthy, stats(2488), false, "block(s) queued for resync"},
-		{"degraded", "degraded", stats(0), false, ""},
+		{"healthy and in sync", garageStatusHealthy, stats(0), full, true, ""},
+		// The queue is not what decides: a store being written to always has one.
+		{"healthy, written to, every node full", garageStatusHealthy, stats(120), full, true, ""},
+		{"healthy, a replica still filling", garageStatusHealthy, stats(2488), filling, false, "holds 0 of 10 blocks"},
+		{"degraded", "degraded", stats(0), full, false, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -767,7 +772,8 @@ func TestAPlacementMoveWaitsForTheReplicasToBeInSync(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			ready, why := readyToMove(context.Background(), newAdminClient(srv.URL, "token"), 3)
+			held := func(context.Context) (map[string]int64, error) { return tc.held, nil }
+			ready, why := readyToMove(context.Background(), newAdminClient(srv.URL, "token"), 3, held)
 			if ready != tc.wantReady || !strings.Contains(why, tc.wantWhy) {
 				t.Errorf("ready=%v why=%q, want %v and %q", ready, why, tc.wantReady, tc.wantWhy)
 			}

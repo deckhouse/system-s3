@@ -217,8 +217,9 @@ func TestStatisticsInSync(t *testing.T) {
 			Error:   map[string]string{"c": "timeout"}}, 3, false, "did not answer"},
 		{"fewer nodes than replicas", nodeStatisticsResponse{Success: map[string]nodeStatistics{
 			"a": node(0, 0, 0)}}, 3, false, "1 of 3"},
+		// A queue alone is a store being written to, not one out of sync.
 		{"blocks queued", nodeStatisticsResponse{Success: map[string]nodeStatistics{
-			"a": node(0, 0, 0), "b": node(2488, 0, 0), "c": node(0, 0, 0)}}, 3, false, "2488 block(s) queued"},
+			"a": node(0, 0, 0), "b": node(2488, 0, 0), "c": node(0, 0, 0)}}, 3, true, ""},
 		{"table work", nodeStatisticsResponse{Success: map[string]nodeStatistics{
 			"a": node(0, 0, 5), "b": node(0, 0, 0), "c": node(0, 0, 0)}}, 3, false, "5 table update(s)"},
 		{"resync errors", nodeStatisticsResponse{Success: map[string]nodeStatistics{
@@ -230,10 +231,7 @@ func TestStatisticsInSync(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			synced, why, err := statisticsInSync(&tc.stats, tc.want)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+			synced, why := statisticsInSync(&tc.stats, tc.want)
 			if synced != tc.wantSync || !strings.Contains(why, tc.wantWhy) {
 				t.Errorf("synced=%v why=%q, want %v and %q", synced, why, tc.wantSync, tc.wantWhy)
 			}
@@ -442,5 +440,40 @@ func TestResizeOfflineReadsPastTheCache(t *testing.T) {
 		if _, err := d.advanceResizeOffline(ctx, store, state); err != nil {
 			t.Errorf("%s: %v", phase, err)
 		}
+	}
+}
+
+// TestBlocksHeld: a node is full when it has a file for every block it counts.
+// Its reference counts arrive with the table sync, long before the blocks do,
+// which is exactly the window this has to see.
+func TestBlocksHeld(t *testing.T) {
+	rc := func(n int64) nodeStatistics {
+		var s nodeStatistics
+		s.BlockManagerStats = &struct {
+			RCEntries      int64 `json:"rcEntries"`
+			ResyncQueueLen int64 `json:"resyncQueueLen"`
+			ResyncErrors   int64 `json:"resyncErrors"`
+		}{RCEntries: n}
+		return s
+	}
+	stats := &nodeStatisticsResponse{Success: map[string]nodeStatistics{"a": rc(2102), "b": rc(2102), "c": rc(2103)}}
+	cases := []struct {
+		name    string
+		files   map[string]int64
+		want    bool
+		wantWhy string
+	}{
+		{"every node full", map[string]int64{"a": 2102, "b": 2102, "c": 2103}, true, ""},
+		{"a block written between the two reads", map[string]int64{"a": 2103, "b": 2103, "c": 2103}, true, ""},
+		{"a node that started empty", map[string]int64{"a": 2102, "b": 2102, "c": 40}, false, "holds 40 of 2103"},
+		{"a node whose volume was not read", map[string]int64{"a": 2102, "b": 2102}, false, "could not be read"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, why := blocksHeld(stats, tc.files)
+			if got != tc.want || !strings.Contains(why, tc.wantWhy) {
+				t.Errorf("blocksHeld=%v %q, want %v and %q", got, why, tc.want, tc.wantWhy)
+			}
+		})
 	}
 }

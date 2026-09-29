@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -180,7 +181,7 @@ func (d *Driver) resizeFreeze(ctx context.Context, desired, store *backend.Store
 	if err != nil || !ready {
 		return state, "", errOrNotReady(err, store, "check the synchronisation")
 	}
-	synced, why, err := clusterInSync(ctx, svc, desiredReplicas(store))
+	synced, why, err := clusterInSync(ctx, svc, desiredReplicas(store), d.blocksOnDisk(store))
 	if err != nil {
 		return state, "", err
 	}
@@ -240,7 +241,7 @@ func (d *Driver) resizeSync(ctx context.Context, store *backend.Store, state mig
 		return state, "changing the replica count: the store serves with three replicas; filling the new ones", nil
 	}
 
-	synced, why, err := clusterInSync(ctx, svc, replicas)
+	synced, why, err := clusterInSync(ctx, svc, replicas, d.blocksOnDisk(store))
 	if err != nil {
 		return state, "", err
 	}
@@ -265,54 +266,138 @@ func (d *Driver) resizeSync(ctx context.Context, store *backend.Store, state mig
 	return done, fmt.Sprintf("the replica count is changed: %d replica(s), in sync", replicas), nil
 }
 
+// heldBlocks reads how many block files each node has on its volume, by node
+// id.
+type heldBlocks func(ctx context.Context) (map[string]int64, error)
+
 // clusterInSync reports whether every node of the cluster holds everything it
-// should: every node answers, no table has updates or inserts waiting, and no
-// block is waiting for a resync or failing one.
+// should: every node answers, no table has updates or inserts waiting, no block
+// is failing to resync, and every node has a file for every block it counts a
+// reference to.
 //
-// The resync queue is the strict half. After the block repair the data is on
-// the new nodes within minutes, while the queue still carries the entries the
-// table sync scheduled ten minutes out; they are resolved as no-ops when they
-// fall due. Waiting for them costs those minutes and buys a signal with nothing
-// left to interpret — the store serves throughout.
-func clusterInSync(ctx context.Context, svc *adminClient, want int32) (bool, string, error) {
+// The last is what "holds everything" means, and it is read off the volumes
+// because Garage has no counter for it. The resync queue is not that counter:
+// every block written — by a consumer, not only by a sync — puts an entry on it
+// that falls due 2 × rpc_timeout later (ten minutes, block/manager.rs) and is
+// resolved as a no-op when the block is already there. Measured on the stand on
+// 29.09: one 1 MiB object a second keeps some hundred entries queued on every
+// node for as long as the writes go on. A gate that waited for an empty queue
+// never opened on a store that is written to, which a platform's store always
+// is. Every replica holds every block (the replication factor is the replica
+// count), so a node with fewer block files than reference counts is a node that
+// is still being filled.
+func clusterInSync(ctx context.Context, svc *adminClient, want int32, held heldBlocks) (bool, string, error) {
 	stats, err := svc.nodeStatistics(ctx)
 	if err != nil {
 		return false, "", fmt.Errorf("read the node statistics: %w", err)
 	}
-	return statisticsInSync(stats, want)
+	if synced, why := statisticsInSync(stats, want); !synced {
+		return false, why, nil
+	}
+	files, err := held(ctx)
+	if err != nil {
+		return false, "", fmt.Errorf("count the block files on the volumes: %w", err)
+	}
+	synced, why := blocksHeld(stats, files)
+	return synced, why, nil
 }
 
-// statisticsInSync is the judgement half of clusterInSync.
-func statisticsInSync(stats *nodeStatisticsResponse, want int32) (bool, string, error) {
+// blocksHeld compares each node's block files with the blocks it counts.
+func blocksHeld(stats *nodeStatisticsResponse, files map[string]int64) (bool, string) {
+	ids := make([]string, 0, len(stats.Success))
+	for id := range stats.Success {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	var short []string
+	for _, id := range ids {
+		rc := stats.Success[id].BlockManagerStats.RCEntries
+		have, ok := files[id]
+		switch {
+		case !ok:
+			short = append(short, fmt.Sprintf("node %s: its volume could not be read", shortID(id)))
+		case have < rc:
+			short = append(short, fmt.Sprintf("node %s holds %d of %d blocks", shortID(id), have, rc))
+		}
+	}
+	if len(short) > 0 {
+		return false, strings.Join(short, "; ")
+	}
+	return true, ""
+}
+
+// blocksOnDisk counts the block files on the volume of every running replica,
+// keyed by the node id its admin API reports.
+//
+// A block is one file under data/<xx>/<yy>/; the depth leaves out the marker
+// Garage keeps at the top of data/. The count is a find over the directory,
+// which is cheap on a platform's store and is run only while a change waits on
+// it.
+func (d *Driver) blocksOnDisk(store *backend.Store) heldBlocks {
+	return func(ctx context.Context) (map[string]int64, error) {
+		token, err := d.adminToken(ctx, store)
+		if err != nil {
+			return nil, err
+		}
+		pods, err := d.planePods(ctx, store)
+		if err != nil {
+			return nil, err
+		}
+		out := map[string]int64{}
+		for i := range pods {
+			pod := &pods[i]
+			if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" {
+				continue
+			}
+			st, err := d.admin(store, podAdminURL(pod.Status.PodIP), token).status(ctx)
+			if err != nil || st.Node == "" {
+				continue // reported as "could not be read" against its node id
+			}
+			raw, err := d.execInPod(ctx, pod.Name, "garage", []string{"sh", "-c",
+				"find " + dataMountPath + "/data -mindepth 3 -type f | wc -l"})
+			if err != nil {
+				return nil, err
+			}
+			n, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("pod %s counted %q block files", pod.Name, strings.TrimSpace(string(raw)))
+			}
+			out[st.Node] = n
+		}
+		return out, nil
+	}
+}
+
+// statisticsInSync is the half of clusterInSync the statistics alone decide.
+func statisticsInSync(stats *nodeStatisticsResponse, want int32) (bool, string) {
 	if len(stats.Error) > 0 {
 		nodes := make([]string, 0, len(stats.Error))
 		for id := range stats.Error {
 			nodes = append(nodes, shortID(id))
 		}
 		sort.Strings(nodes)
-		return false, fmt.Sprintf("node(s) %s did not answer", strings.Join(nodes, ", ")), nil
+		return false, fmt.Sprintf("node(s) %s did not answer", strings.Join(nodes, ", "))
 	}
 	if int32(len(stats.Success)) < want {
-		return false, fmt.Sprintf("%d of %d nodes answered", len(stats.Success), want), nil
+		return false, fmt.Sprintf("%d of %d nodes answered", len(stats.Success), want)
 	}
-	var queued, errors, tableWork int64
+	var errors, tableWork int64
 	for id, s := range stats.Success {
 		if s.BlockManagerStats == nil || s.TableStats == nil {
-			return false, fmt.Sprintf("node %s reports no statistics to judge by", shortID(id)), nil
+			return false, fmt.Sprintf("node %s reports no statistics to judge by", shortID(id))
 		}
-		queued += s.BlockManagerStats.ResyncQueueLen
 		errors += s.BlockManagerStats.ResyncErrors
 		for _, t := range s.TableStats {
 			tableWork += t.MerkleQueueLen + t.InsertQueueLen
 		}
 	}
 	if errors > 0 {
-		return false, fmt.Sprintf("%d block(s) failing to resync", errors), nil
+		return false, fmt.Sprintf("%d block(s) failing to resync", errors)
 	}
-	if tableWork > 0 || queued > 0 {
-		return false, fmt.Sprintf("%d block(s) queued for resync, %d table update(s) pending", queued, tableWork), nil
+	if tableWork > 0 {
+		return false, fmt.Sprintf("%d table update(s) pending", tableWork)
 	}
-	return true, "", nil
+	return true, ""
 }
 
 func shortID(id string) string {
