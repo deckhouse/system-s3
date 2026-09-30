@@ -201,6 +201,9 @@ type BucketUsage struct {
 	// bucket, means the quota has not been applied yet rather than that the
 	// bucket is unbounded.
 	QuotaBytes int64
+	// QuotaObjects is the object-count quota in force in the backend, zero when
+	// there is none.
+	QuotaObjects int64
 
 	// UsedBytes and Objects are what the bucket holds right now.
 	UsedBytes int64

@@ -70,6 +70,21 @@ var (
 		Help:      "Size quota in force on a system bucket, in bytes (0 when none is applied).",
 	}, []string{"namespace", "name", "bucket"})
 
+	// bucketObjects and bucketQuotaObjects are the other half of the same
+	// warning: a bucket is refused writes at its object-count quota too
+	// (spec.size / 64 KiB), with bytes to spare.
+	bucketObjects = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "bucket_objects",
+		Help:      "Objects stored in a system bucket, as the backend counts them.",
+	}, []string{"namespace", "name", "bucket"})
+
+	bucketQuotaObjects = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "bucket_quota_objects",
+		Help:      "Object-count quota in force on a system bucket (0 when none is applied).",
+	}, []string{"namespace", "name", "bucket"})
+
 	// migrationPhase and migrationStartedSeconds describe the module's only
 	// operation measured in hours: moving a store to a second Garage cluster.
 	//
@@ -216,9 +231,11 @@ func Migration(store, phase string, startedAt time.Time) {
 }
 
 // BucketUsage records what one bucket holds and what it is allowed to hold.
-func BucketUsage(namespace, name, bucket string, used, quota int64) {
+func BucketUsage(namespace, name, bucket string, used, quota, objects, quotaObjects int64) {
 	bucketUsedBytes.WithLabelValues(namespace, name, bucket).Set(float64(used))
 	bucketQuotaBytes.WithLabelValues(namespace, name, bucket).Set(float64(quota))
+	bucketObjects.WithLabelValues(namespace, name, bucket).Set(float64(objects))
+	bucketQuotaObjects.WithLabelValues(namespace, name, bucket).Set(float64(quotaObjects))
 }
 
 // ForgetBucket drops a bucket's series.
@@ -229,6 +246,8 @@ func BucketUsage(namespace, name, bucket string, used, quota int64) {
 func ForgetBucket(namespace, name, bucket string) {
 	bucketUsedBytes.DeleteLabelValues(namespace, name, bucket)
 	bucketQuotaBytes.DeleteLabelValues(namespace, name, bucket)
+	bucketObjects.DeleteLabelValues(namespace, name, bucket)
+	bucketQuotaObjects.DeleteLabelValues(namespace, name, bucket)
 	bucketReady.DeleteLabelValues(namespace, name)
 	bucketSizeApplied.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
 }
@@ -240,6 +259,8 @@ func init() {
 	metrics.Registry.MustRegister(migrationStartedSeconds)
 	metrics.Registry.MustRegister(bucketUsedBytes)
 	metrics.Registry.MustRegister(bucketQuotaBytes)
+	metrics.Registry.MustRegister(bucketObjects)
+	metrics.Registry.MustRegister(bucketQuotaObjects)
 	metrics.Registry.MustRegister(bucketReady)
 	metrics.Registry.MustRegister(bucketSizeApplied)
 	metrics.Registry.MustRegister(storeVolumeDesiredBytes)

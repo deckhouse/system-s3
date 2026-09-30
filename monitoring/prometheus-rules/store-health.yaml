@@ -40,10 +40,20 @@
       # The quota is a hard ceiling in the backend: a bucket at it refuses writes,
       # and the component that owns it has no other warning. Thirty minutes so a
       # burst that drains itself does not page anyone.
+      # Either quota: the bytes, or the object count (spec.size / 64 KiB), which a
+      # bucket of small objects reaches with most of its bytes to spare.
       expr: |
-        system_s3_bucket_quota_bytes > 0
-        and
-        system_s3_bucket_used_bytes / system_s3_bucket_quota_bytes > 0.85
+        (
+          system_s3_bucket_quota_bytes > 0
+          and
+          system_s3_bucket_used_bytes / system_s3_bucket_quota_bytes > 0.85
+        )
+        or
+        (
+          system_s3_bucket_quota_objects > 0
+          and
+          system_s3_bucket_objects / system_s3_bucket_quota_objects > 0.85
+        )
       for: 30m
       labels:
         severity_level: "5"
@@ -53,7 +63,9 @@
         plk_protocol_version: "1"
         summary: A system bucket is nearly full.
         description: |
-          `{{ $labels.namespace }}/{{ $labels.name }}` is using more than 85% of its quota.
+          `{{ $labels.namespace }}/{{ $labels.name }}` is using more than 85% of its quota —
+          of its bytes (`status.quotaBytes`) or of its object count (`status.quotaObjects`,
+          `spec.size` / 64 KiB).
 
           At 100% the backend refuses writes. Nothing in the platform reclaims space here —
           a system bucket belongs to one component and only that component knows what in it
@@ -71,9 +83,17 @@
 
     - alert: D8SystemS3BucketFull
       expr: |
-        system_s3_bucket_quota_bytes > 0
-        and
-        system_s3_bucket_used_bytes >= system_s3_bucket_quota_bytes
+        (
+          system_s3_bucket_quota_bytes > 0
+          and
+          system_s3_bucket_used_bytes >= system_s3_bucket_quota_bytes
+        )
+        or
+        (
+          system_s3_bucket_quota_objects > 0
+          and
+          system_s3_bucket_objects >= system_s3_bucket_quota_objects
+        )
       for: 5m
       labels:
         severity_level: "4"
@@ -84,7 +104,9 @@
         summary: A system bucket is full and refusing writes.
         description: |
           `{{ $labels.namespace }}/{{ $labels.name }}` has reached its quota, and the backend
-          is refusing writes to it with `QuotaExceeded`.
+          is refusing writes to it with 403 `AccessDenied` — "Bucket size quota is reached"
+          for the bytes, "Object quota is reached" for the object count
+          (`spec.size` / 64 KiB).
 
           Whatever component owns this bucket is losing whatever it was trying to store.
           Raise `spec.size` on the `SystemBucket`, or free space in the bucket.

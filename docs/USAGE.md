@@ -19,6 +19,8 @@ spec:
 
 `size` is how much the bucket asks for. The default (`1Gi`) fits a component that stores a little; ask for more explicitly when you need it. It is also what the system storage sizes itself from — it provisions the sum of every `SystemBucket`'s size — so raising it here is what makes the volumes grow. A write past `size` is refused by the backend.
 
+`size` also caps the number of objects: `size / 64 KiB` (16384 for `1Gi`, shown in `status.quotaObjects`). Every object costs disk space beyond its bytes — about 2 KiB of metadata and rounding to the filesystem block — and the store's volumes allow for that overhead up to this count. A write that would exceed it is refused with 403 `AccessDenied` ("Object quota is reached") even while the bucket holds less than `size`. A component that stores many objects smaller than 64 KiB on average should ask for a `size` that fits their count, not only their bytes.
+
 `size` can be raised at any time and cannot be lowered — the API server refuses it: the volumes a larger size made the store provision cannot shrink, and a quota below what the bucket holds would only break its writes. Whether a raised size has taken effect is the `SizeApplied` condition: `True` once the backend enforces the new quota and the store's volumes have grown to fit; `Growing` while they grow; `CannotGrow` when they cannot (usually a StorageClass without `allowVolumeExpansion`), with what to change in the message. The bucket stays `Ready` meanwhile.
 
 ```console

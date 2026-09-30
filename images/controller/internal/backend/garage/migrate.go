@@ -318,7 +318,7 @@ func (d *Driver) mirrorBuckets(ctx context.Context, source, target *backend.Stor
 				}
 			}
 			if info.Quotas.MaxSize != nil && (created.Quotas.MaxSize == nil || *created.Quotas.MaxSize != *info.Quotas.MaxSize) {
-				if err := to.setBucketQuota(ctx, created.ID, *info.Quotas.MaxSize); err != nil {
+				if err := to.setBucketQuota(ctx, created.ID, *info.Quotas.MaxSize, objectQuotaFor(*info.Quotas.MaxSize)); err != nil {
 					return fmt.Errorf("set the quota of bucket %q in the incoming cluster: %w", alias, err)
 				}
 			}

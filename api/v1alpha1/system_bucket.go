@@ -189,6 +189,16 @@ type SystemBucketStatus struct {
 	// +optional
 	QuotaBytes int64 `json:"quotaBytes,omitempty"`
 
+	// Number of objects the backend lets this bucket hold: `spec.size`
+	// divided by 64 KiB. Each object costs disk space beyond its bytes
+	// (metadata, rounding to the filesystem block), and the store's
+	// volumes allow for that overhead only up to this count. A bucket
+	// that reaches it has its writes refused with 403 `AccessDenied`
+	// ("Object quota is reached") even below `quotaBytes`; raising
+	// `spec.size` raises both.
+	// +optional
+	QuotaObjects int64 `json:"quotaObjects,omitempty"`
+
 	// UsedBytes and Objects are the only place a consumer can see how close it is
 	// to its quota, and the only input an operator has for raising spec.size
 	// before writes start failing.

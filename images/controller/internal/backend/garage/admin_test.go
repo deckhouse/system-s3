@@ -88,7 +88,7 @@ func TestSetBucketQuotaWireShape(t *testing.T) {
 	defer srv.Close()
 
 	c := newAdminClient(srv.URL, "token")
-	if err := c.setBucketQuota(context.Background(), "bucket-id-1", 30<<30); err != nil {
+	if err := c.setBucketQuota(context.Background(), "bucket-id-1", 30<<30, 491520); err != nil {
 		t.Fatalf("setBucketQuota: %v", err)
 	}
 
@@ -105,10 +105,10 @@ func TestSetBucketQuotaWireShape(t *testing.T) {
 	if got := quotas["maxSize"]; got != float64(30<<30) {
 		t.Errorf("maxSize=%v, want %v", got, float64(30<<30))
 	}
-	// Sent, and sent as null: UpdateBucket replaces the quota object, so the
-	// object-count quota has to be stated rather than left to inference.
-	if v, present := quotas["maxObjects"]; !present || v != nil {
-		t.Errorf("maxObjects=%v (present=%v), want an explicit null", v, present)
+	// Both halves are sent: UpdateBucket replaces the quota object, so a half
+	// left out would be a limit removed.
+	if got := quotas["maxObjects"]; got != float64(491520) {
+		t.Errorf("maxObjects=%v, want 491520", got)
 	}
 }
 
@@ -260,5 +260,21 @@ func TestCleanupIncompleteUploadsWireShape(t *testing.T) {
 	secs, ok := body["olderThanSecs"].(float64)
 	if !ok || int64(secs) != 86400 {
 		t.Errorf("olderThanSecs=%v, want 86400 — the API takes seconds", body["olderThanSecs"])
+	}
+}
+
+// TestObjectQuotaFollowsTheSize: 64 KiB per object on average is what the
+// volume headroom allows for; the count follows spec.size, and never reaches
+// zero, which Garage would read as a bucket that cannot hold anything.
+func TestObjectQuotaFollowsTheSize(t *testing.T) {
+	for _, tc := range []struct{ size, want int64 }{
+		{1 << 30, 16384},
+		{30 << 30, 491520},
+		{64 << 10, 1},
+		{1, 1},
+	} {
+		if got := objectQuotaFor(tc.size); got != tc.want {
+			t.Errorf("objectQuotaFor(%d)=%d, want %d", tc.size, got, tc.want)
+		}
 	}
 }

@@ -293,7 +293,8 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 	}
 	observed.usage = usage
 	if bstate.BucketName != "" {
-		monitoring.BucketUsage(bucket.Namespace, bucket.Name, bstate.BucketName, usage.UsedBytes, usage.QuotaBytes)
+		monitoring.BucketUsage(bucket.Namespace, bucket.Name, bstate.BucketName,
+			usage.UsedBytes, usage.QuotaBytes, usage.Objects, usage.QuotaObjects)
 	}
 	if !status.Advance(v1alpha1.SystemBucketConditionBucketReady, bstate.Ready, bstate.Message, err) {
 		return r.finish(ctx, bucket, status, observed, err)
@@ -631,6 +632,7 @@ func (r *SystemBucketReconciler) updateStatus(
 		}
 		if observed.usage != (backend.BucketUsage{}) {
 			latest.Status.QuotaBytes = observed.usage.QuotaBytes
+			latest.Status.QuotaObjects = observed.usage.QuotaObjects
 			latest.Status.UsedBytes = observed.usage.UsedBytes
 			latest.Status.Objects = observed.usage.Objects
 		}

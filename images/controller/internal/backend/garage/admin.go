@@ -364,7 +364,7 @@ type bucketKeyPerm struct {
 }
 
 // bucketQuotas is the quota pair Garage keeps per bucket. Both halves are
-// nullable — null is "no limit" — and this module sets only the size.
+// nullable — null is "no limit"; this module sets both (see objectQuotaFor).
 type bucketQuotas struct {
 	MaxSize    *int64 `json:"maxSize"`
 	MaxObjects *int64 `json:"maxObjects"`
@@ -540,23 +540,24 @@ func (c *adminClient) createBucket(ctx context.Context, alias string) (*bucketIn
 	return &out, nil
 }
 
-// setBucketQuota sets the bucket's size quota in bytes, in place, leaving the
-// object-count quota alone.
+// setBucketQuota sets the bucket's size quota in bytes and its object-count
+// quota, in place.
 //
 // Garage enforces it on write: a PUT that would take the bucket past maxSize is
-// refused with QuotaExceeded. That is the whole point of carrying spec.size into
+// refused with 403 AccessDenied ("Bucket size quota is reached"), and one that
+// would take it past maxObjects likewise ("Object quota is reached"). That is
+// the whole point of carrying spec.size into
 // the backend rather than only into the volume sizing — without it a single
 // consumer could fill the store and every other platform component would start
 // failing writes for a reason none of them could see.
 //
-// maxObjects is deliberately sent as null rather than omitted: UpdateBucket
-// replaces the quota object, so leaving the field out would be read as "no object
-// quota" anyway, and saying it explicitly is how the intent survives a reader.
-func (c *adminClient) setBucketQuota(ctx context.Context, bucketID string, maxSize int64) error {
+// Both are always sent: UpdateBucket replaces the quota object, so a field left
+// out is a limit removed.
+func (c *adminClient) setBucketQuota(ctx context.Context, bucketID string, maxSize, maxObjects int64) error {
 	body := map[string]any{
 		"quotas": map[string]any{
 			"maxSize":    maxSize,
-			"maxObjects": nil,
+			"maxObjects": maxObjects,
 		},
 	}
 	return c.do(ctx, http.MethodPost, "/v2/UpdateBucket?id="+url.QueryEscape(bucketID), body, nil)

@@ -28,6 +28,29 @@ import (
 	"github.com/deckhouse/system-s3/images/controller/internal/backend/s3util"
 )
 
+// minAverageObjectSize is the smallest average object size a bucket's quota
+// allows for: its object-count quota is spec.size divided by this.
+//
+// The byte quota counts the bytes of the objects, and the disk holds more than
+// that for each of them: about 2 KiB of metadata whatever the size, and a block
+// file rounded up to the filesystem's 4 KiB. Measured on the stand on 29.09, one
+// copy of a million 1 KiB objects took 2.1 times their bytes, and of 16 KiB
+// objects 1.5 times; of large objects 1.006. The volumes are sized from the byte
+// quotas plus headroomPercent (capacity.go), so a bucket of small enough objects
+// would fill the disk before its quota. Capping the count at size / 64 KiB bounds
+// that overhead at (2 KiB + 4 KiB) / 64 KiB ≈ 9.5 % of spec.size, inside the
+// headroom; a bucket of smaller objects is refused by its own quota instead of
+// running every other bucket's volume out of space.
+const minAverageObjectSize = 64 << 10
+
+// objectQuotaFor is the object-count quota that goes with a byte quota.
+func objectQuotaFor(size int64) int64 {
+	if n := size / minAverageObjectSize; n > 0 {
+		return n
+	}
+	return 1
+}
+
 // EnsureBucket creates the named bucket in Garage on behalf of owner
 // ("namespace/name" of the SystemBucket), applies size as the bucket's quota and
 // reports what the bucket holds. Idempotent: a bucket this owner already holds is
@@ -77,8 +100,10 @@ func (d *Driver) EnsureBucket(ctx context.Context, store *backend.Store, name, o
 	// piece of the bucket an operator can change on a live resource, and a quota
 	// that only followed spec.size at creation would mean raising it did nothing
 	// until somebody deleted the bucket.
-	if size > 0 && (b.Quotas.MaxSize == nil || *b.Quotas.MaxSize != size) {
-		if err := svc.setBucketQuota(ctx, b.ID, size); err != nil {
+	objects := objectQuotaFor(size)
+	if size > 0 && (b.Quotas.MaxSize == nil || *b.Quotas.MaxSize != size ||
+		b.Quotas.MaxObjects == nil || *b.Quotas.MaxObjects != objects) {
+		if err := svc.setBucketQuota(ctx, b.ID, size, objects); err != nil {
 			return backend.BucketState{}, backend.BucketUsage{}, fmt.Errorf("set the quota of bucket %q: %w", name, err)
 		}
 		// Re-read rather than assume: what the status publishes has to be what the
@@ -93,6 +118,9 @@ func (d *Driver) EnsureBucket(ctx context.Context, store *backend.Store, name, o
 	usage := backend.BucketUsage{UsedBytes: b.Bytes, Objects: b.Objects}
 	if b.Quotas.MaxSize != nil {
 		usage.QuotaBytes = *b.Quotas.MaxSize
+	}
+	if b.Quotas.MaxObjects != nil {
+		usage.QuotaObjects = *b.Quotas.MaxObjects
 	}
 
 	return backend.BucketState{

@@ -68,3 +68,19 @@ func TestBucketSizeAppliedKeepsOnlyTheCurrentReason(t *testing.T) {
 		t.Errorf("%d series after the bucket was forgotten, want none", n)
 	}
 }
+
+// The object half of a bucket's usage is published next to the bytes and
+// forgotten with them: the fullness alerts read both.
+func TestBucketUsagePublishesTheObjectCount(t *testing.T) {
+	BucketUsage("ns", "o", "ns-o", 100, 1000, 7, 16384)
+	if got := testutil.ToFloat64(bucketObjects.WithLabelValues("ns", "o", "ns-o")); got != 7 {
+		t.Errorf("bucket_objects=%v, want 7", got)
+	}
+	if got := testutil.ToFloat64(bucketQuotaObjects.WithLabelValues("ns", "o", "ns-o")); got != 16384 {
+		t.Errorf("bucket_quota_objects=%v, want 16384", got)
+	}
+	ForgetBucket("ns", "o", "ns-o")
+	if n := testutil.CollectAndCount(bucketQuotaObjects); n != 0 {
+		t.Errorf("%d bucket_quota_objects series after the bucket was forgotten", n)
+	}
+}

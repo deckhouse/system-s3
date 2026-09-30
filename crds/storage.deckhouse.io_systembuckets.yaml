@@ -226,6 +226,17 @@ spec:
                   what stops a write is what the backend holds.
                 format: int64
                 type: integer
+              quotaObjects:
+                description: |-
+                  Number of objects the backend lets this bucket hold: `spec.size`
+                  divided by 64 KiB. Each object costs disk space beyond its bytes
+                  (metadata, rounding to the filesystem block), and the store's
+                  volumes allow for that overhead only up to this count. A bucket
+                  that reaches it has its writes refused with 403 `AccessDenied`
+                  ("Object quota is reached") even below `quotaBytes`; raising
+                  `spec.size` raises both.
+                format: int64
+                type: integer
               usedBytes:
                 description: Bytes the bucket currently holds, as the backend counts
                   them.
