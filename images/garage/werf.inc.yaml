@@ -75,17 +75,9 @@ shell:
     - chmod 0755 /garage
 
 ---
-image: {{ .ModuleNamePrefix }}{{ .ImageName }}
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}-runtime-artifact
 from: {{ index $.Images "builder/distroless" }}
-
-import:
-  - image: {{ .ModuleNamePrefix }}{{ .ImageName }}-artifact
-    add: /garage
-    to: /garage
-    before: setup
-git:
-{{- include "image mount points" . }}
-
+final: false
 shell:
   # Garage is a dynamically-linked glibc binary (x86_64-unknown-linux-gnu); the
   # distroless base has no libc, so ship the glibc runtime (loader + core libs)
@@ -98,9 +90,27 @@ shell:
     # work quietly: a rebalance then recreates the PVC, Garage generates a new
     # node ID, and the old one stays in the layout as a dead node.
     #
-    # builder/distroless does not carry it by default: base/vex in this same
+    # base/distroless does not carry it by default: base/vex in this same
     # repository installs coreutils explicitly for the same reason.
-    - pm install libc gnu-gcc-lib coreutils
+    - pm install --rootDir /relocate libc gnu-gcc-lib coreutils
+    - mkdir -p /relocate/etc
+    - if [ -x /relocate/sbin/ldconfig ]; then chroot /relocate /sbin/ldconfig; fi
+
+---
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}
+from: {{ index $.Images "base/distroless" }}
+
+import:
+  - image: {{ .ModuleNamePrefix }}{{ .ImageName }}-runtime-artifact
+    add: /relocate
+    to: /
+    before: setup
+  - image: {{ .ModuleNamePrefix }}{{ .ImageName }}-artifact
+    add: /garage
+    to: /garage
+    before: setup
+git:
+{{- include "image mount points" . }}
 
 imageSpec:
   config:
