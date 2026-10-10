@@ -92,9 +92,11 @@ shell:
     #
     # base/distroless does not carry it by default: base/vex in this same
     # repository installs coreutils explicitly for the same reason.
-    - pm install --rootDir /relocate libc gnu-gcc-lib coreutils
+    - pm install --rootDir /relocate libc gnu-gcc-lib coreutils bash findutils
+    - for d in /relocate/usr/bin /relocate/bin; do if [ -x "$d/bash" ] && [ ! -e "$d/sh" ]; then ln -s bash "$d/sh"; fi; done
     - mkdir -p /relocate/etc
     - if [ -x /relocate/sbin/ldconfig ]; then chroot /relocate /sbin/ldconfig; fi
+    - chroot /relocate sh -c 'command -v find && command -v wc && command -v base64'
 
 ---
 image: {{ .ModuleNamePrefix }}{{ .ImageName }}
