@@ -51,18 +51,17 @@ const SystemBucketCtrlName = "system-bucket"
 
 // SystemBucketReconciler drives every SystemBucket through a short FSM:
 //
-//		StorageReady -> BucketReady -> ConnectionReady -> Ready
+//	BucketReady -> ConnectionReady -> Ready
 //
-//	  - StorageReady reports the module's single data plane (see StoreManager). It
-//	    gates everything else: no bucket can be created while Garage is not
-//	    serving.
-//	  - BucketReady creates the bucket in the backend.
-//	  - ConnectionReady writes the ConfigMap that tells a consumer where the
-//	    storage is, what its bucket is called and how to ask for credentials.
+// Data-plane details belong to Module/system-s3. BucketReady reports only a
+// generic dependency wait while Garage cannot provision this bucket.
+//   - BucketReady creates the bucket in the backend.
+//   - ConnectionReady writes the ConfigMap that tells a consumer where the
+//     storage is, what its bucket is called and how to ask for credentials.
 //
 // No credentials are issued here, and none are stored anywhere: a consumer
 // exchanges its ServiceAccount token at the credentials endpoint for a key the
-// backend stops honouring an hour later (see internal/sts). Who may do that for
+// backend stops honouring at most 30 minutes later (see internal/sts). Who may do that for
 // which bucket is an ordinary RBAC grant, so this controller has no authorization
 // stage and no key lifecycle at all — nothing to rotate, nothing to revoke,
 // nothing to leak.
@@ -98,7 +97,6 @@ type Driver interface {
 }
 
 var systemBucketStageOrder = []string{
-	v1alpha1.SystemBucketConditionStorageReady,
 	v1alpha1.SystemBucketConditionBucketReady,
 	v1alpha1.SystemBucketConditionConnectionReady,
 }
@@ -115,10 +113,10 @@ type bucketObserved struct {
 	// empty field.
 	usage backend.BucketUsage
 
-	// sizeApplied is the SizeApplied condition, when this pass could work it out
+	// sizeUpToDate is the SizeUpToDate condition, when this pass could work it out
 	// (see sizeCondition). It sits outside the stage builder: it is not a stage,
 	// and a bucket whose volumes are still growing is Ready all the same.
-	sizeApplied *metav1.Condition
+	sizeUpToDate *metav1.Condition
 }
 
 // AddSystemBucketReconcilerToManager wires the SystemBucket reconciler.
@@ -223,8 +221,8 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 	// where the credentials are actually issued as well.
 	platform, err := r.platformNamespace(ctx, bucket.Namespace)
 	if err != nil {
-		status.Set(v1alpha1.SystemBucketConditionStorageReady, metav1.ConditionFalse, conditions.ReasonReconcileFailed, err.Error())
-		status.GateAfter(v1alpha1.SystemBucketConditionStorageReady)
+		status.Set(v1alpha1.SystemBucketConditionBucketReady, metav1.ConditionFalse, conditions.ReasonReconcileFailed, err.Error())
+		status.GateAfter(v1alpha1.SystemBucketConditionBucketReady)
 		return r.finish(ctx, bucket, status, observed, err)
 	}
 	if !platform {
@@ -240,10 +238,10 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 		//
 		// The text keeps saying what is actually wrong; only the reason is the one
 		// the phase derivation understands.
-		status.Set(v1alpha1.SystemBucketConditionStorageReady, metav1.ConditionFalse, conditions.ReasonReconcileFailed,
+		status.Set(v1alpha1.SystemBucketConditionBucketReady, metav1.ConditionFalse, conditions.ReasonReconcileFailed,
 			fmt.Sprintf("namespace %q is not a Deckhouse platform namespace (label %s=%s); the system object storage is not available to it",
 				bucket.Namespace, v1alpha1.LabelHeritage, v1alpha1.HeritageDeckhouse))
-		status.GateAfter(v1alpha1.SystemBucketConditionStorageReady)
+		status.GateAfter(v1alpha1.SystemBucketConditionBucketReady)
 		return r.finish(ctx, bucket, status, observed, nil)
 	}
 
@@ -251,7 +249,10 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 	// SystemBucket in a fresh cluster does not wait for the background tick.
 	state, err := r.Store.Ensure(ctx)
 	observed.endpoint = state.Endpoint
-	if !status.Advance(v1alpha1.SystemBucketConditionStorageReady, state.Ready, state.Message, err) {
+	if err != nil || !state.Ready {
+		status.Set(v1alpha1.SystemBucketConditionBucketReady, metav1.ConditionFalse, "WaitingForDependency",
+			"the system storage dependency is not available; see Module/system-s3 conditions")
+		status.GateAfter(v1alpha1.SystemBucketConditionBucketReady)
 		return r.finish(ctx, bucket, status, observed, err)
 	}
 
@@ -299,7 +300,7 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 	if !status.Advance(v1alpha1.SystemBucketConditionBucketReady, bstate.Ready, bstate.Message, err) {
 		return r.finish(ctx, bucket, status, observed, err)
 	}
-	observed.sizeApplied = sizeCondition(size, usage, state.Capacity)
+	observed.sizeUpToDate = sizeCondition(size, usage)
 
 	// Nothing is minted here and nothing secret is written. What the consumer
 	// gets is a ConfigMap saying where the storage is, what its bucket is called
@@ -539,19 +540,19 @@ func (r *SystemBucketReconciler) finish(
 	// including the ones that stop early: a bucket that never gets past its own
 	// failure is exactly the one worth a series.
 	monitoring.BucketReady(bucket.Namespace, bucket.Name, status.Ready())
-	if c := observed.sizeApplied; c != nil {
+	if c := observed.sizeUpToDate; c != nil {
 		// Only when this pass worked it out: a pass that stopped before sizing
 		// the volumes leaves the last answer, as the condition itself does.
-		monitoring.BucketSizeApplied(bucket.Namespace, bucket.Name, c.Reason, c.Status == metav1.ConditionTrue)
+		monitoring.BucketSizeUpToDate(bucket.Namespace, bucket.Name, c.Reason, c.Status == metav1.ConditionTrue)
 	}
 
 	if reconcileErr != nil {
 		return ctrl.Result{}, reconcileErr
 	}
-	if status.Ready() && observed.sizeApplied != nil && observed.sizeApplied.Status != metav1.ConditionTrue {
+	if status.Ready() && observed.sizeUpToDate != nil && observed.sizeUpToDate.Status != metav1.ConditionTrue {
 		// Ready, but a raised size has not taken effect yet. Growing volumes is
 		// minutes, not the resync interval: come back at the plain cadence, so
-		// SizeApplied turns True close to when it does.
+		// SizeUpToDate turns True close to when it does.
 		return ctrl.Result{RequeueAfter: r.Cfg.RequeueInterval}, nil
 	}
 	if status.Ready() {
@@ -612,12 +613,13 @@ func (r *SystemBucketReconciler) updateStatus(
 		if latest.Status == nil {
 			latest.Status = &v1alpha1.SystemBucketStatus{}
 		}
+		latest.Status.Conditions = clearStoreConditions(latest.Status.Conditions)
 
 		for _, cond := range sb.Conditions() {
 			conditions.Set(&latest.Status.Conditions, cond)
 		}
-		if observed.sizeApplied != nil {
-			cond := *observed.sizeApplied
+		if observed.sizeUpToDate != nil {
+			cond := *observed.sizeUpToDate
 			cond.ObservedGeneration = bucket.Generation
 			conditions.Set(&latest.Status.Conditions, cond)
 		}

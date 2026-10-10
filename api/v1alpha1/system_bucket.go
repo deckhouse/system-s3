@@ -56,7 +56,7 @@ import (
 // **No credentials are written anywhere, and none are long-lived.** A
 // consumer exchanges its ServiceAccount token at the credentials
 // endpoint (`S3_STS_ENDPOINT` in the ConfigMap) for a key pair the
-// backend stops honouring an hour later. Who may do that, for which
+// backend stops honouring at most thirty minutes later. Who may do that, for which
 // bucket, is an ordinary Kubernetes RBAC grant on the virtual
 // `systembuckets/read` and `systembuckets/write` subresources — so
 // access is granted and revoked like any other permission, and nothing
@@ -72,7 +72,10 @@ import (
 // +kubebuilder:metadata:labels={"heritage=deckhouse","module=system-s3","backup.deckhouse.io/cluster-config=true"}
 // +kubebuilder:printcolumn:name="Bucket",type="string",JSONPath=`.status.bucketName`
 // +kubebuilder:printcolumn:name="Size",type="string",JSONPath=`.spec.size`
-// +kubebuilder:printcolumn:name="Used",type="integer",JSONPath=`.status.usedBytes`
+// +kubebuilder:printcolumn:name="UsedBytes",type="integer",JSONPath=`.status.usedBytes`
+// +kubebuilder:printcolumn:name="TotalBytes",type="integer",JSONPath=`.status.quotaBytes`
+// +kubebuilder:printcolumn:name="Objects",type="integer",JSONPath=`.status.objects`
+// +kubebuilder:printcolumn:name="ObjectLimit",type="integer",JSONPath=`.status.quotaObjects`,priority=1
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Connection",type="string",JSONPath=`.status.connectionRef.name`
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].status`
@@ -138,9 +141,9 @@ type SystemBucketSpec struct {
 	// The default is deliberately small: a system bucket is a
 	// platform component's working set, not a data lake.
 	//
-	// It can be raised at any time; the `SizeApplied` condition
-	// says when the new value has taken effect — the quota is
-	// enforced and the store's volumes have grown to fit. It
+	// It can be raised at any time; the `SizeUpToDate` condition
+	// says when the backend enforces the new quota. Shared PVC capacity
+	// is reported separately by Module/system-s3.CapacityReady. It
 	// cannot be lowered: the volumes the store provisioned for it
 	// cannot shrink (a PersistentVolumeClaim cannot), and a quota
 	// below what the bucket holds would only make its writes
@@ -178,7 +181,7 @@ type SystemBucketStatus struct {
 	//
 	// A ConfigMap and not a Secret: there is no key pair in it,
 	// because the module issues none. Credentials are minted per
-	// consumer, for an hour, against a ServiceAccount token.
+	// consumer, for at most thirty minutes, against a ServiceAccount token.
 	// +optional
 	// +crd-enricher:unset:properties.name.description
 	ConnectionRef *LocalObjectReference `json:"connectionRef,omitempty"`
@@ -205,18 +208,16 @@ type SystemBucketStatus struct {
 
 	// Bytes the bucket currently holds, as the backend counts them.
 	// +optional
-	UsedBytes int64 `json:"usedBytes,omitempty"`
+	UsedBytes int64 `json:"usedBytes"`
 	// Number of objects in the bucket, as the backend counts them.
 	// +optional
-	Objects int64 `json:"objects,omitempty"`
+	Objects int64 `json:"objects"`
 
-	// Per-stage conditions: `StorageReady`, `BucketReady`,
+	// Per-stage conditions: `BucketReady`,
 	// `ConnectionReady`, and the aggregate `Ready`. Besides them,
-	// `SizeApplied` says whether `spec.size` has taken effect:
-	// `Applied`, or `QuotaPending`, `Growing` (the store's volumes
-	// are being grown) and `CannotGrow` (they cannot be — the
-	// message says why and what to change). It is not part of
-	// `Ready`: a bucket keeps serving while it grows.
+	// `SizeUpToDate` says whether `spec.size` has taken effect:
+	// `Applied` or `QuotaPending`. Shared storage conditions, including PVC
+	// growth and Garage migrations, are published on Module/system-s3.
 	// +optional
 	// +patchMergeKey=type
 	// +patchStrategy=merge
@@ -227,7 +228,7 @@ type SystemBucketStatus struct {
 	// +crd-enricher:raw:items.properties.observedGeneration.description="Value of `metadata.generation` the condition was last set against."
 	// +crd-enricher:raw:items.properties.reason.description="Machine-readable reason for the current status, suitable for\nlog filtering."
 	// +crd-enricher:raw:items.properties.status.description="Current status of the condition."
-	// +crd-enricher:raw:items.properties.type.description="Condition type, for example `Ready`, `StorageReady`,\n`BucketReady`, or `ConnectionReady`."
+	// +crd-enricher:raw:items.properties.type.description="Condition type, for example `Ready`, `BucketReady`,\n`ConnectionReady`, or `SizeUpToDate`."
 	// +crd-enricher:unset:items.description
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
@@ -241,9 +242,7 @@ type LocalObjectReference struct {
 
 // Well-known condition types for SystemBucket.
 const (
-	// SystemBucketConditionStorageReady reports whether the system data plane
-	// is up and serving S3. It gates everything else: no bucket can be created
-	// while it is False.
+	// Deprecated: StorageReady is now published on Module/system-s3 only.
 	SystemBucketConditionStorageReady = "StorageReady"
 
 	// SystemBucketConditionBucketReady reports whether the bucket exists in the
@@ -259,24 +258,21 @@ const (
 	// SystemBucketConditionReady is the aggregate.
 	SystemBucketConditionReady = "Ready"
 
-	// SystemBucketConditionSizeApplied reports whether spec.size has taken
-	// effect: the backend enforces it as the bucket's quota, and the store's
-	// volumes have grown to fit the sum of every bucket's size. It is not part
-	// of Ready — a bucket whose growth is still under way serves as before — and
-	// it is the place to look after raising spec.size.
-	SystemBucketConditionSizeApplied = "SizeApplied"
+	// SystemBucketConditionSizeUpToDate reports whether spec.size has taken
+	// effect as the backend quota. Shared PVC growth is reported separately on
+	// Module/system-s3 as CapacityReady. SizeUpToDate is not part of Ready.
+	SystemBucketConditionSizeUpToDate = "SizeUpToDate"
 )
 
-// Reasons of the SizeApplied condition.
+// Reasons of the SizeUpToDate condition.
 const (
-	// SizeReasonApplied: the quota is spec.size and the volumes fit.
+	// SizeReasonApplied: the quota is spec.size.
 	SizeReasonApplied = "Applied"
 	// SizeReasonQuotaPending: the backend still enforces another quota.
 	SizeReasonQuotaPending = "QuotaPending"
-	// SizeReasonGrowing: the volumes are being grown to fit.
+	// Deprecated: Growing is now a Module CapacityReady reason.
 	SizeReasonGrowing = "Growing"
-	// SizeReasonCannotGrow: the volumes cannot be grown; the message says why
-	// and what to change.
+	// Deprecated: CannotGrow is now a Module CapacityReady reason.
 	SizeReasonCannotGrow = "CannotGrow"
 )
 
@@ -287,11 +283,10 @@ const (
 // "not yet evaluated" forever. Keeping the set in one list is what lets a test
 // hold the controller to it.
 var SystemBucketConditionTypes = []string{
-	SystemBucketConditionStorageReady,
 	SystemBucketConditionBucketReady,
 	SystemBucketConditionConnectionReady,
 	SystemBucketConditionReady,
-	SystemBucketConditionSizeApplied,
+	SystemBucketConditionSizeUpToDate,
 }
 
 // ManagedByLabel and ManagedByValue mark every object this module creates,
@@ -325,7 +320,7 @@ const (
 //
 // There is no key pair here and there is no Secret next to it: access to a
 // bucket is obtained by exchanging a ServiceAccount token at the credentials
-// endpoint, which mints a key that lives for an hour. What a consumer needs to
+// endpoint, which mints a key that lives for at most 30 minutes. What a consumer needs to
 // do that is the endpoint's address, the audience its token has to carry, and
 // the CA that signs the endpoint (the module's own, so nothing in the cluster
 // trusts it by default) — and all three are public.

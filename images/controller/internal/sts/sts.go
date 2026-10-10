@@ -69,13 +69,12 @@ import (
 // is the API server's token, and this endpoint has no business accepting it.
 const TokenAudience = "system-s3-sts"
 
-// The bounds on how long the credentials last. The default is an hour, which is
-// long enough that a consumer is not asking for credentials in a loop and short
-// enough that a revoked RoleBinding takes effect within a working break.
+// Temporary credentials never live longer than thirty minutes. Requests from
+// SDKs that default to an hour are clamped; clients must use the returned expiry.
 const (
-	DefaultDuration = time.Hour
+	DefaultDuration = 30 * time.Minute
 	MinDuration     = 15 * time.Minute
-	MaxDuration     = 12 * time.Hour
+	MaxDuration     = 30 * time.Minute
 )
 
 // Subresources the endpoint authorises against. They are virtual — no API server
@@ -304,14 +303,15 @@ func requestedDuration(raw string) (time.Duration, error) {
 	if err != nil {
 		return 0, fmt.Errorf("DurationSeconds %q is not a number", raw)
 	}
-	d := time.Duration(secs) * time.Second
-	if d < MinDuration {
-		d = MinDuration
+	// Clamp seconds before converting: a very large valid integer must not
+	// overflow time.Duration and turn a maximum request into a minimum one.
+	if secs < int(MinDuration/time.Second) {
+		return MinDuration, nil
 	}
-	if d > MaxDuration {
-		d = MaxDuration
+	if secs > int(MaxDuration/time.Second) {
+		return MaxDuration, nil
 	}
-	return d, nil
+	return time.Duration(secs) * time.Second, nil
 }
 
 // --- the wire format --------------------------------------------------------

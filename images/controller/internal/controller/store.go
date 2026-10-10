@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
@@ -50,10 +51,9 @@ type storeDriver interface {
 
 // StoreManager owns the module's single system data plane.
 //
-// The data plane has no custom resource, so there is no object to reconcile it
-// from and no status to publish it on: the desired state comes from the module
-// settings (a backend.Store built once at startup) and the observed state is
-// cached here for the SystemBucket reconciler to gate on as StorageReady.
+// Desired state comes from module settings (a backend.Store built at startup).
+// Observed conditions are published on Module/system-s3, including when no
+// SystemBucket exists. Bucket reconciles use the cached readiness as a dependency.
 //
 // It converges the data plane from two directions. Every SystemBucket reconcile
 // calls Ensure first, so a consumer arriving before the store is up drives it;
@@ -66,10 +66,11 @@ type storeDriver interface {
 // driver's reconcile is not safe to run twice concurrently (it pins the
 // replication factor, recycles PVCs and rewrites the Garage layout).
 type StoreManager struct {
-	driver   storeDriver
-	store    *backend.Store
-	log      logger.Logger
-	interval time.Duration
+	driver       storeDriver
+	store        *backend.Store
+	log          logger.Logger
+	interval     time.Duration
+	moduleStatus *moduleStatusPublisher
 
 	mu    sync.Mutex
 	state backend.StoreState
@@ -138,13 +139,14 @@ func (m *StoreManager) shouldRepeatNotReady(msg string) bool {
 }
 
 // NewStoreManager builds the manager for the given store description.
-func NewStoreManager(driver *garage.Driver, store *backend.Store, log logger.Logger, interval time.Duration) *StoreManager {
+func NewStoreManager(driver *garage.Driver, store *backend.Store, log logger.Logger, interval time.Duration, c client.Client, reader client.Reader) *StoreManager {
 	return &StoreManager{
-		driver:   driver,
-		store:    store,
-		log:      log.Named("store-manager"),
-		interval: interval,
-		state:    backend.StoreState{Message: "the system object storage has not been reconciled yet"},
+		driver:       driver,
+		store:        store,
+		log:          log.Named("store-manager"),
+		interval:     interval,
+		moduleStatus: &moduleStatusPublisher{client: c, reader: reader},
+		state:        backend.StoreState{Message: "the system object storage has not been reconciled yet"},
 	}
 }
 
@@ -169,6 +171,13 @@ func (m *StoreManager) ensureOnce(ctx context.Context) (backend.StoreState, erro
 	defer m.mu.Unlock()
 
 	state, err := m.driver.EnsureStore(ctx, m.store)
+	if m.moduleStatus != nil {
+		if publishErr := m.moduleStatus.Publish(ctx, state); publishErr != nil {
+			// A reporting failure must not turn functioning S3 into a dependency
+			// failure. The background loop retries publication on the next pass.
+			m.log.Error("unable to publish Module/system-s3 conditions", logger.Err(publishErr))
+		}
+	}
 	if err != nil {
 		// Keep the last good state: the caller reports the error, and a failed
 		// probe is not evidence that the store went away.
@@ -179,11 +188,7 @@ func (m *StoreManager) ensureOnce(ctx context.Context) (backend.StoreState, erro
 		m.log.Info("the system object storage changed readiness", "ready", state.Ready, "message", state.Message)
 		m.lastNotReadyMsg, m.lastNotReadyAt = "", time.Time{}
 	case !state.Ready:
-		// Not a transition, and not normal either. Without this the only channel
-		// carrying this message is the StorageReady condition on a SystemBucket,
-		// and on an installation that has none there is nothing to carry it: no
-		// object, no event, no metric, and no repeated log line. The first consumer
-		// to create a SystemBucket a week later would be the first to see why.
+		// Keep a throttled reminder alongside Module conditions and metrics.
 		if m.shouldRepeatNotReady(state.Message) {
 			m.log.Warn("the system object storage is still not ready", "message", state.Message)
 			m.lastNotReadyMsg, m.lastNotReadyAt = state.Message, m.clock()
@@ -196,10 +201,7 @@ func (m *StoreManager) ensureOnce(ctx context.Context) (backend.StoreState, erro
 
 // publish mirrors the observed state onto the module's metrics.
 //
-// The data plane has no custom resource, so its state reaches the outside only as
-// a condition copied onto every SystemBucket — and a cluster that has none (the
-// normal state of a fresh installation) has nowhere to show that its system
-// storage never came up. These two gauges are that channel.
+// These gauges complement Module conditions and exist independently of buckets.
 //
 // The capacity is also the only consumer of what the driver computes from the
 // assigned layout; before this it was calculated on every pass and dropped.

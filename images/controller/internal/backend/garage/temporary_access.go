@@ -18,6 +18,7 @@ package garage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -41,11 +42,11 @@ const temporaryKeyPrefix = "sts-"
 // Nothing about the credentials endpoint costs a caller anything: it presents a
 // token it already has and gets a key. A client that asks on every request, or
 // one wedged in a retry loop, mints a key per attempt — each one a record in the
-// metadata Garage replicates to every node, each one alive for up to twelve
-// hours whatever the caller does next. The sweeper only removes keys that have
+// metadata Garage replicates to every node, each one alive for up to thirty
+// minutes whatever the caller does next. The sweeper only removes keys that have
 // already expired, so it cannot bound the rate.
 //
-// Fifty is far above any sane use: a client that renews before its hour is out
+// Fifty is far above any sane use: a client that renews before its half-hour is out
 // holds one or two. It is low enough that a loop is stopped in minutes rather
 // than after it has filled the key table.
 const maxLiveTemporaryKeysPerBucket = 50
@@ -122,10 +123,12 @@ func (d *Driver) IssueTemporaryAccess(
 		return TemporaryCredentials{}, fmt.Errorf("create a temporary access key: %w", err)
 	}
 
-	if err := svc.allow(ctx, b.ID, key.AccessKeyID, permissions{Read: true, Write: write}); err != nil {
-		// The key exists and grants nothing; it would expire on its own, but leaving
-		// it is still leaving a record nobody asked for.
-		_ = svc.deleteKey(ctx, key.AccessKeyID)
+	if err := d.grantTemporaryKey(ctx, store, svc, b.ID, key.AccessKeyID, write); err != nil {
+		// A failed RPC may have granted access. Keep any pending ticket until the
+		// key is known gone or expired, even when this best-effort cleanup fails.
+		if !errors.Is(err, errWriteGrantPending) {
+			_ = svc.deleteKey(ctx, key.AccessKeyID)
+		}
 		return TemporaryCredentials{}, fmt.Errorf("grant the temporary key on bucket %q: %w", bucketName, err)
 	}
 
@@ -189,6 +192,12 @@ func (d *Driver) SweepExpiredTemporaryAccess(ctx context.Context, store *backend
 	for _, k := range keys {
 		if !strings.HasPrefix(k.Name, temporaryKeyPrefix) || !k.Expired {
 			continue
+		}
+		// Clear an expired ticket before deleting the backend record that proves
+		// expiration. This is safe even if registration races this sweep: allow
+		// cannot turn an expired key into a live one.
+		if err := d.completeWriteGrant(ctx, store, k.ID); err != nil {
+			return swept, fmt.Errorf("acknowledge expired write grant: %w", err)
 		}
 		if err := svc.deleteKey(ctx, k.ID); err != nil {
 			// One key that will not go must not stop the rest: the next pass tries

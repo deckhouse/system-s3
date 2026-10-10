@@ -17,11 +17,23 @@ limitations under the License.
 package migrator
 
 import (
+	"context"
+	"encoding/pem"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/minio/minio-go/v7"
+
+	"github.com/deckhouse/sds-common-lib/logger"
 )
 
 func TestNeedsCopy(t *testing.T) {
@@ -62,14 +74,10 @@ func TestNeedsCopy(t *testing.T) {
 			want: true,
 		},
 		{
-			// A multipart object is stored under an ETag that is not its MD5, so the
-			// two clusters disagree about it even when the bytes are identical. It is
-			// the copy time that settles it, or every large object would be re-copied
-			// on the delta pass — in the window where writes are refused.
 			name: "a multipart object copied after it was written",
 			src:  src(1<<30, "abc-8", written),
 			dst:  src(1<<30, "def-4", written.Add(2*time.Minute)),
-			want: false,
+			want: true,
 		},
 		{
 			name: "the source was written again after the copy",
@@ -78,13 +86,22 @@ func TestNeedsCopy(t *testing.T) {
 			want: true,
 		},
 		{
-			// Sub-second timestamps survive one hop and not the other: the source
-			// keeps milliseconds, the destination is stored to the second. Comparing
-			// them as they come would copy every object on every pass, forever.
 			name: "the same object, timestamps of different precision",
 			src:  src(10, "abc-2", written.Add(700*time.Millisecond)),
 			dst:  src(10, "def-1", written),
-			want: false,
+			want: true,
+		},
+		{
+			name: "same-length overwrite during upload of the old copy",
+			src:  src(10, "new", written.Add(time.Second)),
+			dst:  src(10, "old", written.Add(time.Minute)),
+			want: true,
+		},
+		{
+			name: "missing checksums do not prove equality",
+			src:  src(10, "", written),
+			dst:  src(10, "", written),
+			want: true,
 		},
 	}
 	for _, tc := range cases {
@@ -126,6 +143,23 @@ func TestConfigFromEnvRefusesHalfAConfiguration(t *testing.T) {
 		}
 	})
 
+	for _, raw := range []string{"", "false", "true", "invalid"} {
+		t.Run("final sync="+raw, func(t *testing.T) {
+			setEnv(t, full)
+			t.Setenv(EnvFinalSync, raw)
+			cfg, err := ConfigFromEnv()
+			if raw == "invalid" {
+				if err == nil {
+					t.Fatal("invalid final-sync mode accepted")
+				}
+				return
+			}
+			if err != nil || cfg.FinalSync != (raw == "true") {
+				t.Fatalf("finalSync=%v err=%v", cfg.FinalSync, err)
+			}
+		})
+	}
+
 	for name := range full {
 		t.Run("without "+name, func(t *testing.T) {
 			partial := map[string]string{}
@@ -147,8 +181,227 @@ func setEnv(t *testing.T, values map[string]string) {
 	for _, name := range []string{
 		EnvSourceEndpoint, EnvSourceAccessKey, EnvSourceSecretKey,
 		EnvTargetEndpoint, EnvTargetAccessKey, EnvTargetSecretKey,
-		EnvBuckets, EnvWorkers, EnvCAFile, EnvServerName,
+		EnvBuckets, EnvWorkers, EnvCAFile, EnvServerName, EnvFinalSync,
 	} {
 		t.Setenv(name, values[name])
+	}
+}
+
+type fakeObjectStore struct {
+	objects   []minio.ObjectInfo
+	stat      map[string]error
+	removeErr error
+	removed   []string
+}
+
+func (f *fakeObjectStore) ListObjects(_ context.Context, _ string, _ minio.ListObjectsOptions) <-chan minio.ObjectInfo {
+	ch := make(chan minio.ObjectInfo, len(f.objects))
+	for _, obj := range f.objects {
+		ch <- obj
+	}
+	close(ch)
+	return ch
+}
+
+func (f *fakeObjectStore) StatObject(_ context.Context, _, key string, _ minio.StatObjectOptions) (minio.ObjectInfo, error) {
+	return minio.ObjectInfo{Key: key}, f.stat[key]
+}
+
+func (f *fakeObjectStore) RemoveObject(_ context.Context, _, key string, _ minio.RemoveObjectOptions) error {
+	if f.removeErr != nil {
+		return f.removeErr
+	}
+	f.removed = append(f.removed, key)
+	return nil
+}
+
+func TestFinalSyncPrunesOnlyDefinitivelyDeletedObjects(t *testing.T) {
+	source := &fakeObjectStore{stat: map[string]error{"deleted": minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 404}}}
+	target := &fakeObjectStore{objects: []minio.ObjectInfo{{Key: "present"}, {Key: "deleted"}}}
+	n, err := pruneDeletedObjects(context.Background(), source, target, "bucket")
+	if err != nil || n != 1 || len(target.removed) != 1 || target.removed[0] != "deleted" {
+		t.Fatalf("deleted=%d removed=%v err=%v", n, target.removed, err)
+	}
+}
+
+func TestFinalSyncFailsClosed(t *testing.T) {
+	for _, cause := range []error{
+		errors.New("connection reset"),
+		minio.ErrorResponse{Code: "AccessDenied", StatusCode: 403},
+		minio.ErrorResponse{Code: "NoSuchBucket", StatusCode: 404},
+		minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 500},
+		minio.ErrorResponse{StatusCode: 404},
+	} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			source := &fakeObjectStore{stat: map[string]error{"key": cause}}
+			target := &fakeObjectStore{objects: []minio.ObjectInfo{{Key: "key"}}}
+			if _, err := pruneDeletedObjects(context.Background(), source, target, "bucket"); err == nil {
+				t.Fatal("uncertain source accepted")
+			}
+			if len(target.removed) != 0 {
+				t.Fatal("destination deleted despite uncertain source")
+			}
+		})
+	}
+}
+
+func TestFinalSyncReportsListingAndDeletionErrors(t *testing.T) {
+	cause := errors.New("backend unavailable")
+	for _, target := range []*fakeObjectStore{
+		{objects: []minio.ObjectInfo{{Err: cause}}},
+		{objects: []minio.ObjectInfo{{Key: "key"}}, removeErr: cause},
+	} {
+		source := &fakeObjectStore{stat: map[string]error{"key": minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 404}}}
+		if _, err := pruneDeletedObjects(context.Background(), source, target, "bucket"); !errors.Is(err, cause) {
+			t.Fatalf("err=%v, want underlying failure", err)
+		}
+	}
+}
+
+func TestFinalSyncCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	source := &fakeObjectStore{stat: map[string]error{"key": minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 404}}}
+	target := &fakeObjectStore{objects: []minio.ObjectInfo{{Key: "key"}}}
+	if _, err := pruneDeletedObjects(ctx, source, target, "bucket"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v, want cancellation", err)
+	}
+	if len(target.removed) != 0 {
+		t.Fatal("cancelled pass deleted objects")
+	}
+}
+
+// Exercise Run, not only pruning: copying first used to exhaust the object's
+// quota before the stale destination key could be removed.
+func TestRunFinalSyncFreesQuotaBeforeCopyingReplacements(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		final, sameLength bool
+	}{
+		{"bulk quota", false, false}, {"final quota", true, false}, {"same-length newer stale destination", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			final := tc.final
+			var removed, copied atomic.Bool
+			list := func(w http.ResponseWriter, key string) {
+				w.Header().Set("Content-Type", "application/xml")
+				fmt.Fprintf(w, `<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>bucket</Name><IsTruncated>false</IsTruncated><Contents><Key>%s</Key><LastModified>2026-10-07T00:00:00Z</LastModified><ETag>22af645d1859cb5ca6da0c484f1f37ea</ETag><Size>3</Size></Contents></ListBucketResult>`, key)
+			}
+			location := func(w http.ResponseWriter, r *http.Request) bool {
+				if r.URL.Query().Has("location") {
+					fmt.Fprint(w, `<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`)
+					return true
+				}
+				return false
+			}
+			source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if location(w, r) {
+					return
+				}
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/bucket/":
+					list(w, "new")
+				case r.Method == http.MethodHead && r.URL.Path == "/bucket/old":
+					w.WriteHeader(http.StatusNotFound)
+				case (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path == "/bucket/new":
+					w.Header().Set("Content-Length", "3")
+					w.Header().Set("Last-Modified", "Wed, 07 Oct 2026 00:00:00 GMT")
+					w.Header().Set("ETag", `"22af645d1859cb5ca6da0c484f1f37ea"`)
+					if r.Method == http.MethodGet {
+						fmt.Fprint(w, "new")
+					}
+				default:
+					http.Error(w, "unexpected source request", http.StatusBadRequest)
+				}
+			}))
+			defer source.Close()
+			target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if location(w, r) {
+					return
+				}
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/bucket/":
+					if tc.sameLength {
+						list(w, "new")
+					} else {
+						list(w, "old")
+					}
+				case r.Method == http.MethodHead && r.URL.Path == "/bucket/new":
+					if tc.sameLength {
+						w.Header().Set("Content-Length", "3")
+						w.Header().Set("ETag", `"149603e6c03516362a8da23f624db945"`)
+						w.Header().Set("Last-Modified", "Wed, 07 Oct 2026 01:00:00 GMT")
+						return
+					}
+					w.WriteHeader(http.StatusNotFound)
+				case r.Method == http.MethodDelete && r.URL.Path == "/bucket/old":
+					removed.Store(true)
+					w.WriteHeader(http.StatusNoContent)
+				case r.Method == http.MethodPut && r.URL.Path == "/bucket/new":
+					if !removed.Load() && !tc.sameLength {
+						w.WriteHeader(http.StatusForbidden)
+						fmt.Fprint(w, `<Error><Code>QuotaExceeded</Code><Message>object quota reached</Message></Error>`)
+						return
+					}
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					if !strings.Contains(string(body), "new") || strings.Contains(string(body), "old") {
+						http.Error(w, "wrong version copied", http.StatusBadRequest)
+						return
+					}
+					copied.Store(true)
+					w.Header().Set("ETag", `"22af645d1859cb5ca6da0c484f1f37ea"`)
+				default:
+					http.Error(w, "unexpected target request", http.StatusBadRequest)
+				}
+			}))
+			defer target.Close()
+			caFile := filepath.Join(t.TempDir(), "ca.pem")
+			if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: source.Certificate().Raw}), 0600); err != nil {
+				t.Fatal(err)
+			}
+			log, err := logger.NewLoggerToWriter(io.Discard, logger.ErrorLevel)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			err = Run(ctx, Config{
+				Source:  Endpoint{Endpoint: strings.TrimPrefix(source.URL, "https://"), AccessKey: "source", SecretKey: "source-secret"},
+				Target:  Endpoint{Endpoint: strings.TrimPrefix(target.URL, "https://"), AccessKey: "target", SecretKey: "target-secret"},
+				Buckets: []string{"bucket"}, Workers: 1, FinalSync: final, CAFile: caFile, ServerName: "example.com",
+			}, log)
+			if final {
+				if err != nil || removed.Load() == tc.sameLength || !copied.Load() {
+					t.Fatalf("final pass: removed=%v copied=%v err=%v", removed.Load(), copied.Load(), err)
+				}
+			} else if !errors.Is(err, ErrQuotaExceeded) || removed.Load() || copied.Load() {
+				t.Fatalf("bulk pass pruned or bypassed quota: removed=%v copied=%v err=%v", removed.Load(), copied.Load(), err)
+			}
+		})
+	}
+}
+
+func TestQuotaClassificationDoesNotTreatAuthenticationAsQuota(t *testing.T) {
+	for _, tc := range []struct {
+		code, message string
+		want          bool
+	}{
+		{"QuotaExceeded", "quota", true},
+		{"InsufficientStorage", "quota", true},
+		{"AccessDenied", "Bucket size quota is reached", true},
+		{"AccessDenied", "Object quota is reached", true},
+		{"AccessDenied", "Access denied", false},
+		{"SignatureDoesNotMatch", "Bucket size quota is reached", false},
+		{"InternalError", "Object quota is reached", false},
+	} {
+		t.Run(tc.code+tc.message, func(t *testing.T) {
+			if got := quotaExceeded(minio.ErrorResponse{Code: tc.code, Message: tc.message}); got != tc.want {
+				t.Fatalf("quota=%v want %v", got, tc.want)
+			}
+		})
 	}
 }

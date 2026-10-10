@@ -188,17 +188,16 @@ func TestBuildSystemStatefulSet(t *testing.T) {
 
 	assertNoNodeSelection(t, spec)
 
-	// Soft (preferred, not required) anti-affinity so all replicas still run on a
-	// single node.
+	// HA replicas must run on separate eligible hosts, like platform components.
 	if spec.Affinity == nil || spec.Affinity.PodAntiAffinity == nil {
 		t.Fatalf("expected pod anti-affinity")
 	}
-	if len(spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) != 0 {
-		t.Errorf("anti-affinity must be soft, found required terms (would block single-master scheduling)")
+	if len(spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution) != 0 {
+		t.Errorf("anti-affinity must be required, not a preference")
 	}
-	pref := spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution
-	if len(pref) != 1 || pref[0].PodAffinityTerm.TopologyKey != hostnameTopologyKey {
-		t.Errorf("preferred anti-affinity term=%+v, want topologyKey %q", pref, hostnameTopologyKey)
+	required := spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	if len(required) != 1 || required[0].TopologyKey != hostnameTopologyKey {
+		t.Errorf("required anti-affinity term=%+v, want topologyKey %q", required, hostnameTopologyKey)
 	}
 
 	// Stable node identity: an optional identity-Secret volume plus a
@@ -271,6 +270,9 @@ func TestBuildNonHASystemStatefulSet(t *testing.T) {
 	// replica from the configured StorageClass.
 	spec := sts.Spec.Template.Spec
 	assertNoNodeSelection(t, spec)
+	if spec.Affinity != nil && spec.Affinity.PodAntiAffinity != nil {
+		t.Error("non-HA store must not require pod anti-affinity")
+	}
 	if len(sts.Spec.VolumeClaimTemplates) != 1 ||
 		sts.Spec.VolumeClaimTemplates[0].Spec.StorageClassName == nil ||
 		*sts.Spec.VolumeClaimTemplates[0].Spec.StorageClassName != localSC {
@@ -462,9 +464,9 @@ func TestStatefulSetSelectorStaysWideAndPodsCarryThePlane(t *testing.T) {
 	if got := sts.Spec.VolumeClaimTemplates[0].Labels[incarnationLabel]; got != "2" {
 		t.Errorf("claim template label %s=%q, want 2", incarnationLabel, got)
 	}
-	term := sts.Spec.Template.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution[0]
-	if got := term.PodAffinityTerm.LabelSelector.MatchLabels[incarnationLabel]; got != "2" {
-		t.Errorf("the anti-affinity spreads against the other plane too: %v", term.PodAffinityTerm.LabelSelector.MatchLabels)
+	term := sts.Spec.Template.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0]
+	if got := term.LabelSelector.MatchLabels[incarnationLabel]; got != "2" {
+		t.Errorf("the anti-affinity spreads against the other plane too: %v", term.LabelSelector.MatchLabels)
 	}
 }
 
@@ -475,8 +477,8 @@ func TestStatefulSetSelectorStaysWideAndPodsCarryThePlane(t *testing.T) {
 // done. A rule that selected on the store alone would have the second plane read
 // every master as taken — it would pile onto one node, and with a hard rule it
 // would not schedule at all, so the module could never replace a data plane. The
-// counterpart is that the rules stay soft: a one-master cluster runs three
-// replicas on that master rather than leaving two Pending.
+// HA replicas require different hosts, but the incoming incarnation is not
+// blocked by the serving plane's pods on those same hosts.
 func TestEachPlaneSpreadsOnlyAgainstItself(t *testing.T) {
 	store := systemStore()
 	store.Incarnation = 2
@@ -484,13 +486,13 @@ func TestEachPlaneSpreadsOnlyAgainstItself(t *testing.T) {
 	spec := sts.Spec.Template.Spec
 
 	anti := spec.Affinity.PodAntiAffinity
-	if anti == nil || len(anti.PreferredDuringSchedulingIgnoredDuringExecution) != 1 {
-		t.Fatalf("pod anti-affinity=%+v, want one preferred term", anti)
+	if anti == nil || len(anti.RequiredDuringSchedulingIgnoredDuringExecution) != 1 {
+		t.Fatalf("pod anti-affinity=%+v, want one required term", anti)
 	}
-	if len(anti.RequiredDuringSchedulingIgnoredDuringExecution) != 0 {
-		t.Errorf("the anti-affinity is required: a cluster with one master could not run the store at all")
+	if len(anti.PreferredDuringSchedulingIgnoredDuringExecution) != 0 {
+		t.Errorf("preferred anti-affinity must not replace the required separation")
 	}
-	if got := anti.PreferredDuringSchedulingIgnoredDuringExecution[0].PodAffinityTerm.TopologyKey; got != hostnameTopologyKey {
+	if got := anti.RequiredDuringSchedulingIgnoredDuringExecution[0].TopologyKey; got != hostnameTopologyKey {
 		t.Errorf("anti-affinity topology key=%q, want %q", got, hostnameTopologyKey)
 	}
 

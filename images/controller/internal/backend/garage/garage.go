@@ -35,6 +35,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sync"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -132,6 +133,21 @@ func New(c client.Client, apiReader client.Reader, restConfig *rest.Config, log 
 // there are a dozen of them.
 func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state backend.StoreState, err error) {
 	state = backend.StoreState{Version: garageVersion}
+	for _, kind := range backend.StoreConditionTypes {
+		state.SetCondition(kind, metav1.ConditionUnknown, "NotEvaluated", "not evaluated in this reconciliation")
+	}
+	stage := backend.StorageReady
+	defer func() {
+		if err != nil {
+			state.SetCondition(stage, metav1.ConditionFalse, "ReconcileFailed", err.Error())
+			return
+		}
+		for _, c := range state.Conditions {
+			if c.Type == backend.StorageReady && c.Status == metav1.ConditionUnknown {
+				storageCondition(&state, state.Ready, state.Message)
+			}
+		}
+	}()
 
 	if d.image == "" {
 		state.Message = "GARAGE_IMAGE is not configured on the controller"
@@ -156,7 +172,7 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 	// behind their back.
 	//
 	// Nothing is created in this state — not even the Secret above is followed by
-	// a workload — and the reason is on every SystemBucket rather than in the log
+	// a workload — and the reason is on Module/system-s3 rather than in the log
 	// alone.
 	if store.StorageClass == "" {
 		state.Message = "no StorageClass is configured for the system object storage: " +
@@ -170,17 +186,21 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 	// hours a migration takes; while a migration runs there are two, and this pass
 	// belongs to the one the endpoint points at — the incoming plane is built by
 	// the migration itself (see reconcileMigration), on its own terms.
+	stage = backend.MigrationReady
 	migration, err := d.loadMigrationState(ctx, store)
 	if err != nil {
 		return state, fmt.Errorf("read the migration state: %w", err)
 	}
+	state.MigrationPhase, state.MigrationStartedAt = reportedMigration(migration)
 	store = planeOf(store, migration.serving, store.HighAvailability, store.StorageClass)
+	stage = backend.StorageReady
 
 	if err := d.ensureSecret(ctx, store); err != nil {
 		return state, fmt.Errorf("ensure secret: %w", err)
 	}
 	// The RPC/admin secret exists from here on, so the state can name it.
 	state.AdminSecretName = secretName(store)
+	stage = backend.ReplicationReady
 	pinned, err := d.pinnedState(ctx, store)
 	if err != nil {
 		return state, fmt.Errorf("read pinned store state: %w", err)
@@ -197,6 +217,7 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 	// What the configured class is compared against is the class the claims were
 	// actually created with, which is the only record of it — the module keeps no
 	// pinned copy of the class the way it pins the replication factor.
+	stage = backend.MigrationReady
 	boundClass, err := d.boundStorageClass(ctx, store)
 	if err != nil {
 		return state, fmt.Errorf("read the StorageClass of the data plane volumes: %w", err)
@@ -224,16 +245,29 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 	// exit, and suppressed on the one path that has already reported it in more
 	// detail.
 	migrationAdvanced := false
-	if plan := migrationTrigger(desired, store, boundClass); plan.reason != "" || migration.migrating() {
+	plan := migrationTrigger(desired, store, boundClass)
+	migrationKind := migrationConditions(&state, migration, plan, "")
+	if migrationKind == backend.MigrationReady && desired.HighAvailability != store.HighAvailability {
+		state.SetCondition(backend.ReplicationReady, metav1.ConditionFalse, "WaitingForMigration", "the replica count will change with the StorageClass migration")
+	}
+	if plan.reason != "" || migration.migrating() {
 		note := pendingMigrationNote(plan, migration)
 		defer func() {
 			if err != nil || migrationAdvanced {
 				return // the caller reports the error; the phase reported itself
 			}
+			// Preserve the storage observation before appending an operation note
+			// for the internal log message.
+			for _, c := range state.Conditions {
+				if c.Type == backend.StorageReady && c.Status == metav1.ConditionUnknown {
+					storageCondition(&state, state.Ready, state.Message)
+				}
+			}
 			state.Message = appendNote(state.Message, note)
 		}()
 	}
 
+	stage = backend.StorageReady
 	rf := pinned.rf
 	cfgHash := configHash(renderConfig(rf))
 	if err := d.apply(ctx, buildConfigMap(store, d.namespace, rf)); err != nil {
@@ -254,17 +288,34 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 
 	state.Endpoint = s3Endpoint(store, d.namespace, d.clusterDomain)
 	state.Region = "garage"
+	if migration.phase == phaseCutover && (migration.writeFence == writeFenceStopping ||
+		(!migration.frozenAt.IsZero() && time.Since(migration.frozenAt) > cutoverDeadline)) {
+		stage = backend.MigrationReady
+		next, msg, err := d.advanceCutoverOffline(ctx, store, migration)
+		if err != nil {
+			return state, err
+		}
+		migrationAdvanced = true
+		state.Message = msg
+		state.MigrationPhase, state.MigrationStartedAt = reportedMigration(next)
+		state.SetCondition(backend.MigrationReady, metav1.ConditionFalse, string(next.phase), msg)
+		storageCondition(&state, false, "Garage cutover is stopping or recovering; see MigrationReady")
+		return state, nil
+	}
 
 	// The two phases of an in-place change of the replica count in which the
 	// data plane does not run. Everything below needs its pods, so they are
 	// advanced here and the pass ends with what they say (see resize.go).
 	if migration.phase == phaseResizeStop || migration.phase == phaseResizePurge {
+		stage = backend.ReplicationReady
 		msg, err := d.advanceResizeOffline(ctx, store, migration)
 		if err != nil {
 			return state, err
 		}
 		migrationAdvanced = true
 		state.Message = msg
+		state.SetCondition(backend.ReplicationReady, metav1.ConditionFalse, string(migration.phase), msg)
+		storageCondition(&state, false, "Garage is stopped during the in-place replica-count change")
 		state.MigrationPhase, state.MigrationStartedAt = reportedMigration(migration)
 		return state, nil
 	}
@@ -274,12 +325,13 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 	// rejoins with its stable node ID instead of generating a new one (which
 	// strands the old ID as a dead node and churns the layout beyond recovery on
 	// consolidate).
+	stage = backend.PlacementReady
 	identitiesMissing, err := d.ensureNodeIdentities(ctx, store)
 	if err != nil {
 		return state, fmt.Errorf("ensure node identities: %w", err)
 	}
 	// Converge replica placement onto the target topology as the set of eligible
-	// nodes changes (spread across three, consolidate onto one). One health-gated
+	// nodes changes (one HA replica per node). One health-gated
 	// PVC recycle per reconcile; when it acts, report progress and requeue so
 	// the move settles before the next one.
 	acted, placementMsg, err := d.reconcilePlacement(ctx, store)
@@ -287,8 +339,16 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 		return state, fmt.Errorf("reconcile placement: %w", err)
 	}
 	if acted {
+		state.SetCondition(backend.PlacementReady, metav1.ConditionFalse, "Rebalancing", placementMsg)
 		state.Message = placementMsg
+		storageCondition(&state, false, "Garage readiness will be checked after the placement move")
 		return state, nil
+	}
+	state.SetCondition(backend.PlacementReady, metav1.ConditionTrue, "Placed", "replica placement matches the eligible nodes")
+	if placementMsg != "" {
+		state.SetCondition(backend.PlacementReady, metav1.ConditionFalse, "PlacementBlocked", placementMsg)
+	} else if identitiesMissing > 0 {
+		state.SetCondition(backend.PlacementReady, metav1.ConditionFalse, "IdentityNotCaptured", fmt.Sprintf("node identity not captured for %d replica(s); a placement move would give them new node IDs", identitiesMissing))
 	}
 	// Not acted, but a message: placement gave up after repeating the same move
 	// (see maxPlacementAttempts). Reconciliation continues — the store serves with
@@ -300,6 +360,7 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 
 	// What the store is for decides how big it is: the sum of what its consumers
 	// asked for, plus the room a sum of quotas does not account for.
+	stage = backend.CapacityReady
 	sumBytes, err := d.desiredBucketBytes(ctx)
 	if err != nil {
 		return state, fmt.Errorf("sum the SystemBucket sizes: %w", err)
@@ -311,6 +372,7 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 	// same size.
 	_, capacity := d.ensureVolumeCapacity(ctx, store, volumeSize)
 	state.Capacity = capacity
+	capacityCondition(&state)
 	if growMsg := capacity.Problem; growMsg != "" {
 		d.log.Error("the data plane volumes could not be grown", "store", store.Name, "reason", growMsg)
 		defer func() {
@@ -321,6 +383,7 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 		}()
 	}
 
+	stage = backend.StorageReady
 	workloadReady, workloadMsg, err := d.ensureWorkload(ctx, store, cfgHash, volumeSize)
 	if err != nil {
 		return state, err
@@ -344,11 +407,13 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 	}
 	if !workloadReady {
 		state.Message = appendNote(workloadMsg, mesh.msg)
+		storageCondition(&state, false, state.Message)
 		return state, nil
 	}
 	state.TotalCapacity = mesh.total
 	state.Ready = mesh.ready
 	state.Message = mesh.msg
+	storageCondition(&state, state.Ready, mesh.msg)
 
 	// Said on the object, not only in the log. A replica with no stored identity
 	// works fine until the next placement move, and then rejoins under a new node
@@ -370,13 +435,24 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 	// state to be moved away from — every return above this point is either an
 	// error or a cluster that is still converging, and both are answers of the
 	// form "not now".
-	migrationMsg, err := d.advanceMigration(ctx, desired, store, boundClass, migration, sumBytes)
+	if migrationKind != "" {
+		stage = migrationKind
+	} else {
+		stage = backend.MigrationReady
+	}
+	nextMigration, migrationMsg, err := d.reconcileMigration(ctx, desired, store, boundClass, migration, sumBytes)
 	if err != nil {
-		return state, err
+		return state, fmt.Errorf("advance the migration: %w", err)
 	}
 	migrationAdvanced = true
 	state.Message = appendNote(state.Message, migrationMsg)
-	state.MigrationPhase, state.MigrationStartedAt = reportedMigration(migration)
+	if nextMigration.phase == phaseConverged && migration.phase != phaseConverged {
+		plan = migrationPlan{}
+	}
+	migrationConditions(&state, nextMigration, plan, migrationMsg)
+	if nextMigration.migrating() && desired.HighAvailability != store.HighAvailability {
+		state.SetCondition(backend.ReplicationReady, metav1.ConditionFalse, "WaitingForMigration", "the replica count will change with the StorageClass migration")
+	}
 	return state, nil
 }
 

@@ -3,6 +3,27 @@ title: "Usage"
 weight: 40
 ---
 
+## Contract for module developers
+
+1. Declare a `SystemBucket` in your module's namespace labelled `heritage: deckhouse`. `spec.size` is a bucket quota, not a dedicated PVC. Deleting the CR destroys its objects: handle this intentionally in your module's lifecycle.
+2. Wait for `Ready=True` with `observedGeneration` matching `metadata.generation`, then read the ConfigMap in `status.connectionRef`. Do not hard-code endpoints or assume the ConfigMap exists immediately.
+3. Grant your consumer ServiceAccount `systembuckets/read` and, for writers, `systembuckets/write`, restricted by `resourceNames`. Owning a bucket CR does not grant the consumer access; STS checks TokenReview and SubjectAccessReview.
+4. Mount a projected token with audience `system-s3-sts`, both CAs, and WebIdentity settings from the ConfigMap. Re-read the token file on refresh because kubelet rotates it. Its one-hour example lifetime is independent of the S3 key's maximum thirty minutes.
+5. Use a caching SDK credentials provider and the response's actual `Expiration`. Do not request a key per S3 operation, store it in a Secret, or log the token/STS response. SDK requests for an hour are clamped to thirty minutes. Test refresh with one process running longer than thirty minutes.
+6. Handle outages during HA changes and early key invalidation after StorageClass cutover. Expiry-based refresh alone does not establish recovery: test reacquisition in your SDK. Interrupted multipart needs retry or abort. A `403` may also indicate quota exhaustion or missing permissions; endlessly issuing new keys is not a general solution.
+
+### Usage and quota reporting
+
+`kubectl get sb` displays `Objects`, `UsedBytes`, and `TotalBytes`; `-o wide` also displays `ObjectLimit`. `TotalBytes` is this bucket's applied quota, not Garage's physical capacity; `Size` is its desired quota. Empty buckets explicitly report `objects: 0` and `usedBytes: 0`.
+
+```shell
+kubectl -n d8-monitoring get sb loki -o wide
+kubectl -n d8-monitoring get sb loki -o json |
+  jq '.status | {objects,usedBytes,quotaBytes,quotaObjects,conditions}'
+```
+
+Counters update during reconciliation, not in real time, and may retain the last successful reading while the backend is unavailable. Raise `spec.size` and wait for `SizeUpToDate` for that generation; shrinking is prohibited. Test byte and object-count quotas separately.
+
 ## Asking for a bucket
 
 A Deckhouse component creates a `SystemBucket` in its own namespace:
@@ -21,10 +42,10 @@ spec:
 
 `size` also caps the number of objects: `size / 64 KiB` (16384 for `1Gi`, shown in `status.quotaObjects`). Every object costs disk space beyond its bytes — about 2 KiB of metadata and rounding to the filesystem block — and the store's volumes allow for that overhead up to this count. A write that would exceed it is refused with 403 `AccessDenied` ("Object quota is reached") even while the bucket holds less than `size`. A component that stores many objects smaller than 64 KiB on average should ask for a `size` that fits their count, not only their bytes.
 
-`size` can be raised at any time and cannot be lowered — the API server refuses it: the volumes a larger size made the store provision cannot shrink, and a quota below what the bucket holds would only break its writes. Whether a raised size has taken effect is the `SizeApplied` condition: `True` once the backend enforces the new quota and the store's volumes have grown to fit; `Growing` while they grow; `CannotGrow` when they cannot (usually a StorageClass without `allowVolumeExpansion`), with what to change in the message. The bucket stays `Ready` meanwhile.
+`size` can be raised at any time and cannot be lowered — the API server refuses it. `SystemBucket.SizeUpToDate=True` means the backend enforces **this bucket's** quota; `QuotaPending` means it has not applied it yet. This does not guarantee sufficient physical capacity. Shared PVC growth and CSI failures are reported only in `Module/system-s3.CapacityReady`: `Growing` while volumes grow, `CannotGrow` when expansion is impossible or fails. When physical capacity is exhausted, writes may fail before the quota is reached: check both resources. The bucket may remain `Ready` during PVC expansion.
 
-```console
-$ kubectl -n d8-monitoring get sb loki -o jsonpath='{.status.conditions[?(@.type=="SizeApplied")]}'
+```shell
+kubectl -n d8-monitoring get sb loki -o jsonpath='{.status.conditions[?(@.type=="SizeUpToDate")]}'
 ```
 
 The controller creates the bucket in the system storage and writes a `ConfigMap` next to the resource with everything needed to reach it:
@@ -50,7 +71,7 @@ loki   d8-monitoring-loki   Ready   loki-s3-connection   True    30s
 long-lived key for a bucket — not for its owner either. Every consumer, including
 the component that asked for the bucket, gets credentials the same way: it
 presents its ServiceAccount token at the credentials endpoint and receives a key
-pair the backend stops honouring an hour later.
+pair the backend stops honouring at most thirty minutes later.
 
 `envFrom` this ConfigMap for the addresses, mount the token, and mount the two
 CAs into a directory of their own:
@@ -124,7 +145,7 @@ creds, _ := credentials.NewSTSWebIdentity(
 ```
 
 The endpoint returns a key pair that Garage stops honouring at the expiry in the
-response (an hour by default, `DurationSeconds` between 15 minutes and 12 hours).
+response (30 minutes by default, `DurationSeconds` between 15 and 30 minutes; larger SDK requests are clamped to 30 minutes).
 There is no session token: the credentials are a real key pair, and S3 requests
 signed with them need nothing else.
 
@@ -187,7 +208,7 @@ deleting the `RoleBinding`: what was handed out expires on its own, and the next
 request is refused.
 
 **Reuse the key you are given until it expires.** Every request mints a new key,
-and that key stays alive for the rest of its lifetime (an hour by default)
+and that key stays alive for the rest of its lifetime (30 minutes by default)
 whether the client still wants it or not, in metadata Garage replicates to every
 node. One bucket is therefore allowed at most 50 unexpired temporary keys at a
 time: a client that asks for credentials on every request reaches that limit and
@@ -229,20 +250,34 @@ The resource keeps a finalizer until the bucket is gone from the backend, so a f
 
 ## Status and troubleshooting
 
-`status.conditions` reports the stages in order:
+`SystemBucket.status.conditions` reports the stages in order:
 
 | Condition | Meaning when `False` |
 |-----------|----------------------|
-| `StorageReady` | The Garage data plane is not serving yet. The message says what it is waiting for (pods rolling out, layout converging). Nothing else can proceed. |
-| `BucketReady` | The bucket could not be created in the backend. |
+| `BucketReady` | The bucket could not be created, or its dependency is unavailable (`WaitingForDependency`; details in `Module/system-s3`). |
 | `ConnectionReady` | The `ConfigMap` with the connection parameters could not be written. |
 | `Ready` | Aggregate of the above. |
 
-A `SystemBucket` in a namespace without the `heritage: deckhouse` label is rejected by the webhook. If one exists anyway (created while the webhook was down), the controller refuses to provision it and says so with `StorageReady=False`, reason `NamespaceNotPlatform`.
+A `SystemBucket` in a namespace without the `heritage: deckhouse` label is rejected by the webhook. If admission was bypassed and the resource exists anyway, the controller refuses to provision it with `BucketReady=False`, reason `ReconcileFailed`, and a message explaining the namespace label. An unavailable webhook also rejects requests because its `failurePolicy` is `Fail`.
+
+Shared Garage state is published only in `Module/system-s3.status.conditions`, including before the first bucket exists. The system-s3 controller does not change Deckhouse conditions (`IsReady`, enablement conditions, etc.) or `Module.status.phase`.
+
+| Condition | Meaning |
+|-----------|---------|
+| `StorageReady` | Bootstrap, Garage health, quorum and layout. |
+| `PlacementReady` | Replica placement, eligible-node shortages, relocation and saved node identities. |
+| `CapacityReady` | Shared PVC capacity, expansion and CSI failures. |
+| `ReplicationReady` | HA mode convergence: `ResizeFreeze`, `ResizeStop`, `ResizePurge`, `ResizeSync`. |
+| `MigrationReady` | StorageClass migration: `Provisioning`, `Copying`, `Verifying`, `Cutover`, `Draining`, `Decommission`. |
+
+`False` can mean a normal operation in progress, not only a failure; inspect `reason` and `message`. `Unknown/NotEvaluated` means this reconciliation did not reach the check. Completed operations return to `True`. Conditions show current state, not an event history. On upgrade the controller removes legacy Garage conditions from buckets; replace waits for `SystemBucket.StorageReady` with `Module.StorageReady`.
+
+The quota condition was renamed from `SizeApplied` to `SizeUpToDate`. Reconciliation removes the old name, including when Garage is unavailable. Update consumer JSONPath expressions and readiness checks. The Prometheus metric name `system_s3_bucket_size_applied` is retained for compatibility.
 
 To inspect the storage itself:
 
 ```shell
+kubectl get module system-s3 -o json | jq '.status.conditions'
 kubectl -n d8-system-s3 get pods,sts,pvc
 kubectl -n d8-system-s3 logs deploy/controller -c controller
 ```

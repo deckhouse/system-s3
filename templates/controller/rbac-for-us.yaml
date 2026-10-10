@@ -72,6 +72,8 @@
     (dict "apiGroups" (list "coordination.k8s.io") "resources" (list "leases") "verbs" (list "get" "list" "watch" "create" "update" "patch" "delete"))
   )
   "clusterRoleRules" (list
+    (dict "apiGroups" (list "deckhouse.io") "resources" (list "modules") "resourceNames" (list "system-s3") "verbs" (list "get"))
+    (dict "apiGroups" (list "deckhouse.io") "resources" (list "modules/status") "resourceNames" (list "system-s3") "verbs" (list "patch"))
     (dict "apiGroups" (list "storage.deckhouse.io") "resources" (list "systembuckets" "systembuckets/status" "systembuckets/finalizers") "verbs" (list "get" "list" "watch" "create" "update" "patch" "delete"))
     (dict "apiGroups" (list "") "resources" (list "secrets") "verbs" (list "get" "list" "watch"))
     (dict "apiGroups" (list "") "resources" (list "configmaps") "verbs" (list "get" "list" "watch" "create" "update" "patch"))

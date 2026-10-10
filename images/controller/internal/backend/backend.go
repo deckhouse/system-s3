@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/deckhouse/sds-common-lib/objectstorage"
 )
@@ -106,9 +107,11 @@ type Store struct {
 }
 
 // StoreState is the observed data-plane state the driver reports. The store
-// reconciler surfaces it on every SystemBucket as the StorageReady condition —
-// there is no store object of its own to carry it.
+// manager publishes its conditions on Module/system-s3, not on SystemBuckets.
 type StoreState struct {
+	// Conditions are independently observed data-plane concerns. Unknown means
+	// this pass could not evaluate the concern, not that it is healthy.
+	Conditions []metav1.Condition
 	// Ready is true once the data plane is up and serving S3.
 	Ready bool
 

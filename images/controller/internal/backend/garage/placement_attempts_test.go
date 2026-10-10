@@ -236,19 +236,16 @@ func TestPlacementGivesUpAfterRepeatedIdenticalMoves(t *testing.T) {
 	ctx := context.Background()
 	store := systemStore()
 
-	// One control-plane node, so the decision is CONSOLIDATE and needs no health
-	// query: every replica belongs on m0, and this one is pinned to a node that is
-	// gone.
-	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
-		Name:   "m0",
-		Labels: map[string]string{hostnameTopologyKey: "m0"},
-	}}
+	// Exercise the execution budget independently of health/topology discovery.
+	// The production caller only selects this action with three eligible hosts.
+	spots := map[int32]replicaSpot{0: {nodePinned: true}, 1: {nodePinned: true}}
+	action := placementAction{act: true, ordinal: 0, reason: "spread: replica off an eligible node"}
 	pv := pinnedPV("replica-pv", "gone")
 	cfg := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: configName(store), Namespace: ns},
 		Data:       map[string]string{configFileName: "replication_factor = 3\n"},
 	}
-	c := fake.NewClientBuilder().WithScheme(attemptScheme(t)).WithObjects(node, pv, cfg).Build()
+	c := fake.NewClientBuilder().WithScheme(attemptScheme(t)).WithObjects(pv, cfg).Build()
 	d := &Driver{client: c, apiReader: c, namespace: ns}
 
 	// The scheduler putting the replica back where it was: the PVC reappears bound
@@ -269,7 +266,7 @@ func TestPlacementGivesUpAfterRepeatedIdenticalMoves(t *testing.T) {
 
 	for pass := 1; pass <= maxPlacementAttempts; pass++ {
 		putReplicaBack(t, 0)
-		acted, msg, err := d.reconcilePlacement(ctx, store)
+		acted, msg, err := d.executePlacementAction(ctx, store, spots, action)
 		if err != nil {
 			t.Fatalf("pass %d: unexpected error: %v", pass, err)
 		}
@@ -280,7 +277,7 @@ func TestPlacementGivesUpAfterRepeatedIdenticalMoves(t *testing.T) {
 
 	// The cap is reached: this pass must not recycle.
 	putReplicaBack(t, 0)
-	acted, msg, err := d.reconcilePlacement(ctx, store)
+	acted, msg, err := d.executePlacementAction(ctx, store, spots, action)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -290,7 +287,7 @@ func TestPlacementGivesUpAfterRepeatedIdenticalMoves(t *testing.T) {
 	if msg == "" {
 		t.Fatal("gave up silently: the operator has to be told why the placement is wrong")
 	}
-	if !strings.Contains(msg, "gave up") || !strings.Contains(msg, "consolidate") {
+	if !strings.Contains(msg, "gave up") || !strings.Contains(msg, "spread") {
 		t.Errorf("message %q does not name the give-up and the move it gave up on", msg)
 	}
 	if err := c.Get(ctx, client.ObjectKey{
@@ -307,7 +304,8 @@ func TestPlacementGivesUpAfterRepeatedIdenticalMoves(t *testing.T) {
 		t.Fatalf("delete replica 0 pvc: %v", err)
 	}
 	putReplicaBack(t, 1)
-	acted, msg, err = d.reconcilePlacement(ctx, store)
+	action.ordinal = 1
+	acted, msg, err = d.executePlacementAction(ctx, store, spots, action)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

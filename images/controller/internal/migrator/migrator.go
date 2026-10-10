@@ -27,12 +27,13 @@ limitations under the License.
 // The copy is restartable by construction: it compares each object with its
 // counterpart at the destination and copies the ones that are missing or stale.
 // A Job that is killed halfway and rerun picks up where it left off without
-// keeping a cursor, and the delta pass at cutover is not a different mode — it is
-// the same pass, run again over a source that has stopped changing.
+// keeping a cursor. The final delta pass also prunes destination objects absent
+// from the frozen source; the bulk pass must never delete while writers run.
 package migrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -50,6 +51,17 @@ import (
 // Command is the argument that turns the controller binary into the copier.
 const Command = "copy-objects"
 
+// QuotaExitCode is the machine-readable outcome consumed by the controller.
+const QuotaExitCode = 75
+
+var ErrQuotaExceeded = errors.New("destination bucket quota exceeded")
+
+func quotaExceeded(err error) bool {
+	r := minio.ToErrorResponse(err)
+	return r.Code == "QuotaExceeded" || r.Code == "InsufficientStorage" ||
+		(r.Code == "AccessDenied" && (r.Message == "Bucket size quota is reached" || r.Message == "Object quota is reached"))
+}
+
 // Environment variables the Job is configured with. They are the whole
 // interface: the copier talks to no Kubernetes API, holds no ServiceAccount
 // token, and cannot touch anything but the two S3 endpoints it is given.
@@ -62,6 +74,7 @@ const (
 	EnvTargetSecretKey = "MIGRATE_TARGET_SECRET_KEY"
 	EnvBuckets         = "MIGRATE_BUCKETS"
 	EnvWorkers         = "MIGRATE_WORKERS"
+	EnvFinalSync       = "MIGRATE_FINAL_SYNC"
 
 	// EnvCAFile is the CA both clusters' certificates are verified against, and
 	// EnvServerName the name they are verified for. Both clusters present the
@@ -95,6 +108,7 @@ type Config struct {
 	Workers    int
 	CAFile     string
 	ServerName string
+	FinalSync  bool // only against a write-frozen source, before endpoint cutover
 }
 
 // ConfigFromEnv reads the Job's configuration, rejecting anything incomplete:
@@ -123,6 +137,13 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if n, err := strconv.Atoi(os.Getenv(EnvWorkers)); err == nil && n > 0 {
 		cfg.Workers = n
+	}
+	if raw := os.Getenv(EnvFinalSync); raw != "" {
+		var err error
+		cfg.FinalSync, err = strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("%s must be a boolean: %w", EnvFinalSync, err)
+		}
 	}
 
 	missing := []string{}
@@ -176,6 +197,16 @@ func Run(ctx context.Context, cfg Config, log logger.Logger) error {
 
 	for _, bucket := range cfg.Buckets {
 		start := time.Now()
+		if cfg.FinalSync {
+			// Free quota occupied by keys deleted since the bulk pass before
+			// copying their replacements. Otherwise a full destination can never
+			// accept the final copy and the prune is never reached.
+			deleted, err := pruneDeletedObjects(ctx, source, target, bucket)
+			if err != nil {
+				return fmt.Errorf("synchronize deletions in bucket %q: %w", bucket, err)
+			}
+			log.Info("bucket deletions synchronized", "bucket", bucket, "deleted", deleted)
+		}
 		res, err := copyBucket(ctx, source, target, bucket, cfg.Workers)
 		if err != nil {
 			return fmt.Errorf("copy bucket %q: %w", bucket, err)
@@ -246,7 +277,45 @@ func copyBucket(ctx context.Context, source, target *minio.Client, bucket string
 	if failure != nil {
 		return res, failure
 	}
+	if err := ctx.Err(); err != nil {
+		return res, err
+	}
 	return res, nil
+}
+
+type objectStore interface {
+	ListObjects(context.Context, string, minio.ListObjectsOptions) <-chan minio.ObjectInfo
+	StatObject(context.Context, string, string, minio.StatObjectOptions) (minio.ObjectInfo, error)
+	RemoveObject(context.Context, string, string, minio.RemoveObjectOptions) error
+}
+
+// pruneDeletedObjects runs only before the final copy against a frozen source.
+// A listing on the destination plus one HEAD per key avoids retaining an entire
+// bucket inventory in memory. Only a definitive NoSuchKey authorizes deletion:
+// an unavailable source, missing bucket or denied HEAD must fail closed.
+func pruneDeletedObjects(ctx context.Context, source, target objectStore, bucket string) (int64, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var deleted int64
+	for obj := range target.ListObjects(ctx, bucket, minio.ListObjectsOptions{Recursive: true}) {
+		if err := ctx.Err(); err != nil {
+			return deleted, err
+		}
+		if obj.Err != nil {
+			return deleted, fmt.Errorf("list destination: %w", obj.Err)
+		}
+		if _, err := source.StatObject(ctx, bucket, obj.Key, minio.StatObjectOptions{}); err != nil {
+			response := minio.ToErrorResponse(err)
+			if response.Code != "NoSuchKey" || response.StatusCode != 404 {
+				return deleted, fmt.Errorf("check source object %q: %w", obj.Key, err)
+			}
+			if err := target.RemoveObject(ctx, bucket, obj.Key, minio.RemoveObjectOptions{}); err != nil {
+				return deleted, fmt.Errorf("delete destination object %q: %w", obj.Key, err)
+			}
+			deleted++
+		}
+	}
+	return deleted, ctx.Err()
 }
 
 // copyObject copies one object unless the destination already holds it, and
@@ -283,6 +352,9 @@ func copyObject(ctx context.Context, source, target *minio.Client, bucket string
 		UserMetadata:       userMetadata(info),
 	}
 	if _, err := target.PutObject(ctx, bucket, obj.Key, reader, info.Size, opts); err != nil {
+		if quotaExceeded(err) {
+			return false, fmt.Errorf("write %q: %w: %w", obj.Key, ErrQuotaExceeded, err)
+		}
 		return false, fmt.Errorf("write %q: %w", obj.Key, err)
 	}
 	return true, nil
@@ -290,18 +362,9 @@ func copyObject(ctx context.Context, source, target *minio.Client, bucket string
 
 // NeedsCopy decides whether one object has to be transferred.
 //
-// The destination is copied over when it is absent, when it is a different size,
-// or when the source has been written since the copy was made. Sizes and times
-// rather than checksums, because Garage stores a multipart object under an ETag
-// that is not the object's MD5 — comparing ETags would re-copy every large object
-// on every pass, including the delta pass at cutover, where re-copying is the one
-// thing that costs a consumer its write window.
-//
-// A source and a destination written within the same second are treated as the
-// same object. That is only reachable while the source is still being written,
-// which is precisely when the copy is NOT the one being trusted: the pass that
-// decides the migration runs with writes already refused, so nothing can be
-// written in the second the object is compared.
+// Copy time does not identify the version read from the source. Ambiguous ETags
+// (including different multipart layouts) must be copied again, even if that
+// lengthens the bounded final synchronization window.
 func NeedsCopy(src, dst minio.ObjectInfo, statErr error) bool {
 	if statErr != nil {
 		// Anything the destination cannot answer — not found, and equally an error
@@ -315,7 +378,7 @@ func NeedsCopy(src, dst minio.ObjectInfo, statErr error) bool {
 	if src.ETag != "" && src.ETag == dst.ETag {
 		return false
 	}
-	return dst.LastModified.Before(src.LastModified.Truncate(time.Second))
+	return true
 }
 
 // userMetadata carries the object's user metadata across. minio returns it with

@@ -187,6 +187,13 @@ func (d *Driver) resizeFreeze(ctx context.Context, desired, store *backend.Store
 	}
 
 	if state.frozenAt.IsZero() {
+		drained, err := d.writeGrantsDrained(ctx, store, svc)
+		if err != nil {
+			return state, "", err
+		}
+		if !drained {
+			return state, "changing the replica count: waiting for pending STS write grants", nil
+		}
 		if !synced {
 			return state, fmt.Sprintf("changing the replica count: waiting for the replicas to be in sync before writes are refused (%s)", why), nil
 		}
@@ -460,7 +467,13 @@ func (d *Driver) scaleToZero(ctx context.Context, store *backend.Store) (bool, e
 	case apierrors.IsNotFound(err):
 	case err != nil:
 		return false, fmt.Errorf("read the StatefulSet: %w", err)
-	case sts.Spec.Replicas == nil || *sts.Spec.Replicas != 0:
+	case sts.Spec.Replicas == nil || *sts.Spec.Replicas != 0 || sts.Spec.PersistentVolumeClaimRetentionPolicy == nil ||
+		sts.Spec.PersistentVolumeClaimRetentionPolicy.WhenScaled != appsv1.RetainPersistentVolumeClaimRetentionPolicyType ||
+		sts.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted != appsv1.RetainPersistentVolumeClaimRetentionPolicyType:
+		sts.Spec.PersistentVolumeClaimRetentionPolicy = &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+			WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			WhenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+		}
 		sts.Spec.Replicas = ptr.To(int32(0))
 		if err := d.client.Update(ctx, sts); err != nil {
 			return false, fmt.Errorf("scale the data plane to zero: %w", err)

@@ -119,39 +119,39 @@ func TestNextPlacementAction(t *testing.T) {
 			healthy:  true,
 			wantAct:  false,
 		},
-		// CONSOLIDATE (exactly 1 eligible node)
+		// Insufficient hosts: required anti-affinity forbids HA consolidation.
 		{
-			name:     "consolidate: all on target -> no action",
+			name:     "one eligible node: all on target -> no action",
 			eligible: []string{"m0"},
 			replica:  map[int32]string{0: "m0", 1: "m0", 2: "m0"},
 			healthy:  false,
 			wantAct:  false,
 		},
 		{
-			name:     "consolidate: replicas bound to removed nodes -> recycle first, no gate (anchor untouched)",
+			name:     "one eligible node: replicas bound to removed nodes -> preserve PVCs",
 			eligible: []string{"m0"},
 			replica:  map[int32]string{0: "m0", 1: "gone1", 2: "gone2"},
 			healthy:  false,
-			wantAct:  true,
+			wantAct:  false,
 			wantOrd:  1,
 		},
 		{
-			name:     "consolidate: unbound replica (still binding) -> left alone",
+			name:     "one eligible node: unbound replica -> left alone",
 			eligible: []string{"m0"},
 			replica:  map[int32]string{0: "m0", 1: "", 2: "m0"},
 			healthy:  false,
 			wantAct:  false,
 		},
 		{
-			name:     "consolidate: replica on a node that exists but is no longer eligible + healthy -> recycle it",
+			name:     "one eligible node: healthy replica outside selection -> preserve PVC",
 			eligible: []string{"m0"},
 			replica:  map[int32]string{0: "m0", 1: "m0", 2: "m2"},
 			healthy:  true,
-			wantAct:  true,
+			wantAct:  false,
 			wantOrd:  2,
 		},
 		{
-			name:     "consolidate: replica on a node that exists, NOT healthy -> gated, it holds a live copy",
+			name:     "one eligible node: unhealthy replica outside selection -> preserve PVC",
 			eligible: []string{"m0"},
 			replica:  map[int32]string{0: "m0", 1: "m0", 2: "m2"},
 			healthy:  false,
@@ -161,18 +161,18 @@ func TestNextPlacementAction(t *testing.T) {
 			// The role given to a node none of the replicas is on. Every replica
 			// holds a live copy; recycling them without the gate would, on a
 			// node-pinned class, throw away every copy of the data.
-			name:     "consolidate: no replica on the target, all on live nodes, NOT healthy -> no action",
+			name:     "one eligible node: no replica on target, unhealthy -> no action",
 			eligible: []string{"s0"},
 			replica:  map[int32]string{0: "w0", 1: "w1", 2: "w2"},
 			healthy:  false,
 			wantAct:  false,
 		},
 		{
-			name:     "consolidate: no replica on the target, all on live nodes + healthy -> one at a time",
+			name:     "one eligible node: no replica on target, healthy -> no action",
 			eligible: []string{"s0"},
 			replica:  map[int32]string{0: "w0", 1: "w1", 2: "w2"},
 			healthy:  true,
-			wantAct:  true,
+			wantAct:  false,
 			wantOrd:  0,
 		},
 		// IGNORE (2 or 0 eligible nodes)
@@ -194,17 +194,7 @@ func TestNextPlacementAction(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Every node the fixture names exists, except the ones called gone*.
-			present := map[string]bool{}
-			for _, n := range tc.eligible {
-				present[n] = true
-			}
-			for _, n := range tc.replica {
-				if n != "" && !strings.HasPrefix(n, "gone") {
-					present[n] = true
-				}
-			}
-			got := nextPlacementAction(tc.eligible, present, spotsOn(tc.replica), replicas, tc.healthy)
+			got := nextPlacementAction(tc.eligible, spotsOn(tc.replica), replicas, tc.healthy)
 			if got.act != tc.wantAct {
 				t.Fatalf("act=%v, want %v (reason=%q)", got.act, tc.wantAct, got.reason)
 			}
@@ -217,9 +207,8 @@ func TestNextPlacementAction(t *testing.T) {
 
 // TestReconcilePlacementNonHA pins the promise made outside the
 // high-availability mode: the sole replica is never relocated. The fixture is a
-// consolidate case the highly available store acts on without a health gate (one
-// master left, the replica's PV pinned to a master that is gone), so the two
-// modes are compared on identical input.
+// topology with one eligible host and a replica pinned to a removed host.
+// Neither mode may recycle the PVC in this topology.
 func TestReconcilePlacementNonHA(t *testing.T) {
 	ns := "d8-system-s3"
 
@@ -261,18 +250,18 @@ func TestReconcilePlacementNonHA(t *testing.T) {
 		}
 	})
 
-	t.Run("default profile: consolidates onto the surviving master", func(t *testing.T) {
+	t.Run("HA: insufficient hosts never recycle a surviving copy", func(t *testing.T) {
 		store := systemStore()
 		d, c := newDriver(t, store)
 		acted, _, err := d.reconcilePlacement(context.Background(), store)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !acted {
-			t.Fatalf("acted=false, want the default profile to recycle the stale replica")
+		if acted {
+			t.Fatalf("acted=true: required anti-affinity cannot consolidate HA onto one host")
 		}
-		if !pvcGone(t, c, store) {
-			t.Errorf("expected the replica's PVC to be recycled")
+		if pvcGone(t, c, store) {
+			t.Errorf("replica PVC must remain intact when too few hosts are eligible")
 		}
 	})
 }

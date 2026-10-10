@@ -23,6 +23,12 @@
   plane itself is highly available. The controller sees the answer, not the
   chain.
 
+  The controller workload itself follows control-plane HA, independently of the
+  data-plane setting. In particular, a cluster with one control-plane node may
+  still run three Garage replicas on workers. Feeding systemS3.highAvailability
+  into helm_lib_module_controller_manifests would put required controller
+  anti-affinity on that single node and deadlock its rollout.
+
   HIGH_AVAILABILITY_EXPLICIT is the one thing about that chain the controller
   does have to know: whether the answer was WRITTEN by somebody or DERIVED from
   the shape of the control plane. The derived value changes on its own when
@@ -67,6 +73,9 @@
   (controllerMetricsProxyPort) and reaches the ServiceMonitor through
   helm_lib_module_webhook_service, which is the only Service this chart has.
 */ -}}
+{{- $controllerContext := deepCopy . -}}
+{{- $_ := unset $controllerContext.Values.systemS3 "highAvailability" -}}
+{{- $_ := unset $controllerContext.Values.global "highAvailability" -}}
 {{- $config := dict
   "valuesKey" "systemS3"
   "onMasterNode" true
@@ -100,7 +109,7 @@
     (dict "name" "garage-tls-ca" "secret" (dict "secretName" "garage-tls" "items" (list (dict "key" "ca.crt" "path" "ca.crt"))))
   )
 }}
-{{ include "helm_lib_module_controller_manifests" (list . $config) }}
+{{ include "helm_lib_module_controller_manifests" (list $controllerContext $config) }}
 
 {{- /*
   Webhook Service. It carries the metrics port too: the controller and the

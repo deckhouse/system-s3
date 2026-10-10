@@ -24,7 +24,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -48,8 +47,7 @@ type placementAction struct {
 // left Pending after its node was removed keeps its PVC bound to the old PV
 // (Retain), so it reads back as that removed node — not "" — and is migrated.
 //
-// Topology rules (the 2-node state is intentionally left untouched — a
-// mid-shrink transient we neither spread across nor consolidate from):
+// Topology rules:
 //   - eligible nodes >= replicas: SPREAD — one replica per node. A replica that
 //     is co-located (shares its node) or sits on a node that is no longer
 //     eligible is relocated onto an empty eligible node. Gated on
@@ -58,21 +56,17 @@ type placementAction struct {
 //     The gate is kept even where the volume follows the pod and no
 //     re-replication is needed: a move is still one replica down, and taking a
 //     second one down while the cluster is degraded is what the gate prevents.
-//   - exactly one eligible node: CONSOLIDATE — every replica onto that
-//     node. Replicas not already pinned there (Pending because their node was
-//     removed, or on a node that is no longer eligible) are relocated; a replica
-//     already on the target is never recycled. A replica whose node is gone is
-//     moved without a health gate: it holds no reachable data, so recycling it
-//     only restores quorum. A replica whose node still exists holds a live copy
-//     — the case a node role produces, when the role is given to a node the
-//     replicas are not on — and is moved only while Garage is healthy, one at a
-//     time, exactly like SPREAD; moving them all at once would recycle every
-//     copy of the data on a node-pinned class.
-//   - otherwise (0 or 2 nodes): no action.
+//   - fewer eligible nodes than replicas: no action. Required anti-affinity
+//     makes consolidation impossible, and deleting a volume cannot fix that.
 //
 // It returns at most one action; the caller performs it and requeues, so the
 // rebalance advances one replica per reconcile.
-func nextPlacementAction(eligible []string, present map[string]bool, spots map[int32]replicaSpot, replicas int32, healthy bool) placementAction {
+func nextPlacementAction(eligible []string, spots map[int32]replicaSpot, replicas int32, healthy bool) placementAction {
+	// Required HA anti-affinity cannot place all replicas on fewer hosts.
+	// Do not recycle healthy/local volumes for a relocation that cannot finish.
+	if int32(len(eligible)) < replicas {
+		return placementAction{}
+	}
 	eligibleSet := make(map[string]struct{}, len(eligible))
 	for _, n := range eligible {
 		eligibleSet[n] = struct{}{}
@@ -100,23 +94,6 @@ func nextPlacementAction(eligible []string, present map[string]bool, spots map[i
 			if perNode[n] > 1 {
 				return placementAction{act: true, ordinal: ord, reason: "spread: replica co-located on " + n}
 			}
-		}
-		return placementAction{}
-
-	case len(eligible) == 1: // CONSOLIDATE
-		target := eligible[0]
-		for ord := int32(0); ord < replicas; ord++ {
-			n := spots[ord].node
-			if n == "" {
-				continue // PVC still binding (e.g. initial bring-up) — leave it
-			}
-			if n == target {
-				continue
-			}
-			if present[n] && !healthy {
-				return placementAction{} // a live copy: wait for the previous move to settle
-			}
-			return placementAction{act: true, ordinal: ord, reason: "consolidate onto " + target}
 		}
 		return placementAction{}
 
@@ -158,21 +135,23 @@ func (d *Driver) reconcilePlacement(ctx context.Context, store *backend.Store) (
 		return false, "", fmt.Errorf("read replica placement: %w", err)
 	}
 
-	present, err := d.presentNodes(ctx)
-	if err != nil {
-		return false, "", fmt.Errorf("list nodes: %w", err)
-	}
-
-	// The health gate matters for SPREAD and for CONSOLIDATE off a live node;
-	// with no eligible node or two there is nothing to decide, and it is skipped.
+	// Probe the health gate only when enough hosts exist to complete a move.
 	replicas := desiredReplicas(store)
+	if int32(len(candidates)) < replicas {
+		return false, fmt.Sprintf("required HA anti-affinity needs %d eligible nodes, but only %d are available; existing PVCs are preserved", replicas, len(candidates)), nil
+	}
+	for ord := int32(0); ord < replicas; ord++ {
+		if spots[ord].node == "" {
+			return false, fmt.Sprintf("placement of replica %d is not established yet", ord), nil
+		}
+	}
 	ready, why := false, ""
-	if int32(len(candidates)) >= replicas || len(candidates) == 1 {
+	if int32(len(candidates)) >= replicas {
 		ready, why = d.garageReadyToMove(ctx, store, replicas)
 	}
 
-	action := nextPlacementAction(candidates, present, spots, replicas, ready)
-	if !action.act && why != "" && nextPlacementAction(candidates, present, spots, replicas, true).act {
+	action := nextPlacementAction(candidates, spots, replicas, ready)
+	if !action.act && why != "" && nextPlacementAction(candidates, spots, replicas, true).act {
 		// A move is due and the cluster is up, but a replica is still being
 		// filled. Said, so an operator watching a store that will not spread
 		// knows it is waiting and on what.
@@ -187,6 +166,12 @@ func (d *Driver) reconcilePlacement(ctx context.Context, store *backend.Store) (
 		return false, "", nil
 	}
 
+	return d.executePlacementAction(ctx, store, spots, action)
+}
+
+// executePlacementAction carries out a health-gated relocation selected above,
+// keeping the attempt budget independent of the topology decision.
+func (d *Driver) executePlacementAction(ctx context.Context, store *backend.Store, spots map[int32]replicaSpot, action placementAction) (bool, string, error) {
 	// Same migration asked for over and over means the previous ones did not
 	// achieve it: the replica keeps coming back to a node it was moved off.
 	// Attempting it forever costs a copy of the data each time, so stop and say so.
@@ -446,27 +431,11 @@ func (d *Driver) candidateHostnames(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-// presentNodes returns the names of every node that exists, eligible or not. A
-// replica on a node in this set holds a copy the store can still read; one on a
-// node outside it holds nothing reachable.
-func (d *Driver) presentNodes(ctx context.Context) (map[string]bool, error) {
-	nodes := &metav1.PartialObjectMetadataList{}
-	nodes.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("NodeList"))
-	if err := d.apiReader.List(ctx, nodes); err != nil {
-		return nil, err
-	}
-	out := make(map[string]bool, len(nodes.Items))
-	for i := range nodes.Items {
-		out[nodes.Items[i].Name] = true
-	}
-	return out, nil
-}
-
 // moveReplica relocates one replica, and what it deletes depends on whether the
 // replica's volume can travel.
 //
 //   - A volume that follows the pod: only the pod is deleted. The StatefulSet
-//     recreates it, the scheduler places it elsewhere (soft anti-affinity), and
+//     recreates it, required anti-affinity separates it from its peers, and
 //     the same volume is attached there. No data is lost and nothing has to be
 //     re-replicated — the move is a restart.
 //   - A volume pinned to a node: the pod AND the claim are deleted, because the

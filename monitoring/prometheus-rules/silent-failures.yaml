@@ -74,16 +74,12 @@
           system_s3_store_volume_requested_bytes > system_s3_store_volume_capacity_bytes
           ```
 
-          The reason is also on every `SystemBucket`, in the `StorageReady` message.
+          The reason is also on `Module/system-s3`, in its `CapacityReady` condition.
 
     - alert: D8SystemS3BucketSizeNotApplied
       # The bucket's own view of a raised size. StoreCannotGrow says the store's
-      # volumes are stuck; this says which bucket is waiting on it, and it is the
-      # only alert for the other half — a quota that never reaches the backend,
-      # which leaves the raised size a number on a resource.
-      #
-      # Thirty minutes, as for the store: the quota is one reconcile, but the
-      # volumes grow at the CSI driver's pace.
+      # volumes are stuck; this independently reports a bucket quota that never
+      # reaches the backend. Keep the existing metric and alert names stable.
       expr: system_s3_bucket_size_applied == 0
       for: 30m
       labels:
@@ -96,17 +92,17 @@
         summary: A system bucket's size has not taken effect.
         description: |
           `spec.size` of `SystemBucket` `{{ $labels.namespace }}/{{ $labels.name }}` has not
-          taken effect for half an hour (`SizeApplied=False`, reason `{{ $labels.reason }}`).
-          Writes to the bucket can fail before the size it asks for is reached.
+          taken effect for half an hour (`SizeUpToDate=False`, reason `{{ $labels.reason }}`).
+          The backend quota does not match the requested size.
 
           - `QuotaPending` — the quota in the backend is still the old one: the controller
             cannot apply it. The reason is in the controller's log and in `BucketReady`.
-          - `Growing` or `CannotGrow` — the quota is in place, but the store's volumes have
-            not grown to the sum of the bucket sizes; `D8SystemS3StoreCannotGrow` says why.
+          Shared PVC growth is reported separately in `Module/system-s3.CapacityReady`;
+          `D8SystemS3StoreCannotGrow` reports expansion failures.
 
           ```
           d8 k -n {{ $labels.namespace }} get systembucket {{ $labels.name }} \
-            -o jsonpath='{.status.conditions[?(@.type=="SizeApplied")].message}{"\n"}'
+            -o jsonpath='{.status.conditions[?(@.type=="SizeUpToDate")].message}{"\n"}'
           ```
 
     - alert: D8SystemS3TemporaryCredentialsRefused

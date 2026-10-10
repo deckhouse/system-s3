@@ -25,7 +25,17 @@ spec:
       name: Size
       type: string
     - jsonPath: .status.usedBytes
-      name: Used
+      name: UsedBytes
+      type: integer
+    - jsonPath: .status.quotaBytes
+      name: TotalBytes
+      type: integer
+    - jsonPath: .status.objects
+      name: Objects
+      type: integer
+    - jsonPath: .status.quotaObjects
+      name: ObjectLimit
+      priority: 1
       type: integer
     - jsonPath: .status.phase
       name: Phase
@@ -58,7 +68,7 @@ spec:
           **No credentials are written anywhere, and none are long-lived.** A
           consumer exchanges its ServiceAccount token at the credentials
           endpoint (`S3_STS_ENDPOINT` in the ConfigMap) for a key pair the
-          backend stops honouring an hour later. Who may do that, for which
+          backend stops honouring at most thirty minutes later. Who may do that, for which
           bucket, is an ordinary Kubernetes RBAC grant on the virtual
           `systembuckets/read` and `systembuckets/write` subresources — so
           access is granted and revoked like any other permission, and nothing
@@ -97,9 +107,9 @@ spec:
                   The default is deliberately small: a system bucket is a
                   platform component's working set, not a data lake.
 
-                  It can be raised at any time; the `SizeApplied` condition
-                  says when the new value has taken effect — the quota is
-                  enforced and the store's volumes have grown to fit. It
+                  It can be raised at any time; the `SizeUpToDate` condition
+                  says when the backend enforces the new quota. Shared PVC capacity
+                  is reported separately by Module/system-s3.CapacityReady. It
                   cannot be lowered: the volumes the store provisioned for it
                   cannot shrink (a PersistentVolumeClaim cannot), and a quota
                   below what the bucket holds would only make its writes
@@ -125,13 +135,11 @@ spec:
                 type: string
               conditions:
                 description: |-
-                  Per-stage conditions: `StorageReady`, `BucketReady`,
+                  Per-stage conditions: `BucketReady`,
                   `ConnectionReady`, and the aggregate `Ready`. Besides them,
-                  `SizeApplied` says whether `spec.size` has taken effect:
-                  `Applied`, or `QuotaPending`, `Growing` (the store's volumes
-                  are being grown) and `CannotGrow` (they cannot be — the
-                  message says why and what to change). It is not part of
-                  `Ready`: a bucket keeps serving while it grows.
+                  `SizeUpToDate` says whether `spec.size` has taken effect:
+                  `Applied` or `QuotaPending`. Shared storage conditions, including PVC
+                  growth and Garage migrations, are published on Module/system-s3.
                 items:
                   properties:
                     lastTransitionTime:
@@ -166,8 +174,8 @@ spec:
                       type: string
                     type:
                       description: |-
-                        Condition type, for example `Ready`, `StorageReady`,
-                        `BucketReady`, or `ConnectionReady`.
+                        Condition type, for example `Ready`, `BucketReady`,
+                        `ConnectionReady`, or `SizeUpToDate`.
                       maxLength: 316
                       pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
                       type: string
@@ -192,7 +200,7 @@ spec:
 
                   A ConfigMap and not a Secret: there is no key pair in it,
                   because the module issues none. Credentials are minted per
-                  consumer, for an hour, against a ServiceAccount token.
+                  consumer, for at most thirty minutes, against a ServiceAccount token.
                 properties:
                   name:
                     type: string

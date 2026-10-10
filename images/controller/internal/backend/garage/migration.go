@@ -21,11 +21,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
@@ -55,8 +57,8 @@ const (
 	// goes back to Copying rather than forward.
 	phaseVerifying migrationPhase = "Verifying"
 	// phaseCutover: the only window in which writes are refused. Write access is
-	// revoked on the serving plane, the delta is copied, the consumers' keys are
-	// imported into the incoming plane and the endpoint is switched to it.
+	// revoked on the serving plane, the delta and deletions are synchronized, and
+	// the endpoint is switched. Consumers must obtain new temporary credentials.
 	phaseCutover migrationPhase = "Cutover"
 	// phaseDraining: the incoming plane serves; the old one is kept read-only as
 	// the way back, for drainPeriod.
@@ -131,8 +133,16 @@ const (
 	// Of the in-place change: the keys whose write access the freeze took away,
 	// to be given it back on the same cluster, and when the block repair was
 	// launched.
-	migrationKeyFrozenKeys = "frozen-keys"
-	migrationKeyRepairAt   = "repair-launched-at"
+	migrationKeyFrozenKeys       = "frozen-keys"
+	migrationKeyRepairAt         = "repair-launched-at"
+	migrationKeyWriteFence       = "write-fence"
+	migrationKeyEndpointRecorded = "endpoint-recorded"
+)
+
+const (
+	writeFenceStopping   = "Stopping"
+	writeFenceRestarting = "Restarting"
+	writeFenceReady      = "Ready"
 )
 
 // migrationStateName is the ConfigMap the phase lives in. It belongs to the
@@ -178,12 +188,11 @@ type migrationState struct {
 	// same cluster, and has to give it back to exactly the keys that had it.
 	frozenKeys []frozenKey
 	// repairAt is when the in-place growth launched the block repair.
-	repairAt time.Time
-	// recorded reports whether the state was read from an object that exists,
-	// i.e. whether this store has ever had a second data plane. It is not part of
-	// the state and is never written: it is how the endpoint's selector knows
-	// whether it may stay as wide as an installation that has never migrated left
-	// it (see endpointSelector).
+	repairAt   time.Time
+	writeFence string
+	// recorded controls whether the endpoint selector names a plane. A ConfigMap
+	// created only for write tickets preserves a legacy wide selector; an actual
+	// migration state write starts naming the plane (see endpointSelector).
 	recorded bool
 }
 
@@ -219,7 +228,7 @@ func (d *Driver) loadMigrationState(ctx context.Context, store *backend.Store) (
 		return migrationState{}, err
 	}
 	state := parseMigrationState(cm.Data)
-	state.recorded = true
+	state.recorded = cm.Data[migrationKeyEndpointRecorded] != "false"
 	return state, nil
 }
 
@@ -264,6 +273,7 @@ func parseMigrationState(data map[string]string) migrationState {
 		cutoverAt:    parseTime(data[migrationKeyCutoverAt]),
 		repairAt:     parseTime(data[migrationKeyRepairAt]),
 		frozenKeys:   parseFrozenKeys(data[migrationKeyFrozenKeys]),
+		writeFence:   data[migrationKeyWriteFence],
 	}
 	// Any real plane, the first one included. It is the first one exactly half the
 	// time: before a cutover the other plane is the one being built, after it the
@@ -356,10 +366,7 @@ func formatTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// saveMigrationState writes the state back. It is a full write rather than a
-// patch: the state is one small document with a single writer (the controller
-// holds the leader lease), and a phase that moved must not leave a key of the
-// previous one behind.
+// saveMigrationState serializes phase changes with grants from all STS replicas.
 func (d *Driver) saveMigrationState(ctx context.Context, store *backend.Store, state migrationState) error {
 	data := map[string]string{
 		migrationKeyServing: strconv.FormatInt(int64(state.serving), 10),
@@ -387,18 +394,58 @@ func (d *Driver) saveMigrationState(ctx context.Context, store *backend.Store, s
 	if s := formatTime(state.cutoverAt); s != "" {
 		data[migrationKeyCutoverAt] = s
 	}
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      migrationStateName(store),
-			Namespace: d.namespace,
-			Labels:    commonLabels(store),
-		},
-		Data: data,
+	if state.writeFence != "" {
+		data[migrationKeyWriteFence] = state.writeFence
 	}
-	if err := d.apply(ctx, cm); err != nil {
+	if err := d.updateGrantState(ctx, store, func(cm *corev1.ConfigMap) error {
+		next := make(map[string]string, len(data)+len(cm.Data))
+		for key, value := range data {
+			next[key] = value
+		}
+		for key, value := range cm.Data {
+			if strings.HasPrefix(key, pendingWriteGrantPrefix) {
+				next[key] = value
+			}
+		}
+		cm.Data = next
+		return nil
+	}); err != nil {
 		return fmt.Errorf("write the migration state: %w", err)
 	}
 	return nil
+}
+
+func (d *Driver) updateGrantState(ctx context.Context, store *backend.Store, change func(*corev1.ConfigMap) error) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cm := &corev1.ConfigMap{}
+		err := d.apiReader.Get(ctx, client.ObjectKey{Namespace: d.namespace, Name: migrationStateName(store)}, cm)
+		missing := apierrors.IsNotFound(err)
+		if err != nil && !missing {
+			return err
+		}
+		if missing {
+			serving, named, err := d.servingFromEndpoint(ctx, store)
+			if err != nil {
+				return err
+			}
+			cm = &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: migrationStateName(store), Namespace: d.namespace, Labels: commonLabels(store)},
+				Data: map[string]string{migrationKeyServing: strconv.FormatInt(int64(serving), 10), migrationKeyPhase: string(phaseConverged), migrationKeyEndpointRecorded: strconv.FormatBool(named)}}
+		}
+		if cm.Data == nil {
+			cm.Data = map[string]string{}
+		}
+		if err := change(cm); err != nil {
+			return err
+		}
+		if missing {
+			err := d.client.Create(ctx, cm)
+			if apierrors.IsAlreadyExists(err) {
+				return apierrors.NewConflict(corev1.Resource("configmaps"), cm.Name, err)
+			}
+			return err
+		}
+		return d.client.Update(ctx, cm)
+	})
 }
 
 // planeOf returns the store description of one of its data planes: the same

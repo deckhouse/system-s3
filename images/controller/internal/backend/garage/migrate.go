@@ -359,7 +359,16 @@ func (d *Driver) migrationCopy(
 	if err != nil {
 		return state, "", err
 	}
+	return d.recordCopyOutcome(ctx, serving, state, outcome, msg)
+}
+
+func (d *Driver) recordCopyOutcome(ctx context.Context, serving *backend.Store, state migrationState, outcome copyOutcome, msg string) (migrationState, string, error) {
 	if outcome != copyDone {
+		if outcome == copyQuotaBlocked {
+			state.phase = phaseCutover
+			state.frozenAt = time.Now()
+			return state, "bulk copy reached the destination quota; entering bounded frozen synchronization", d.saveMigrationState(ctx, serving, state)
+		}
 		return state, d.waitingNote(state, msg), nil
 	}
 
@@ -382,7 +391,7 @@ func (d *Driver) migrationVerify(
 	}
 	incoming := d.incomingPlane(serving, state)
 
-	behind, err := d.compareClusters(ctx, serving, incoming)
+	behind, err := d.compareClusters(ctx, serving, incoming, false)
 	if err != nil {
 		return state, "", err
 	}
@@ -403,7 +412,9 @@ func (d *Driver) migrationVerify(
 	return state, "the two clusters agree; switching over, writes are briefly refused", nil
 }
 
-// difference is how far the incoming cluster is behind the serving one.
+// difference is the aggregate mismatch between clusters. Before the freeze only
+// missing data matters; the final copy synchronizes deletions, so cutover also
+// checks for excess objects and bytes.
 type difference struct {
 	objects int64
 	bytes   int64
@@ -412,13 +423,10 @@ type difference struct {
 	bucket string
 }
 
-// compareClusters sums how much the incoming cluster is missing.
-//
-// Only what is MISSING counts. The incoming cluster holding more than the
-// serving one is not a difference to close by copying: it is the copy of an
-// object that has since been deleted at the source, which the cutover does not
-// wait for and the decommission of the old cluster settles.
-func (d *Driver) compareClusters(ctx context.Context, source, target *backend.Store) (difference, error) {
+// compareClusters compares aggregate counts, not object checksums or key sets.
+// Excess destination data is tolerated only before the write freeze, because
+// pruning a changing source would race its writers. The final pass prunes first.
+func (d *Driver) compareClusters(ctx context.Context, source, target *backend.Store, exact bool) (difference, error) {
 	from, ready, err := d.adminClientFor(ctx, source)
 	if err != nil || !ready {
 		return difference{}, errOrNotReady(err, source, "compare the clusters")
@@ -452,13 +460,13 @@ func (d *Driver) compareClusters(ctx context.Context, source, target *backend.St
 				}
 				continue
 			}
-			if missing := src.Objects - dst.Objects; missing > 0 {
+			if missing := aggregateDifference(src.Objects, dst.Objects, exact); missing > 0 {
 				diff.objects += missing
 				if diff.bucket == "" {
 					diff.bucket = alias
 				}
 			}
-			if missing := src.Bytes - dst.Bytes; missing > 0 {
+			if missing := aggregateDifference(src.Bytes, dst.Bytes, exact); missing > 0 {
 				diff.bytes += missing
 				if diff.bucket == "" {
 					diff.bucket = alias
@@ -469,14 +477,24 @@ func (d *Driver) compareClusters(ctx context.Context, source, target *backend.St
 	return diff, nil
 }
 
+func aggregateDifference(source, target int64, exact bool) int64 {
+	if source >= target {
+		return source - target
+	}
+	if exact {
+		return target - source
+	}
+	return 0
+}
+
 // migrationCutover is the one window in which consumers cannot write.
 //
 // The steps are ordered so that the window is as short as the delta allows, and
 // so that re-entering the phase after a controller restart repeats work rather
 // than skipping it: write access is revoked (idempotent), the delta is copied
 // (the copier skips what is already there), the two clusters are compared
-// exactly, the consumers' keys are imported into the new cluster verbatim, and
-// only then does the endpoint move.
+// by aggregate counts after synchronizing deletions, and only then does the
+// endpoint move. Temporary consumer keys are not imported into the new cluster.
 //
 // The point of no return is the endpoint. Everything before it can be undone by
 // deleting the incoming cluster; after it, the way back is the old cluster, kept
@@ -493,12 +511,32 @@ func (d *Driver) migrationCutover(
 	// the settings ask for it to be.
 	incoming := d.incomingPlane(serving, state)
 
+	stopped, err := d.stopCopyPass(ctx, serving, incoming, copyPassBulk)
+	if err != nil {
+		return state, "", err
+	}
+	if !stopped {
+		return state, "stopping the bulk copier before final synchronization", nil
+	}
+
 	if !state.frozenAt.IsZero() && time.Since(state.frozenAt) > cutoverDeadline {
+		// Final synchronization may delete destination keys. Do not unfreeze
+		// its source until the Job and all of its pods have actually disappeared.
+		// Also discard completed delta Jobs: their success cannot authorize a
+		// later cutover after consumers have resumed writes.
+		stopped, err := d.stopDeltaPass(ctx, serving, incoming)
+		if err != nil {
+			return state, "", err
+		}
+		if !stopped {
+			return state, "the cutover timed out; stopping the final copier before allowing writes again", nil
+		}
 		// The switch is not going to happen this time round. Write access comes
 		// back on its own: the ordinary pass grants it on every SystemBucket as
 		// soon as the phase is no longer the cutover.
 		state.phase = phaseCopying
 		state.frozenAt = time.Time{}
+		state.writeFence = ""
 		if err := d.saveMigrationState(ctx, serving, state); err != nil {
 			return state, "", err
 		}
@@ -508,9 +546,48 @@ func (d *Driver) migrationCutover(
 			"writes are allowed again and the copy continues", cutoverDeadline), nil
 	}
 
+	svc, ready, err := d.adminClientFor(ctx, serving)
+	if err != nil || !ready {
+		return state, "", errOrNotReady(err, serving, "drain pending write grants")
+	}
+	drained, err := d.writeGrantsDrained(ctx, serving, svc)
+	if err != nil {
+		return state, "", err
+	}
+	if !drained {
+		return state, "waiting for pending STS write grants before freezing writes", nil
+	}
+	if state.writeFence == "" {
+		stopped, err := d.stopDeltaPass(ctx, serving, incoming)
+		if err != nil {
+			return state, "", err
+		}
+		if !stopped {
+			return state, "stopping any previous final copier before fencing the source", nil
+		}
+	}
+
 	frozen, err := d.freezeWrites(ctx, serving)
 	if err != nil {
 		return state, "", err
+	}
+	if state.writeFence != writeFenceReady {
+		if state.writeFence != "" && state.writeFence != writeFenceRestarting {
+			return state, "", fmt.Errorf("unexpected write fence stage %q", state.writeFence)
+		}
+		synced, why, err := clusterInSync(ctx, svc, desiredReplicas(serving), d.blocksOnDisk(serving))
+		if err != nil {
+			return state, "", err
+		}
+		if !synced {
+			return state, fmt.Sprintf("waiting for the frozen source to synchronize (%s)", why), nil
+		}
+		if state.writeFence == "" {
+			state.writeFence = writeFenceStopping
+			return state, "stopping the source Garage on its existing PVCs to finish in-flight requests", d.saveMigrationState(ctx, serving, state)
+		}
+		state.writeFence = writeFenceReady
+		return state, "the restarted source is synchronized; final copy can start", d.saveMigrationState(ctx, serving, state)
 	}
 
 	buckets, err := d.bucketNames(ctx, serving)
@@ -529,7 +606,7 @@ func (d *Driver) migrationCutover(
 			return state, fmt.Sprintf("switching over: writes are refused while the last objects are copied (%s)", msg), nil
 		}
 
-		behind, err := d.compareClusters(ctx, serving, incoming)
+		behind, err := d.compareClusters(ctx, serving, incoming, true)
 		if err != nil {
 			return state, "", err
 		}
@@ -539,17 +616,18 @@ func (d *Driver) migrationCutover(
 			if err := d.restartDeltaPass(ctx, serving, incoming); err != nil {
 				return state, "", err
 			}
-			return state, fmt.Sprintf("switching over: bucket %q is still behind by %d object(s); copying again",
+			return state, fmt.Sprintf("switching over: bucket %q differs by %d object(s); synchronizing again",
 				behind.bucket, behind.objects), nil
 		}
 	}
 
 	// Nothing is carried across for the consumers, and there is nothing to carry:
-	// the only keys a consumer ever holds are the hour-long ones the credentials
+	// the only keys a consumer ever holds live at most thirty minutes; the credentials
 	// endpoint minted, and the module does not keep their secret halves — the
 	// backend hands a secret back once and never again. A client holding one when
-	// the endpoint moves gets 403 on its next request and asks for another, which
-	// is the contract it already follows.
+	// the endpoint moves gets 403 on its next request. Its application must handle
+	// early invalidation and renew credentials; ordinary expiry-based SDK refresh
+	// alone does not guarantee recovery before that key's advertised expiry.
 	//
 	// What does not change is the address and the right to ask: the Service keeps
 	// its name, and the RBAC grant that lets a ServiceAccount exchange its token
@@ -794,22 +872,6 @@ func claimBelongsTo(claim, setName string) bool {
 	}
 	parent, ok := podParent(claim[len(prefix):])
 	return ok && parent == setName
-}
-
-// advanceMigration runs one step of the migration machine and returns what to
-// report, so EnsureStore keeps one shape for the call.
-func (d *Driver) advanceMigration(
-	ctx context.Context,
-	desired, serving *backend.Store,
-	boundClass string,
-	state migrationState,
-	sumBytes int64,
-) (string, error) {
-	_, msg, err := d.reconcileMigration(ctx, desired, serving, boundClass, state, sumBytes)
-	if err != nil {
-		return "", fmt.Errorf("advance the migration: %w", err)
-	}
-	return msg, nil
 }
 
 // pendingMigrationNote is what a pass that did not get as far as the migration

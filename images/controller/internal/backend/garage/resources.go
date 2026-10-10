@@ -57,7 +57,7 @@ const (
 	registryPullSecret = "system-s3-module-registry"
 
 	// hostnameTopologyKey is the node label carrying the hostname, used for the
-	// soft pod anti-affinity that spreads the replicas.
+	// required pod anti-affinity that separates HA replicas.
 	hostnameTopologyKey = "kubernetes.io/hostname"
 
 	// nodeIdentityMountPath is where the per-ordinal Garage node identity Secret
@@ -74,20 +74,11 @@ const (
 // replicasHA is the number of Garage replicas the highly available store runs,
 // independent of how many nodes the placement allows. Keeping it constant
 // (rather than one pod per eligible node) keeps the pinned replication factor and
-// the Garage quorum stable as nodes come and go: three replicas always run —
-// spread across the eligible nodes when several exist, co-located on one
-// otherwise.
-//
-// The changes in the number of eligible nodes this has to survive, and what
-// happens on each:
-//   - 1 -> 3: the replicas stay where they are and the placement reconcile moves
-//     them out one at a time, health-gated, so the store keeps serving.
-//   - 3 -> 1: the two replicas whose nodes are gone are consolidated onto the
-//     survivor; they hold no reachable data, so recycling them restores quorum
-//     rather than risking it.
-//   - 3 -> 2 (and 2 -> 3): left alone. It is a transient of a shrink or a grow,
-//     and neither spreading across two nor consolidating from two is a state
-//     worth moving data for.
+// the Garage quorum stable as nodes come and go: three replicas are desired,
+// with required anti-affinity on different eligible hosts. Fewer eligible hosts
+// leave replicas Pending; placement does not recycle volumes in an attempt to
+// consolidate those replicas. Reduce the replication factor only through the
+// explicit highAvailability setting and its coordinated in-place transition.
 //
 // See nextPlacementAction in rebalance.go, which implements exactly these rules.
 const replicasHA int32 = 3
@@ -142,10 +133,9 @@ const (
 // A migration recycles the replica's PVC, which throws away that replica's copy
 // of the data and makes Garage re-replicate it by anti-entropy. The move is only
 // worth it because the scheduler is expected to place the replica on a different
-// node — but that is a preference, not a guarantee: the pod anti-affinity is
-// preferred (it has to be, or replicas could not run on a single node) and the
-// pool holds a free PV on every node, so the scheduler may legally return the
-// replica to the node it just left. Without a cap that is an unbounded retry
+// node. Required anti-affinity separates live HA pods, but a node-pinned PV or
+// other scheduling constraints may still prevent relocation. Without a cap
+// that would be an unbounded retry
 // (Nygard, Release It!, 2nd ed., ch. 4): every few minutes one replica loses its
 // data and rebuilds it, forever, and the log looks like progress.
 const maxPlacementAttempts = 3
@@ -692,10 +682,10 @@ fi
 // StorageClass. Which nodes they may run on is not decided here: the driver puts
 // the chart's placement on the result (see placement.go).
 //
-// The replica count is independent of how many nodes the placement allows —
-// replicas spread one-per-node when there are several (soft anti-affinity and a
-// soft spread constraint, both scoped to this data plane) and co-locate on one
-// node otherwise. Pods start in parallel (no ordinal barrier). This keeps a
+// The replica count is independent of how many nodes the placement allows.
+// HA replicas require distinct eligible hosts; with fewer than three hosts
+// some pods remain Pending rather than creating false redundancy on one node.
+// Pods start in parallel (no ordinal barrier). This keeps a
 // constant replication factor and Garage quorum as nodes come and go; the layout
 // is reconciled in mesh.go as replicas move and rejoin.
 //
@@ -724,10 +714,8 @@ func buildStatefulSet(store *backend.Store, namespace, image, cfgHash string, vo
 	// deadlock on its own placement policy. Each plane spreads itself; neither
 	// has an opinion about the other.
 	//
-	// Both rules are soft, for the same reason they are two. A cluster with one
-	// eligible node runs three replicas on it: that is a degraded store, not a refusal
-	// to run, and the node-pinned volumes it comes back to are what it rebuilds
-	// from. Nothing here may ever leave a replica Pending.
+	// Like helm_lib_pod_anti_affinity_for_ha, the HA anti-affinity is required.
+	// The soft spread constraint remains a scoring aid, not an escape from it.
 	//
 	// The anti-affinity says "not on a node that already has one of mine" — a
 	// repulsion, evaluated per pod, which is what keeps the first replicas apart.
@@ -737,14 +725,13 @@ func buildStatefulSet(store *backend.Store, namespace, image, cfgHash string, vo
 	// Honouring node affinity and taints makes the skew count only the nodes this
 	// pod could actually land on — the placement's — instead of every node in the
 	// cluster, which would make the constraint satisfiable while doing nothing.
-	spec.Affinity.PodAntiAffinity = &corev1.PodAntiAffinity{
-		PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
-			Weight: 100,
-			PodAffinityTerm: corev1.PodAffinityTerm{
+	if desiredReplicas(store) > 1 {
+		spec.Affinity.PodAntiAffinity = &corev1.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
 				LabelSelector: &metav1.LabelSelector{MatchLabels: planeLabels(store)},
 				TopologyKey:   hostnameTopologyKey,
-			},
-		}},
+			}},
+		}
 	}
 	spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
 		MaxSkew:            1,

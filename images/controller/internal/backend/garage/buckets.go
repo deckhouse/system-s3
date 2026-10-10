@@ -18,6 +18,7 @@ package garage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -206,11 +207,15 @@ func (d *Driver) destroyBucket(ctx context.Context, store *backend.Store, name s
 // own (those belong to the SystemBucket's key, which may already be gone by the
 // time the bucket is reclaimed).
 func (d *Driver) emptyBucket(ctx context.Context, store *backend.Store, svc *adminClient, bucketID, name string) error {
-	key, err := svc.createKey(ctx, "system-s3-reclaim-"+name)
+	key, err := svc.createExpiringKey(ctx, temporaryKeyName(name, "reclaim"), time.Now().Add(30*time.Minute))
 	if err != nil {
 		return fmt.Errorf("create temporary key to empty bucket %q: %w", name, err)
 	}
+	pending := false
 	defer func() {
+		if pending {
+			return
+		}
 		// Its own context, not the one being unwound.
 		//
 		// The common way to reach this defer is the reconcile timeout expiring
@@ -234,7 +239,8 @@ func (d *Driver) emptyBucket(ctx context.Context, store *backend.Store, svc *adm
 		}
 	}()
 
-	if err := svc.allow(ctx, bucketID, key.AccessKeyID, permissions{Read: true, Write: true, Owner: true}); err != nil {
+	if err := d.grantBucketKey(ctx, store, svc, bucketID, key.AccessKeyID, permissions{Read: true, Write: true, Owner: true}); err != nil {
+		pending = errors.Is(err, errWriteGrantPending)
 		return fmt.Errorf("grant temporary key on bucket %q: %w", name, err)
 	}
 	mc, err := s3util.NewClient(planeS3HostPort(store, d.namespace, d.clusterDomain), key.AccessKeyID, key.SecretAccessKey,

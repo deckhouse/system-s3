@@ -130,6 +130,35 @@ func bucketFor(ns, name string) *v1alpha1.SystemBucket {
 	}}
 }
 
+func TestBucketStatusReportsUsageAndEmptyBucket(t *testing.T) {
+	const ns, name = "d8-monitoring", "loki"
+	bucket := bucketFor(ns, name)
+	bucket.Spec.Size = "1Gi"
+	drv := &fakeDriver{usage: backend.BucketUsage{
+		QuotaBytes: 1 << 30, QuotaObjects: 16384, UsedBytes: 1024, Objects: 3,
+	}}
+	r, c := newReconciler(t, drv, platformNS(ns), bucket)
+	ctx := context.Background()
+	key := client.ObjectKey{Namespace: ns, Name: name}
+	for _, empty := range []bool{false, true} {
+		if empty {
+			drv.usage.UsedBytes, drv.usage.Objects = 0, 0
+		}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+			t.Fatal(err)
+		}
+		live := &v1alpha1.SystemBucket{}
+		if err := c.Get(ctx, key, live); err != nil {
+			t.Fatal(err)
+		}
+		if live.Status == nil || live.Status.QuotaBytes != drv.usage.QuotaBytes ||
+			live.Status.QuotaObjects != drv.usage.QuotaObjects || live.Status.UsedBytes != drv.usage.UsedBytes ||
+			live.Status.Objects != drv.usage.Objects {
+			t.Fatalf("status does not reflect backend counters: %+v", live.Status)
+		}
+	}
+}
+
 func TestANonPlatformNamespaceGetsNothing(t *testing.T) {
 	const ns, name = "tenant-a", "sneaky"
 	drv := &fakeDriver{}

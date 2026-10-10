@@ -442,6 +442,49 @@ func TestCopyJobIsPowerless(t *testing.T) {
 	}
 }
 
+func TestOnlyFinalCopyPassSynchronizesDeletions(t *testing.T) {
+	for _, pass := range []string{copyPassBulk, copyPassDelta} {
+		job := &batchv1.Job{Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "copier"}}}}}}
+		configureCopyPass(job, pass)
+		if got := copyJobHasFinalSync(job); got != (pass == copyPassDelta) {
+			t.Errorf("pass=%s finalSync=%v", pass, got)
+		}
+	}
+}
+
+func TestAggregateDifferenceChecksExcessOnlyAtCutover(t *testing.T) {
+	for _, tc := range []struct{ source, target, bulk, final int64 }{
+		{3, 3, 0, 0}, {3, 2, 1, 1}, {2, 3, 0, 1}, {0, 1, 0, 1},
+	} {
+		if got := aggregateDifference(tc.source, tc.target, false); got != tc.bulk {
+			t.Errorf("bulk difference=%d want=%d", got, tc.bulk)
+		}
+		if got := aggregateDifference(tc.source, tc.target, true); got != tc.final {
+			t.Errorf("cutover difference=%d want=%d", got, tc.final)
+		}
+	}
+}
+
+func TestLegacyFinalCopyJobIsNotAccepted(t *testing.T) {
+	ctx := context.Background()
+	source := planeOf(systemStore(), 1, true, localSC)
+	target := planeOf(systemStore(), 2, false, localSC)
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: copyJobName(source, target.Incarnation, copyPassDelta), Namespace: "d8-system-s3",
+		Annotations: map[string]string{annCopyBuckets: bucketsStamp([]string{"one"})},
+	}}
+	job.Status.Succeeded = 1
+	c := fake.NewClientBuilder().WithScheme(coreScheme(t)).WithObjects(job).Build()
+	d := &Driver{client: c, apiReader: c, namespace: "d8-system-s3", log: testGarageLogger(t)}
+	outcome, _, err := d.runCopyPass(ctx, source, target, copyPassDelta, []string{"one"})
+	if err != nil || outcome == copyDone {
+		t.Fatalf("legacy final copy accepted: outcome=%v err=%v", outcome, err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(job), &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("legacy job not removed: %v", err)
+	}
+}
+
 // TestCopyJobIsReplacedWhenTheBucketsChange: a bucket created while the bulk copy
 // runs is not in the running Job's list, and a Job's pod template cannot be
 // edited.
@@ -522,6 +565,37 @@ func TestCutoverGivesTheWritesBackIfItCannotFinish(t *testing.T) {
 	}
 	if got.serving != 1 {
 		t.Errorf("serving=%d, want the store still on the cluster it was on", got.serving)
+	}
+}
+
+func TestCutoverTimeoutWaitsForDeltaTerminationAndDiscardsItsSuccess(t *testing.T) {
+	for _, succeeded := range []int32{0, 1} {
+		t.Run(fmt.Sprintf("succeeded=%d", succeeded), func(t *testing.T) {
+			ctx := context.Background()
+			serving := planeOf(systemStore(), 1, true, localSC)
+			state := migrationState{serving: 1, other: 2, phase: phaseCutover, frozenAt: time.Now().Add(-cutoverDeadline - time.Minute)}
+			name := copyJobName(serving, 2, copyPassDelta)
+			job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "d8-system-s3"}, Status: batchv1.JobStatus{Succeeded: succeeded}}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-pod", Namespace: "d8-system-s3", Labels: map[string]string{"job-name": name}}}
+			c := fake.NewClientBuilder().WithScheme(coreScheme(t)).WithObjects(job, pod).Build()
+			d := &Driver{client: c, apiReader: c, namespace: "d8-system-s3", log: testGarageLogger(t)}
+			for i := 0; i < 2; i++ {
+				got, _, err := d.migrationCutover(ctx, serving, state)
+				if err != nil || got.phase != phaseCutover || got.frozenAt.IsZero() {
+					t.Fatalf("thawed before copier termination: state=%+v err=%v", got, err)
+				}
+			}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(job), &batchv1.Job{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("old delta success was retained: %v", err)
+			}
+			if err := c.Delete(ctx, pod); err != nil {
+				t.Fatal(err)
+			}
+			got, _, err := d.migrationCutover(ctx, serving, state)
+			if err != nil || got.phase != phaseCopying || !got.frozenAt.IsZero() {
+				t.Fatalf("did not thaw after copier termination: state=%+v err=%v", got, err)
+			}
+		})
 	}
 }
 

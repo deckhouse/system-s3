@@ -8,7 +8,7 @@ weight: 1
 The module is in the `Experimental` stage. The API, configuration, and custom resources may change without notice; do not use it for production workloads.
 {{< /alert >}}
 
-The `system-s3` module provides the **system** S3 object storage: the bucket a Deckhouse component keeps its data in. It runs one Garage cluster on the cluster's control-plane nodes and hands out buckets with credentials through a single custom resource.
+The `system-s3` module provides the **system** S3 object storage for Deckhouse components. It runs one Garage cluster on nodes selected by the `system-s3` role, then `system`, then other eligible nodes. `SystemBucket` provisions the bucket and connection parameters; consumers obtain temporary credentials separately through STS using a ServiceAccount token and RBAC.
 
 It is not a storage service for applications. Workloads get their object storage from the `sds-object` module, which offers the user-facing backends; this module exists so platform components have somewhere to put their data without waiting for that one, and it is deliberately the smaller of the two.
 
@@ -21,7 +21,7 @@ It is not a storage service for applications. Workloads get their object storage
 That is the whole API, and each omission is deliberate:
 
 - **No resource for the storage itself.** The module runs exactly one data plane; its settings live in `ModuleConfig`. There is nothing to reference and no name to know.
-- **No separate access resource.** The credentials come with the bucket. Rotate them by changing the `storage.deckhouse.io/rotate` annotation on the `SystemBucket`.
+- **No separate access resource.** RBAC on `systembuckets/read` and `systembuckets/write` controls access. STS issues temporary keys; this contract has no long-lived consumer keys or manual rotation annotation.
 - **No reclaim policy.** Deleting a `SystemBucket` deletes the bucket and every object in it. A platform component owns its bucket outright.
 
 ## Who may use it
@@ -34,20 +34,38 @@ No user-facing RBAC is granted for the resource: only cluster and storage admini
 
 One Garage cluster, deployed by the controller:
 
-- three replicas with a replication factor of 3 in the platform's high-availability mode, independent of how many nodes the cluster offers — replicas spread one per node where there are enough, and co-locate otherwise;
+- three replicas with a replication factor of 3 in the platform's high-availability mode. Required pod anti-affinity keeps them on distinct eligible hosts; fewer than three hosts leave replicas Pending rather than co-locating them;
 - how big it is is not a setting: every replica's volume is sized from the sum of the `SystemBucket` sizes (plus headroom and the metadata reserve) and grows with it, as long as the StorageClass allows volume expansion;
 - storage is one `PersistentVolumeClaim` per replica, ordered from `storageClass` (falling back to `global.modules.storageClass` and then the cluster default). A StorageClass is required — without one no data plane is created, and every `SystemBucket` says so;
 - outside that mode, a single replica with replication factor 1 — a third of the footprint, no redundancy. That replica never relocates: on a node-pinned class relocating it would mean losing the whole store (there is no second copy), so when its node goes away it stays Pending with its data intact on that node's disk — the storage is unavailable until the node comes back. On a class whose volumes follow the pod the outage is only the move. The mode follows `highAvailability`, then `global.highAvailability`, and with neither set, whether the control plane itself is highly available. In that last case a shrink is not performed: a cluster that loses masters reads as not highly available, and the store keeps its three replicas until `highAvailability: false` is written out loud;
 - what a replica's move costs depends on the class. Where volumes are pinned to nodes (a local class), moving a replica leaves its copy behind and Garage rebuilds it from the others — the next replica moves only once that rebuild is complete, which takes at least ten minutes per move; where volumes follow the pod (a network class), the volume is simply attached elsewhere. The module reads which it is from the volume itself;
-- placement follows the platform's rule for system components: the data plane runs on nodes with the `node-role.deckhouse.io/system-s3` role if the cluster has any, on system nodes (`node-role.deckhouse.io/system`) if it has those instead, and on any node otherwise; it tolerates the `dedicated.deckhouse.io` taint with the value `system-s3` or `system`. To give the store nodes of its own, give a NodeGroup the `system-s3` role — with disks sized for it, since that is where its volumes are ordered on a local class. The masters are not used unless they are the only nodes without a taint. The replicas spread one per node as far as the eligible nodes allow, and share one where there is only one. During a migration two Garage clusters run on the same nodes side by side; each spreads itself and neither pushes the other off a node. The controller itself stays on the control-plane nodes;
+- placement follows the platform's rule for system components: the data plane
+  runs on nodes with the `node-role.deckhouse.io/system-s3` role if the cluster
+  has any, on system nodes (`node-role.deckhouse.io/system`) if it has those
+  instead, and on any node otherwise; it tolerates the `dedicated.deckhouse.io`
+  taint with the value `system-s3` or `system`. To give the store nodes of its
+  own, give a NodeGroup the `system-s3` role — with disks sized for it, since
+  that is where its volumes are ordered on a local class. The masters are not
+  used unless they are the only nodes without a taint. Required anti-affinity
+  separates HA replicas by `kubernetes.io/hostname`. If a `system-s3` role
+  exists on too few nodes, placement does not fall back to other roles or
+  recycle PVCs to consolidate the replicas. Add eligible nodes or explicitly
+  change `highAvailability`. During a migration two Garage clusters run on the
+  same nodes side by side; each spreads itself and neither pushes the other off
+  a node. The controller itself stays on the control-plane nodes and follows
+  control-plane HA independently of the Garage replica mode;
 - what this means for the StorageClass: it has to be able to give volumes on those nodes, and with `volumeBindingMode: WaitForFirstConsumer` — with `Immediate` the volume is allocated before a node is chosen, and the replica is bound to wherever it landed.
 
 {{< alert level="warning" >}}
-Changing the high-availability mode of an installation that already holds data is done **on the same Garage cluster and the same volumes**. Garage cannot change its replication factor while it runs, so the module stops the data plane, removes the saved cluster layout and starts it again with the other replica count; nothing is copied. Going from one replica to three, the store is unavailable from the stop until the three replicas are up — usually under a minute — and the new replicas are filled in the background while it serves. Going from three to one, writes are refused (403) until every replica holds everything, while reads keep working; if that takes longer than 10 minutes, writes are given back and the change is tried again later. The store is then unavailable for about a minute while it restarts on one replica, and the volumes of the two replicas that are gone are released. Temporary keys asked for with write access while writes are refused are refused as well.
+Changing the high-availability mode of an installation that already holds data is done **on the same Garage cluster and the same volumes**. Garage cannot change its replication factor while it runs, so the module stops the data plane, removes the saved cluster layout and starts it again with the other replica count; nothing is copied. Going from one replica to three, the store is unavailable from the stop until the three replicas are up — with duration depending on volumes and startup time — and the new replicas are filled in the background while it serves. Going from three to one, writes are refused (403) until every replica holds everything, while reads keep working; if that takes longer than 10 minutes, writes are given back and the change is tried again later. The store is then unavailable while it restarts on one replica, and the volumes of the two replicas that are gone are released. Temporary keys asked for with write access while writes are refused are refused as well.
 
 Changing the StorageClass — alone or together with the mode — is a **migration between two Garage clusters**. Bound volumes cannot be re-ordered from another class, so the module builds a second cluster next to the first, copies the objects into it and moves the endpoint onto it. Depending on how much there is to copy, that takes minutes or hours.
 
-What the consumers see is a few minutes, during the switch itself, in which writes are refused with a 403 while reads keep working. A multipart upload in flight at that moment is broken like any other write and has to be retried; the parts it had already written never become an object and are removed by the automatic sweep a day later. The temporary keys issued before the switch stop working with it, and a client asks for another — which is the same thing it does when one expires. The endpoint keeps its address, and nothing has to be reconfigured. Progress is reported in each `SystemBucket`'s `StorageReady` condition, and the cluster that was migrated away from is kept read-only for 24 hours afterwards as the way back.
+During cutover writes are refused with a 403. The final pass copies the delta and removes destination objects absent from the frozen source, then checks aggregate object and byte counts, not every object's SHA256. An in-flight multipart upload may need to be retried; the controller sweeps incomplete parts older than a day. Previously issued temporary keys are not imported: consumers must obtain new credentials even before the old `Expiration`. Expiry-based SDK refresh does not guarantee recovery from this early invalidation; test the application's handling of that 403. The endpoint address is stable, but uninterrupted access is not guaranteed. Progress is reported in `Module/system-s3.MigrationReady`; HA transitions use `ReplicationReady`. The old cluster is retained read-only for 24 hours without reverse-copying new writes; it is a recovery source, not an automatic lossless rollback.
+
+Cutover also stops and restarts **all source Garage Pods on their existing PVCs**, without purging the layout. Reads are unavailable during this restart. The final copier starts only after the old Pods have terminated and the restarted cluster has synchronized; termination is never force-bypassed on timeout. Pending write-key grants are tracked in the migration ConfigMap across controller replicas and restarts. An ambiguous grant RPC retains its barrier until Garage confirms the key has expired; a missing record alone is not proof of expiration. Do not manually remove these tickets or force-delete source Pods to unblock migration. The controller normally abandons a cutover after 30 minutes, stopping copier Pods before allowing writes again; recovery still depends on the source volumes and Pods becoming available.
+
+Objects are skipped only when size and a non-empty ETag agree. Different multipart ETags require copying again, regardless of timestamps, so large multipart datasets can exceed the cutover budget. A confirmed destination quota failure in bulk copy enters bounded frozen synchronization, which prunes stale destination keys before copying replacements. Authentication failures do not trigger this transition and destination quotas are not removed.
 
 Both clusters exist at once for the length of the migration, so the storage it needs is up to twice the usual — more when moving from one replica to three. Putting the setting back before the switch happens calls the migration off and removes the half-built cluster.
 {{< /alert >}}
@@ -56,7 +74,7 @@ Both clusters exist at once for the length of the migration, so the storage it n
 
 There are no long-lived credentials, and no `Secret` anywhere holding a key for a
 bucket. A consumer presents its ServiceAccount token at the credentials endpoint
-and receives a key pair the backend stops honouring an hour later. The endpoint
+and receives a key pair the backend stops honouring at most thirty minutes later. The endpoint
 speaks AWS STS `AssumeRoleWithWebIdentity`, so any S3 client already knows how to
 use it; see [USAGE](usage.html).
 

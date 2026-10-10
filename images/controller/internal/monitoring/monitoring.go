@@ -35,8 +35,7 @@ const namespace = "system_s3"
 
 var (
 	// storeReady is the readiness of the single system data plane, 1 or 0. Same
-	// value as the StorageReady condition, which only exists where a SystemBucket
-	// exists.
+	// value as Module/system-s3's StorageReady condition.
 	storeReady = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "store_ready",
@@ -121,18 +120,16 @@ var (
 		Help:      "Whether a system bucket is fully provisioned (1) or not (0).",
 	}, []string{"namespace", "name"})
 
-	// bucketSizeApplied is the SizeApplied condition of one bucket: 1 when the
-	// quota and the volumes both fit spec.size, 0 while one of them does not, with
+	// bucketSizeUpToDate is the SizeUpToDate condition of one bucket: 1 when the
+	// backend quota matches spec.size, 0 while it does not, with
 	// the condition's reason as a label.
 	//
-	// The volumes half has an alert of its own on the store (StoreCannotGrow); the
-	// quota half does not, and a quota that never reaches the backend is a bucket
-	// whose raised size is a number on a resource and nothing else. The reason
-	// label is what lets the alert say which of the two it is.
-	bucketSizeApplied = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	// Keep the published metric name for existing dashboards and alert rules.
+	// Shared PVC expansion is reported independently by the store's metrics.
+	bucketSizeUpToDate = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "bucket_size_applied",
-		Help:      "Whether a system bucket's spec.size has taken effect (1) or not (0), by the SizeApplied reason.",
+		Help:      "Whether a system bucket's spec.size has taken effect (1) or not (0), by the SizeUpToDate reason.",
 	}, []string{"namespace", "name", "reason"})
 
 	// The three sizes of one replica's volume, which are equal on a healthy store
@@ -187,18 +184,18 @@ func BucketReady(namespace, name string, ready bool) {
 	bucketReady.WithLabelValues(namespace, name).Set(v)
 }
 
-// BucketSizeApplied records a bucket's SizeApplied condition.
+// BucketSizeUpToDate records a bucket's SizeUpToDate condition.
 //
 // The series of the previous reason is dropped rather than set to zero, for the
 // same reason as in Migration: an alert on the reason must stop matching once
 // the reason is gone.
-func BucketSizeApplied(namespace, name, reason string, applied bool) {
-	bucketSizeApplied.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
+func BucketSizeUpToDate(namespace, name, reason string, applied bool) {
+	bucketSizeUpToDate.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
 	v := 0.0
 	if applied {
 		v = 1
 	}
-	bucketSizeApplied.WithLabelValues(namespace, name, reason).Set(v)
+	bucketSizeUpToDate.WithLabelValues(namespace, name, reason).Set(v)
 }
 
 // StoreVolumes records the three sizes of a replica's volume: what it should be,
@@ -249,7 +246,7 @@ func ForgetBucket(namespace, name, bucket string) {
 	bucketObjects.DeleteLabelValues(namespace, name, bucket)
 	bucketQuotaObjects.DeleteLabelValues(namespace, name, bucket)
 	bucketReady.DeleteLabelValues(namespace, name)
-	bucketSizeApplied.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
+	bucketSizeUpToDate.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
 }
 
 func init() {
@@ -262,7 +259,7 @@ func init() {
 	metrics.Registry.MustRegister(bucketObjects)
 	metrics.Registry.MustRegister(bucketQuotaObjects)
 	metrics.Registry.MustRegister(bucketReady)
-	metrics.Registry.MustRegister(bucketSizeApplied)
+	metrics.Registry.MustRegister(bucketSizeUpToDate)
 	metrics.Registry.MustRegister(storeVolumeDesiredBytes)
 	metrics.Registry.MustRegister(storeVolumeRequestedBytes)
 	metrics.Registry.MustRegister(storeVolumeCapacityBytes)

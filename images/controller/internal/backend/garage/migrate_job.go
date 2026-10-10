@@ -206,6 +206,7 @@ const (
 	copyRunning copyOutcome = iota
 	copyDone
 	copyFailed
+	copyQuotaBlocked
 )
 
 // runCopyPass drives one copy Job to completion and reports where it is.
@@ -231,7 +232,9 @@ func (d *Driver) runCopyPass(
 		if err := d.ensureMigrationKeys(ctx, source, target); err != nil {
 			return copyRunning, "", err
 		}
-		if err := d.client.Create(ctx, d.buildCopyJob(name, source, target, buckets, stamp)); err != nil && !apierrors.IsAlreadyExists(err) {
+		job := d.buildCopyJob(name, source, target, buckets, stamp)
+		configureCopyPass(job, pass)
+		if err := d.client.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
 			return copyRunning, "", fmt.Errorf("start the copier: %w", err)
 		}
 		return copyRunning, fmt.Sprintf("copying %d bucket(s) into the new cluster", len(buckets)), nil
@@ -239,20 +242,29 @@ func (d *Driver) runCopyPass(
 		return copyRunning, "", err
 	}
 
-	if job.Annotations[annCopyBuckets] != stamp {
+	if job.Annotations[annCopyBuckets] != stamp || (pass == copyPassDelta && !copyJobHasFinalSync(job)) {
 		// A bucket appeared or disappeared since this Job was started. A Job's pod
 		// template cannot be edited, so the pass is restarted over the new list;
 		// what was already copied is skipped by the copier itself.
 		if err := d.deleteCopyJob(ctx, job); err != nil {
 			return copyRunning, "", err
 		}
-		return copyRunning, "the set of buckets changed; the copy is starting again over all of them", nil
+		return copyRunning, "the bucket set or final synchronization mode changed; the copy is restarting", nil
 	}
 
 	switch {
 	case job.Status.Succeeded > 0:
 		return copyDone, "", nil
 	case jobExhausted(job):
+		if pass == copyPassBulk {
+			blocked, err := d.copyHitQuota(ctx, job)
+			if err != nil {
+				return copyRunning, "", err
+			}
+			if blocked {
+				return copyQuotaBlocked, "the destination quota prevents bulk copy", nil
+			}
+		}
 		if err := d.deleteCopyJob(ctx, job); err != nil {
 			return copyFailed, "", err
 		}
@@ -260,6 +272,25 @@ func (d *Driver) runCopyPass(
 	default:
 		return copyRunning, fmt.Sprintf("copying %d bucket(s) into the new cluster", len(buckets)), nil
 	}
+}
+
+func configureCopyPass(job *batchv1.Job, pass string) {
+	if pass == copyPassDelta {
+		job.Spec.Template.Spec.Containers[0].Env = append(job.Spec.Template.Spec.Containers[0].Env,
+			corev1.EnvVar{Name: migrator.EnvFinalSync, Value: "true"})
+	}
+}
+
+func copyJobHasFinalSync(job *batchv1.Job) bool {
+	if len(job.Spec.Template.Spec.Containers) == 0 {
+		return false
+	}
+	for _, env := range job.Spec.Template.Spec.Containers[0].Env {
+		if env.Name == migrator.EnvFinalSync {
+			return env.Value == "true"
+		}
+	}
+	return false
 }
 
 // jobExhausted reports whether the Job has given up: its backoff limit is spent
@@ -283,6 +314,60 @@ func (d *Driver) deleteCopyJob(ctx context.Context, job *batchv1.Job) error {
 		return fmt.Errorf("remove the copier Job: %w", err)
 	}
 	return nil
+}
+
+// stopDeltaPass is a non-blocking termination barrier before thawing the source.
+// Foreground deletion retains the Job until dependent pods are removed. The
+// explicit pod check also covers a Job already background-deleted by an earlier
+// reconcile or controller version.
+func (d *Driver) stopDeltaPass(ctx context.Context, source, target *backend.Store) (bool, error) {
+	return d.stopCopyPass(ctx, source, target, copyPassDelta)
+}
+
+func (d *Driver) stopCopyPass(ctx context.Context, source, target *backend.Store, pass string) (bool, error) {
+	name := copyJobName(source, target.Incarnation, pass)
+	job := &batchv1.Job{}
+	key := client.ObjectKey{Namespace: d.namespace, Name: name}
+	if err := d.apiReader.Get(ctx, key, job); err == nil {
+		if job.DeletionTimestamp.IsZero() {
+			policy := metav1.DeletePropagationForeground
+			if err := d.client.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &policy}); err != nil && !apierrors.IsNotFound(err) {
+				return false, fmt.Errorf("stop the final copier: %w", err)
+			}
+		}
+		return false, nil
+	} else if !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("read the final copier: %w", err)
+	}
+	pods := &corev1.PodList{}
+	if err := d.apiReader.List(ctx, pods, client.InNamespace(d.namespace), client.MatchingLabels{"job-name": name}); err != nil {
+		return false, fmt.Errorf("check final copier termination: %w", err)
+	}
+	return len(pods.Items) == 0, nil
+}
+
+func (d *Driver) copyHitQuota(ctx context.Context, job *batchv1.Job) (bool, error) {
+	pods := &corev1.PodList{}
+	if err := d.apiReader.List(ctx, pods, client.InNamespace(d.namespace), client.MatchingLabels{"job-name": job.Name}); err != nil {
+		return false, fmt.Errorf("read copier outcome: %w", err)
+	}
+	for _, pod := range pods.Items {
+		owned := false
+		for _, owner := range pod.OwnerReferences {
+			if owner.UID == job.UID && owner.Kind == "Job" && owner.Name == job.Name && owner.Controller != nil && *owner.Controller {
+				owned = true
+			}
+		}
+		if !owned {
+			continue
+		}
+		for _, status := range pod.Status.ContainerStatuses {
+			if status.Name == "copier" && status.State.Terminated != nil && status.State.Terminated.ExitCode == migrator.QuotaExitCode {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // bucketsStamp is a short hash of the bucket list, for the annotation the Job

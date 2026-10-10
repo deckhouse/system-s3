@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	goruntime "runtime"
@@ -244,7 +245,7 @@ func main() {
 	// The data plane converges from the background loop as well as from every
 	// SystemBucket reconcile, so a cluster with no consumer yet still gets its
 	// storage built. Leader election keeps the loop to one replica.
-	storeManager := controller.NewStoreManager(driver, store, baseLog, cfgParams.RequeueInterval)
+	storeManager := controller.NewStoreManager(driver, store, baseLog, cfgParams.RequeueInterval, mgr.GetClient(), mgr.GetAPIReader())
 	if err := mgr.Add(storeManager); err != nil {
 		log.Error("unable to register the store manager", logger.Err(err))
 		os.Exit(1)
@@ -333,6 +334,9 @@ func runCopier(ctx context.Context, log logger.Logger) {
 
 	if err := migrator.Run(ctx, cfg, log); err != nil {
 		log.Error("the copy did not finish", logger.Err(err))
+		if errors.Is(err, migrator.ErrQuotaExceeded) {
+			os.Exit(migrator.QuotaExitCode)
+		}
 		os.Exit(1)
 	}
 	log.Info("every bucket is copied")

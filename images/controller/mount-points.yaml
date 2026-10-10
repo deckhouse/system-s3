@@ -3,3 +3,4 @@ dirs:
   # well: the credentials endpoint (internal/sts) serves it, and it is issued for
   # names in this namespace that now include the endpoint's Service.
   - /etc/sts-certs
+  - /etc/garage-tls

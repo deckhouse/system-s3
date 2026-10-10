@@ -200,8 +200,8 @@ func TestPermissionsFollowTheSubjectAccessReview(t *testing.T) {
 				resp.Result.Credentials.SecretAccessKey != "secret-half" {
 				t.Errorf("credentials in the response: %+v", resp.Result.Credentials)
 			}
-			if resp.Result.Credentials.Expiration != "2026-09-16T13:00:00Z" {
-				t.Errorf("expiration=%q, want the default hour from now in RFC 3339",
+			if resp.Result.Credentials.Expiration != "2026-09-16T12:30:00Z" {
+				t.Errorf("expiration=%q, want thirty minutes from now in RFC 3339",
 					resp.Result.Credentials.Expiration)
 			}
 		})
@@ -305,6 +305,8 @@ func TestRequestedDurationIsClamped(t *testing.T) {
 		"in range":  {"1800", 30 * time.Minute},
 		"too short": {"60", MinDuration},
 		"too long":  {"86400", MaxDuration},
+		"SDK hour":  {"3600", 30 * time.Minute},
+		"overflow":  {"9223372036854775807", 30 * time.Minute},
 	}
 	for name, tc := range cases {
 		got, err := requestedDuration(tc.raw)

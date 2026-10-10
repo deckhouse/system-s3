@@ -101,7 +101,7 @@ func TestEveryValidationRuleCompiles(t *testing.T) {
 //
 // A guard that can jam the platform is worse than the mistake it prevents. The
 // replica-count switch is refused by the driver instead, which reports it on
-// StorageReady and blocks nothing (see TestReplicaSwitchNeedsTheAcknowledgement
+// Module/system-s3.ReplicationReady and blocks nothing (see TestReplicaSwitchNeedsTheAcknowledgement
 // in the garage package).
 func TestNoTransitionRulesInModuleValues(t *testing.T) {
 	for _, path := range schemaFiles {
