@@ -43,8 +43,8 @@ properties:
       replicas that are gone are released.
 
       The endpoint keeps its address and every key keeps working, so no
-      credentials `Secret` has to be re-read. Progress is reported in every
-      `SystemBucket`'s `StorageReady` condition.
+      credentials `Secret` has to be re-read. Progress is reported in the
+      `ReplicationReady` condition of `Module/system-s3`.
   storageClass:
     type: string
     x-examples: ["ceph-csi-rbd", "localpath-system"]
@@ -57,8 +57,8 @@ properties:
 
       A StorageClass is required: the module has no storage of its own to fall
       back to, so an installation where none of the three resolves brings up no
-      data plane at all and says so in every `SystemBucket`'s `StorageReady`
-      condition.
+      data plane at all and says so in the `StorageReady` condition of
+      `Module/system-s3`.
 
       Which class to choose is a durability decision. A class whose volumes are
       pinned to a node (a local class) ties each replica's data to the node it
