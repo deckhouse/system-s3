@@ -136,11 +136,13 @@ const (
 	migrationKeyFrozenKeys       = "frozen-keys"
 	migrationKeyRepairAt         = "repair-launched-at"
 	migrationKeyWriteFence       = "write-fence"
+	migrationKeyFencePods        = "write-fence-pods"
 	migrationKeyEndpointRecorded = "endpoint-recorded"
 )
 
 const (
 	writeFenceStopping   = "Stopping"
+	writeFenceRolling    = "Rolling"
 	writeFenceRestarting = "Restarting"
 	writeFenceReady      = "Ready"
 )
@@ -190,6 +192,9 @@ type migrationState struct {
 	// repairAt is when the in-place growth launched the block repair.
 	repairAt   time.Time
 	writeFence string
+	// fencePods are the UIDs of the source pods that ran when writes were
+	// frozen, for the rolling fence of a highly available source.
+	fencePods []string
 	// recorded controls whether the endpoint selector names a plane. A ConfigMap
 	// created only for write tickets preserves a legacy wide selector; an actual
 	// migration state write starts naming the plane (see endpointSelector).
@@ -274,6 +279,7 @@ func parseMigrationState(data map[string]string) migrationState {
 		repairAt:     parseTime(data[migrationKeyRepairAt]),
 		frozenKeys:   parseFrozenKeys(data[migrationKeyFrozenKeys]),
 		writeFence:   data[migrationKeyWriteFence],
+		fencePods:    parseList(data[migrationKeyFencePods]),
 	}
 	// Any real plane, the first one included. It is the first one exactly half the
 	// time: before a cutover the other plane is the one being built, after it the
@@ -397,6 +403,9 @@ func (d *Driver) saveMigrationState(ctx context.Context, store *backend.Store, s
 	if state.writeFence != "" {
 		data[migrationKeyWriteFence] = state.writeFence
 	}
+	if len(state.fencePods) > 0 {
+		data[migrationKeyFencePods] = strings.Join(state.fencePods, ",")
+	}
 	if err := d.updateGrantState(ctx, store, func(cm *corev1.ConfigMap) error {
 		next := make(map[string]string, len(data)+len(cm.Data))
 		for key, value := range data {
@@ -514,4 +523,11 @@ func reportedMigration(state migrationState) (string, time.Time) {
 		return "", time.Time{}
 	}
 	return string(state.phase), state.startedAt
+}
+
+func parseList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
 }

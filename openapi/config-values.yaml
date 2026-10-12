@@ -81,7 +81,11 @@ properties:
       new class, copies the objects into it and moves the endpoint onto it. Both
       clusters exist at once for the length of it, so the storage it needs is up
       to twice the usual. What consumers see is a few minutes, during the switch
-      itself, in which writes are refused while reads keep working. The cluster
+      itself, in which writes are refused. In the highly available mode the
+      store keeps serving reads, though a read can stall for up to about a
+      minute while a source replica restarts; a single-replica store is
+      restarted once during the switch, and reads are unavailable for that
+      minute or two. The cluster
       migrated away from is kept read-only for 24 hours afterwards. Putting the
       setting back before the switch happens calls the migration off and removes
       the half-built cluster. A change of `highAvailability` made together with

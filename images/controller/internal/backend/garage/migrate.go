@@ -537,6 +537,7 @@ func (d *Driver) migrationCutover(
 		state.phase = phaseCopying
 		state.frozenAt = time.Time{}
 		state.writeFence = ""
+		state.fencePods = nil
 		if err := d.saveMigrationState(ctx, serving, state); err != nil {
 			return state, "", err
 		}
@@ -572,8 +573,13 @@ func (d *Driver) migrationCutover(
 		return state, "", err
 	}
 	if state.writeFence != writeFenceReady {
-		if state.writeFence != "" && state.writeFence != writeFenceRestarting {
+		if state.writeFence != "" && state.writeFence != writeFenceRestarting && state.writeFence != writeFenceRolling {
 			return state, "", fmt.Errorf("unexpected write fence stage %q", state.writeFence)
+		}
+		if state.writeFence == writeFenceRolling {
+			if _, msg, err := d.fencePodsSettled(ctx, serving); err != nil || msg != "" {
+				return state, msg, err
+			}
 		}
 		synced, why, err := clusterInSync(ctx, svc, desiredReplicas(serving), d.blocksOnDisk(serving))
 		if err != nil {
@@ -582,9 +588,25 @@ func (d *Driver) migrationCutover(
 		if !synced {
 			return state, fmt.Sprintf("waiting for the frozen source to synchronize (%s)", why), nil
 		}
+		if state.writeFence == "" && desiredReplicas(serving) > 1 {
+			pods, err := d.planePods(ctx, serving)
+			if err != nil {
+				return state, "", err
+			}
+			state.writeFence, state.fencePods = writeFenceRolling, podUIDs(pods)
+			return state, "restarting the source Garage pods one at a time to finish in-flight requests",
+				d.saveMigrationState(ctx, serving, state)
+		}
 		if state.writeFence == "" {
 			state.writeFence = writeFenceStopping
 			return state, "stopping the source Garage on its existing PVCs to finish in-flight requests", d.saveMigrationState(ctx, serving, state)
+		}
+		if state.writeFence == writeFenceRolling {
+			done, msg, err := d.rollFencePods(ctx, serving, state.fencePods)
+			if err != nil || !done {
+				return state, msg, err
+			}
+			state.fencePods = nil
 		}
 		state.writeFence = writeFenceReady
 		return state, "the restarted source is synchronized; final copy can start", d.saveMigrationState(ctx, serving, state)
@@ -638,6 +660,7 @@ func (d *Driver) migrationCutover(
 	switched := state
 	switched.serving, switched.other = state.other, state.serving
 	switched.phase = phaseDraining
+	switched.fencePods = nil
 	switched.cutoverAt = time.Now()
 	if err := d.apply(ctx, buildEndpointService(serving, d.namespace, endpointSelector(serving, switched))); err != nil {
 		return state, "", fmt.Errorf("switch the endpoint to the new cluster: %w", err)
@@ -655,8 +678,11 @@ func (d *Driver) migrationCutover(
 // freezeWrites revokes write access from every key of every bucket of a cluster,
 // and reports how many buckets it froze.
 //
-// Reads are left alone: a consumer that only reads sees nothing at all, and one
-// that writes gets a 403 for the length of the delta copy. There is no way to
+// Reads are left alone. The fence that follows restarts the source pods: one at
+// a time in the highly available mode (rollFencePods), where a read can stall
+// while the replica it asks first is away; all at once for a single replica,
+// whose readers see that restart. A consumer that writes gets a 403 for the length of
+// the delta copy. There is no way to
 // pause an S3 consumer, and two clusters taking writes at once is the one outcome
 // a migration must not produce.
 func (d *Driver) freezeWrites(ctx context.Context, plane *backend.Store) (int, error) {

@@ -18,15 +18,20 @@ package garage
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 )
 
 func TestCutoverFenceWaitsForPodsAndRetainsClaimsAcrossControllerRestart(t *testing.T) {
@@ -111,5 +116,83 @@ func TestExpiredCutoverFenceStopsOldPodsBeforeReturningToCopying(t *testing.T) {
 	next, _, err := d.advanceCutoverOffline(ctx, store, state)
 	if err != nil || next.phase != phaseCopying || next.writeFence != "" || !next.frozenAt.IsZero() {
 		t.Fatalf("timeout did not safely thaw: %+v %v", next, err)
+	}
+}
+
+func fencePod(store *backend.Store, ordinal int, uid string, ready bool) *corev1.Pod {
+	status := corev1.ConditionFalse
+	if ready {
+		status = corev1.ConditionTrue
+	}
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("%s-%d", resourceName(store), ordinal), Namespace: "d8-system-s3", Labels: planeLabels(store), UID: types.UID(uid)},
+		Status:     corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: status}}},
+	}
+}
+
+func TestRollingFenceRestartsOneSourcePodAtATime(t *testing.T) {
+	ctx := context.Background()
+	store := planeOf(systemStore(), 1, true, localSC)
+	c := fake.NewClientBuilder().WithScheme(coreScheme(t)).
+		WithObjects(fencePod(store, 0, "old-0", true), fencePod(store, 1, "old-1", true), fencePod(store, 2, "old-2", true)).Build()
+	d := testDriver(t, c, "d8-system-s3")
+	old := []string{"old-0", "old-1", "old-2"}
+
+	present := func() []string {
+		pods, err := d.planePods(ctx, store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return podUIDs(pods)
+	}
+
+	for step, ordinal := range []int{0, 1, 2} {
+		done, msg, err := d.rollFencePods(ctx, store, old)
+		if err != nil || done {
+			t.Fatalf("step %d: %v %v", step, done, err)
+		}
+		if got := present(); len(got) != 2 {
+			t.Fatalf("step %d: want exactly one pod restarted at a time, have %v (%s)", step, got, msg)
+		}
+		// While the restarted pod is missing or not ready nothing else is touched.
+		if _, _, err := d.rollFencePods(ctx, store, old); err != nil {
+			t.Fatal(err)
+		}
+		if got := present(); len(got) != 2 {
+			t.Fatalf("step %d: a second pod went down while one was missing: %v", step, got)
+		}
+		back := fencePod(store, ordinal, fmt.Sprintf("new-%d", ordinal), false)
+		if err := c.Create(ctx, back); err != nil {
+			t.Fatal(err)
+		}
+		if _, msg, _ := d.rollFencePods(ctx, store, old); len(present()) != 3 || msg == "" {
+			t.Fatalf("step %d: a pod went down while the restarted one was not ready: %v", step, present())
+		}
+		back.Status.Conditions[0].Status = corev1.ConditionTrue
+		if err := c.Status().Update(ctx, back); err != nil {
+			t.Fatal(err)
+		}
+	}
+	done, _, err := d.rollFencePods(ctx, store, old)
+	if err != nil || !done {
+		t.Fatalf("fence not done after every pod restarted: %v %v", done, err)
+	}
+	if got := present(); len(got) != 3 || got[0] != "new-0" || got[2] != "new-2" {
+		t.Fatalf("unexpected pods after the fence: %v", got)
+	}
+}
+
+func TestRollingFencePodsSurviveControllerRestart(t *testing.T) {
+	ctx := context.Background()
+	store := planeOf(systemStore(), 1, true, localSC)
+	c := fake.NewClientBuilder().WithScheme(coreScheme(t)).Build()
+	d := testDriver(t, c, "d8-system-s3")
+	state := migrationState{serving: 1, other: 2, phase: phaseCutover, frozenAt: time.Now(), writeFence: writeFenceRolling, fencePods: []string{"a", "b", "c"}}
+	if err := d.saveMigrationState(ctx, store, state); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := testDriver(t, c, "d8-system-s3").loadMigrationState(ctx, store)
+	if err != nil || loaded.writeFence != writeFenceRolling || strings.Join(loaded.fencePods, ",") != "a,b,c" || !loaded.writesFrozen() {
+		t.Fatalf("rolling fence not persisted: %+v %v", loaded, err)
 	}
 }
