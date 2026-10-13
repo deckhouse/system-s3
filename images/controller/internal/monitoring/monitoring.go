@@ -25,6 +25,7 @@ limitations under the License.
 package monitoring
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -168,6 +169,20 @@ var (
 	// refused — a RoleBinding removed, a client asking for a key on every request
 	// and hitting the per-bucket cap — is invisible from the outside otherwise.
 	// The error code is the label because it is what the client is told.
+	// temporaryKeyExpiration is the list of temporary keys Garage still honours,
+	// one series per key, valued with the Unix time it stops being honoured.
+	//
+	// It is the only place outside Garage an administrator can see who holds
+	// access to a bucket right now: the module keeps no record of the keys it
+	// mints. The access key ID is not a secret; the secret half never leaves
+	// Garage after it is handed to the caller. A bucket holds at most 50
+	// unexpired temporary keys, which bounds the series.
+	temporaryKeyExpiration = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "temporary_key_expiration_seconds",
+		Help:      "Unix time an unexpired temporary key stops being honoured, by bucket, access key ID, the ServiceAccount it was issued to and whether it may write.",
+	}, []string{"bucket", "access_key_id", "subject", "write"})
+
 	stsRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "sts_requests_total",
@@ -264,6 +279,24 @@ func init() {
 	metrics.Registry.MustRegister(storeVolumeRequestedBytes)
 	metrics.Registry.MustRegister(storeVolumeCapacityBytes)
 	metrics.Registry.MustRegister(stsRequestsTotal)
+	metrics.Registry.MustRegister(temporaryKeyExpiration)
+}
+
+// TemporaryKey is one series of temporary_key_expiration_seconds.
+type TemporaryKey struct {
+	Bucket, AccessKeyID, Subject string
+	Write                        bool
+	ExpiresAt                    time.Time
+}
+
+// TemporaryKeys replaces the published list of unexpired temporary keys. A key
+// that expired or was swept since the last call drops out.
+func TemporaryKeys(keys []TemporaryKey) {
+	temporaryKeyExpiration.Reset()
+	for _, k := range keys {
+		temporaryKeyExpiration.WithLabelValues(k.Bucket, k.AccessKeyID, k.Subject, strconv.FormatBool(k.Write)).
+			Set(float64(k.ExpiresAt.Unix()))
+	}
 }
 
 // StoreReady records the readiness of the named store.

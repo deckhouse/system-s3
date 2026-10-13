@@ -61,6 +61,10 @@ type countingDriver struct {
 
 // The sweeps are not what this test is about; they are here because the manager
 // takes one interface.
+func (d *countingDriver) TemporaryKeys(context.Context, *backend.Store) ([]backend.TemporaryKey, error) {
+	return nil, nil
+}
+
 func (d *countingDriver) SweepExpiredTemporaryAccess(_ context.Context, _ *backend.Store) (int, error) {
 	d.swept.Add(1)
 	return 0, nil

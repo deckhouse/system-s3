@@ -47,6 +47,10 @@ type storeDriver interface {
 	// occupy the volume without appearing in any listing or counting against any
 	// quota.
 	SweepIncompleteUploads(ctx context.Context, store *backend.Store) (int, error)
+
+	// TemporaryKeys lists the unexpired temporary keys, for the metric that is
+	// the only place outside Garage they can be seen.
+	TemporaryKeys(ctx context.Context, store *backend.Store) ([]backend.TemporaryKey, error)
 }
 
 // StoreManager owns the module's single system data plane.
@@ -110,6 +114,10 @@ type StoreManager struct {
 	// lastSweep is when the expired temporary keys were last cleaned up. Touched
 	// only from Start's goroutine.
 	lastSweep time.Time
+
+	// lastKeys is when the list of temporary keys was last published. Touched
+	// only from Start's goroutine.
+	lastKeys time.Time
 
 	// now is time.Now, replaced in tests.
 	now func() time.Time
@@ -251,6 +259,35 @@ func (m *StoreManager) sweep(ctx context.Context) {
 	}
 }
 
+// keysInterval is how often the list of unexpired temporary keys is published.
+// A key lives 15 to 30 minutes, so a list that lags by more than a minute is a
+// list of the wrong keys.
+const keysInterval = time.Minute
+
+// publishTemporaryKeys refreshes temporary_key_expiration_seconds, no more often
+// than keysInterval. A failed read keeps the previous list rather than clearing
+// it: an empty list would claim nobody holds access.
+func (m *StoreManager) publishTemporaryKeys(ctx context.Context) {
+	now := m.clock()
+	if !m.lastKeys.IsZero() && now.Sub(m.lastKeys) < keysInterval {
+		return
+	}
+	m.lastKeys = now
+
+	keys, err := m.driver.TemporaryKeys(ctx, m.store)
+	if err != nil {
+		m.log.Error("unable to list temporary access keys", logger.Err(err))
+		return
+	}
+	series := make([]monitoring.TemporaryKey, 0, len(keys))
+	for _, k := range keys {
+		series = append(series, monitoring.TemporaryKey{
+			Bucket: k.Bucket, AccessKeyID: k.AccessKeyID, Subject: k.Subject, Write: k.Write, ExpiresAt: k.ExpiresAt,
+		})
+	}
+	monitoring.TemporaryKeys(series)
+}
+
 // State returns the last observed state without touching the backend.
 func (m *StoreManager) State() backend.StoreState {
 	m.mu.Lock()
@@ -273,6 +310,7 @@ func (m *StoreManager) Start(ctx context.Context) error {
 			m.log.Error("unable to reconcile the system object storage", logger.Err(err))
 		}
 		m.sweep(ctx)
+		m.publishTemporaryKeys(ctx)
 		select {
 		case <-ctx.Done():
 			return nil

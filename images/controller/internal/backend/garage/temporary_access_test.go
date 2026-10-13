@@ -23,6 +23,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 )
 
 // TestLiveTemporaryKeysCountsOnlyThisBucketsUnexpiredOnes: the limit exists to
@@ -100,5 +103,76 @@ func TestTemporaryKeyNameCarriesBucketAndSubject(t *testing.T) {
 	want := fmt.Sprintf("%sd8-monitoring-loki-d8-monitoring.agent", temporaryKeyPrefix)
 	if name != want {
 		t.Errorf("temporaryKeyName=%q, want %q", name, want)
+	}
+}
+
+// TestTemporaryKeysListsTheLiveOnesWithTheirBucket: the list an administrator
+// sees is the unexpired temporary keys only, each charged to the bucket that
+// granted it — not to a bucket whose name happens to prefix the key name — with
+// the subject cut after that bucket's own name and the bucket's own permission.
+func TestTemporaryKeysListsTheLiveOnesWithTheirBucket(t *testing.T) {
+	buckets := map[string]bucketInfo{
+		"b1": {ID: "b1", GlobalAliases: []string{"loki"}, Keys: []bucketKeyPerm{
+			{AccessKeyID: "GK1", Name: "sts-loki-d8-monitoring.agent", Permissions: permissions{Read: true, Write: true}},
+			{AccessKeyID: "GK3", Name: "sts-loki-d8-monitoring.gone", Permissions: permissions{Read: true, Write: true}},
+			{AccessKeyID: "GK5", Name: "d8-monitoring.loki", Permissions: permissions{Read: true, Write: true, Owner: true}},
+		}},
+		"b2": {ID: "b2", GlobalAliases: []string{"loki-staging"}, Keys: []bucketKeyPerm{
+			{AccessKeyID: "GK2", Name: "sts-loki-staging-d8-monitoring.reader", Permissions: permissions{Read: true}},
+		}},
+	}
+	keys := []map[string]any{
+		{"id": "GK1", "name": "sts-loki-d8-monitoring.agent", "expired": false, "expiration": "2026-10-13T10:30:00Z"},
+		{"id": "GK2", "name": "sts-loki-staging-d8-monitoring.reader", "expired": false, "expiration": "2026-10-13T10:15:00.5Z"},
+		{"id": "GK3", "name": "sts-loki-d8-monitoring.gone", "expired": true, "expiration": "2026-10-13T09:00:00Z"},
+		{"id": "GK5", "name": "d8-monitoring.loki", "expired": false},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/ListKeys":
+			_ = json.NewEncoder(w).Encode(keys)
+		case "/v2/ListBuckets":
+			_ = json.NewEncoder(w).Encode([]bucketListItem{{ID: "b1"}, {ID: "b2"}})
+		case "/v2/GetBucketInfo":
+			_ = json.NewEncoder(w).Encode(buckets[r.URL.Query().Get("id")])
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	got, err := temporaryKeysOf(context.Background(), newAdminClient(srv.URL, "token"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []backend.TemporaryKey{
+		{Bucket: "loki", AccessKeyID: "GK1", Subject: "d8-monitoring.agent", Write: true, ExpiresAt: time.Date(2026, 10, 13, 10, 30, 0, 0, time.UTC)},
+		{Bucket: "loki-staging", AccessKeyID: "GK2", Subject: "d8-monitoring.reader", Write: false, ExpiresAt: time.Date(2026, 10, 13, 10, 15, 0, 5e8, time.UTC)},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i].Bucket != want[i].Bucket || got[i].AccessKeyID != want[i].AccessKeyID || got[i].Subject != want[i].Subject ||
+			got[i].Write != want[i].Write || !got[i].ExpiresAt.Equal(want[i].ExpiresAt) {
+			t.Errorf("key %d: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestTemporaryKeysWithoutLiveKeysDoesNotReadBuckets: no live temporary key, no
+// bucket reads — the list is published every minute and most minutes it is empty.
+func TestTemporaryKeysWithoutLiveKeysDoesNotReadBuckets(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/ListKeys" {
+			t.Errorf("unexpected request %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "GK5", "name": "d8-monitoring.loki", "expired": false}})
+	}))
+	defer srv.Close()
+
+	got, err := temporaryKeysOf(context.Background(), newAdminClient(srv.URL, "token"))
+	if err != nil || len(got) != 0 {
+		t.Fatalf("got %+v, %v; want no keys", got, err)
 	}
 }

@@ -194,6 +194,17 @@ type (
 	AccessState = objectstorage.AccessState
 )
 
+// TemporaryKey is one unexpired key the credentials endpoint minted, as Garage
+// holds it: the bucket it is granted on, the ServiceAccount it was issued to and
+// whether it may write. The secret half is not here — Garage hands it out once.
+type TemporaryKey struct {
+	Bucket      string
+	AccessKeyID string
+	Subject     string
+	Write       bool
+	ExpiresAt   time.Time
+}
+
 // BucketUsage is what a bucket holds and what it is allowed to hold, as the
 // backend counts it. It is reported alongside BucketState rather than inside it
 // because BucketState is shared with the user-facing module through

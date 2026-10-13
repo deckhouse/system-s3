@@ -207,6 +207,11 @@ in its own namespace. Nothing is copied between them, and revoking access is
 deleting the `RoleBinding`: what was handed out expires on its own, and the next
 request is refused.
 
+Who holds access to a bucket right now is in the metric
+`system_s3_temporary_key_expiration_seconds`: one series per unexpired temporary key, labelled
+`bucket`, `access_key_id`, `subject` (the ServiceAccount the key was issued to) and `write`, valued
+with the Unix time it expires. The list is refreshed every minute; the secret half of a key is not in it.
+
 **Reuse the key you are given until it expires.** Every request mints a new key,
 and that key stays alive for the rest of its lifetime (30 minutes by default)
 whether the client still wants it or not, in metadata Garage replicates to every

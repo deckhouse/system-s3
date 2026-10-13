@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -248,6 +249,79 @@ func (d *Driver) liveTemporaryKeys(ctx context.Context, svc *adminClient, bucket
 		}
 	}
 	return live, nil
+}
+
+// TemporaryKeys lists the unexpired temporary keys of the serving plane, each
+// with the bucket it is granted on.
+//
+// It is what an administrator asks when a bucket is written to by something they
+// did not expect, and the answer has to come from Garage: the module keeps no
+// record of the keys it minted (see temporaryKeyPrefix).
+func (d *Driver) TemporaryKeys(ctx context.Context, store *backend.Store) ([]backend.TemporaryKey, error) {
+	store, _, err := d.servingPlane(ctx, store)
+	if err != nil {
+		return nil, err
+	}
+	svc, ready, err := d.adminClientFor(ctx, store)
+	if err != nil || !ready {
+		return nil, err
+	}
+	return temporaryKeysOf(ctx, svc)
+}
+
+// temporaryKeysOf joins the two halves Garage keeps apart: ListKeys says which
+// keys are still honoured and until when, a bucket's own key list says which of
+// them it granted and with what. The bucket and the subject are not parsed out of
+// the key name — "sts-<bucket>-<subject>" is ambiguous when both contain a
+// hyphen (see liveTemporaryKeys).
+func temporaryKeysOf(ctx context.Context, svc *adminClient) ([]backend.TemporaryKey, error) {
+	keys, err := svc.listKeys(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list access keys: %w", err)
+	}
+	live := make(map[string]keyListItem)
+	for _, k := range keys {
+		if strings.HasPrefix(k.Name, temporaryKeyPrefix) && !k.Expired {
+			live[k.ID] = k
+		}
+	}
+	if len(live) == 0 {
+		return nil, nil
+	}
+
+	buckets, err := svc.listBuckets(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list buckets: %w", err)
+	}
+	var out []backend.TemporaryKey
+	for _, b := range buckets {
+		info, err := svc.getBucketByID(ctx, b.ID)
+		if err != nil {
+			return nil, fmt.Errorf("read bucket %s: %w", b.ID, err)
+		}
+		alias := bucketAlias(info)
+		for _, granted := range info.Keys {
+			k, ok := live[granted.AccessKeyID]
+			if !ok {
+				continue
+			}
+			expiresAt, _ := time.Parse(time.RFC3339Nano, k.Expiration)
+			out = append(out, backend.TemporaryKey{
+				Bucket:      alias,
+				AccessKeyID: k.ID,
+				Subject:     strings.TrimPrefix(k.Name, temporaryKeyPrefix+alias+"-"),
+				Write:       granted.Permissions.Write,
+				ExpiresAt:   expiresAt,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Bucket != out[j].Bucket {
+			return out[i].Bucket < out[j].Bucket
+		}
+		return out[i].ExpiresAt.Before(out[j].ExpiresAt)
+	})
+	return out, nil
 }
 
 // bucketAlias is the bucket's global name, for a message. A bucket always has

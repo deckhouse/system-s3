@@ -275,6 +275,10 @@ func TestSizeUpToDateReplacesAllLegacySizeAppliedStatuses(t *testing.T) {
 func (d *reportingStoreDriver) EnsureStore(context.Context, *backend.Store) (backend.StoreState, error) {
 	return d.state, d.err
 }
+func (*reportingStoreDriver) TemporaryKeys(context.Context, *backend.Store) ([]backend.TemporaryKey, error) {
+	return nil, nil
+}
+
 func (*reportingStoreDriver) SweepExpiredTemporaryAccess(context.Context, *backend.Store) (int, error) {
 	return 0, nil
 }
