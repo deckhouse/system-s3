@@ -7,7 +7,7 @@
 # discovery values describe a three-master cluster with VPA and Prometheus
 # enabled, which is the shape the templates branch on.
 global:
-  enabledModules: [vertical-pod-autoscaler-crd, prometheus]
+  enabledModules: [vertical-pod-autoscaler-crd, vertical-pod-autoscaler, prometheus]
   modulesImages:
     registry:
       base: registry.example.com/deckhouse

@@ -240,7 +240,8 @@ func main() {
 		WithPlacement(garage.Placement{
 			NodeSelector: cfgParams.DataPlaneNodeSelector,
 			Tolerations:  cfgParams.DataPlaneTolerations,
-		})
+		}).
+		WithVPA(cfgParams.VPAEnabled)
 
 	// The data plane converges from the background loop as well as from every
 	// SystemBucket reconcile, so a cluster with no consumer yet still gets its

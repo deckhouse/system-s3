@@ -43,6 +43,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -104,6 +105,10 @@ type Driver struct {
 	// placement is where the data plane may run (see placement.go and
 	// WithPlacement). The chart renders it; the zero value is any untainted node.
 	placement Placement
+
+	// vpaEnabled is whether the data plane gets a VerticalPodAutoscaler (see
+	// vpa.go and WithVPA).
+	vpaEnabled bool
 
 	// The exec clientset is built once. Capturing node identities execs into
 	// every replica on every pass, and a clientset per exec is a set of REST
@@ -701,6 +706,9 @@ func (d *Driver) ensureWorkload(ctx context.Context, store *backend.Store, cfgHa
 	if err := d.apply(ctx, sts); err != nil {
 		return false, "", fmt.Errorf("ensure statefulset: %w", err)
 	}
+	if err := d.ensureVPA(ctx, store); err != nil {
+		return false, "", err
+	}
 	desired := int32(0)
 	if sts.Spec.Replicas != nil {
 		desired = *sts.Spec.Replicas
@@ -825,6 +833,12 @@ func mergeDesired(live, desired client.Object) error {
 		l.Labels = d.Labels
 		l.Spec.Replicas = d.Spec.Replicas
 		l.Spec.Template = d.Spec.Template
+	case *unstructured.Unstructured:
+		// The VerticalPodAutoscaler, the one object applied without a Go type.
+		// Its spec is the module's whole and is written whole; status is the
+		// recommender's and is left alone.
+		l.SetLabels(desired.GetLabels())
+		l.Object["spec"] = desired.(*unstructured.Unstructured).Object["spec"]
 	default:
 		return fmt.Errorf("mergeDesired has no case for %T: it would be created once and never updated", live)
 	}

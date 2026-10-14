@@ -88,6 +88,10 @@ const (
 	DataPlaneNodeSelectorEnv = "DATA_PLANE_NODE_SELECTOR"
 	DataPlaneTolerationsEnv  = "DATA_PLANE_TOLERATIONS"
 
+	// VPAEnabledEnv says whether the cluster has the VerticalPodAutoscaler API,
+	// which the chart reads off the list of enabled modules.
+	VPAEnabledEnv = "VPA_ENABLED"
+
 	DefaultControllerNamespace     = "d8-system-s3"
 	DefaultControllerName          = "system-s3-controller"
 	DefaultHealthProbeBindAddress  = ":8081"
@@ -196,6 +200,11 @@ type Options struct {
 	// one.
 	DataPlaneNodeSelector map[string]string
 	DataPlaneTolerations  []corev1.Toleration
+
+	// VPAEnabled gives every data plane a VerticalPodAutoscaler. The default is
+	// false: an object of a kind the cluster does not serve is an error on every
+	// pass, while the static requests are what the data plane ran with before.
+	VPAEnabled bool
 }
 
 // defaultMetricsBindAddress keeps the endpoint on loopback when the chart says
@@ -258,6 +267,8 @@ func NewConfig() *Options {
 
 	jsonFromEnv(DataPlaneNodeSelectorEnv, &opts.DataPlaneNodeSelector)
 	jsonFromEnv(DataPlaneTolerationsEnv, &opts.DataPlaneTolerations)
+
+	opts.VPAEnabled = boolFromEnv(VPAEnabledEnv, false)
 
 	return &opts
 }

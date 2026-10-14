@@ -69,6 +69,12 @@
   endpoint's Service name to its SANs. A second PKI for a second listener in the
   same Pod would be two things to rotate instead of one.
 
+  VPA_ENABLED says whether the cluster serves the VerticalPodAutoscaler API. The
+  controller creates one for every Garage StatefulSet it builds; without the API
+  the data plane keeps its static requests. The module to look for is
+  vertical-pod-autoscaler, which ships the CRD itself: the standalone -crd module
+  lib-helm still tests for was removed in Deckhouse 1.65.
+
   controllerMetricsPort is the loopback port the manager serves /metrics on; the
   port that is actually published belongs to the kube-rbac-proxy sidecar
   (controllerMetricsProxyPort) and reaches the ServiceMonitor through
@@ -107,6 +113,7 @@
     (dict "name" "GARAGE_TLS_CA_FILE" "value" "/etc/garage-tls/ca.crt")
     (dict "name" "DATA_PLANE_NODE_SELECTOR" "value" ($dataPlaneNodeSelector | toJson))
     (dict "name" "DATA_PLANE_TOLERATIONS" "value" ($dataPlaneTolerations | toJson))
+    (dict "name" "VPA_ENABLED" "value" (ternary "true" "false" (.Values.global.enabledModules | has "vertical-pod-autoscaler")))
   )
   "additionalControllerVolumeMounts" (list
     (dict "name" "webhook-certs" "mountPath" "/etc/sts-certs" "readOnly" true)

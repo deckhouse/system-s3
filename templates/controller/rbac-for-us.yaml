@@ -14,6 +14,11 @@
   cluster-scoped, node-pinned PersistentVolumes (its node-sticky local storage),
   so node read and persistentvolume verbs are granted cluster-wide too.
 
+  The VerticalPodAutoscalers of the Garage StatefulSets are the controller's
+  too, created and removed with each data plane, so their verbs sit in the
+  namespaced Role with the rest of it. The rule is there whether or not the
+  cluster serves the API: RBAC does not need the kind to exist.
+
   Namespaces are read because the label heritage: deckhouse is what admits a
   SystemBucket: both the webhook and the reconciler check it, and neither can be
   told the answer by the object itself.
@@ -69,6 +74,7 @@
     (dict "apiGroups" (list "apps") "resources" (list "statefulsets") "verbs" (list "create" "update" "patch" "delete"))
     (dict "apiGroups" (list "batch") "resources" (list "jobs") "verbs" (list "get" "list" "watch" "create" "delete"))
     (dict "apiGroups" (list "policy") "resources" (list "poddisruptionbudgets") "verbs" (list "get" "list" "watch" "create" "update" "patch" "delete"))
+    (dict "apiGroups" (list "autoscaling.k8s.io") "resources" (list "verticalpodautoscalers") "verbs" (list "get" "list" "watch" "create" "update" "patch" "delete"))
     (dict "apiGroups" (list "coordination.k8s.io") "resources" (list "leases") "verbs" (list "get" "list" "watch" "create" "update" "patch" "delete"))
   )
   "clusterRoleRules" (list

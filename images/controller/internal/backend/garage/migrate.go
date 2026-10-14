@@ -881,7 +881,7 @@ func (d *Driver) teardownPlane(ctx context.Context, plane *backend.Store) error 
 			return fmt.Errorf("remove %s of the retired cluster: %w", obj.GetName(), err)
 		}
 	}
-	return nil
+	return d.removeVPA(ctx, plane)
 }
 
 // removeCopyJobs removes the copier Jobs of a finished or abandoned migration.

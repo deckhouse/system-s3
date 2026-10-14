@@ -563,12 +563,7 @@ func garageContainer(image string) corev1.Container {
 			PeriodSeconds:       10,
 			FailureThreshold:    30,
 		},
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("100m"),
-				corev1.ResourceMemory: resource.MustParse("256Mi"),
-			},
-		},
+		Resources: corev1.ResourceRequirements{Requests: garageRequests()},
 		// The container had no security context of its own at all: it inherited root
 		// from the pod and kept the runtime's default capability set. See
 		// hardenedRoot.

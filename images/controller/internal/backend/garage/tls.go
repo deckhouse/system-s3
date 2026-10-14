@@ -23,7 +23,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 	"github.com/deckhouse/system-s3/images/controller/internal/tlsclient"
@@ -135,12 +134,7 @@ func terminatorSidecar(image string) corev1.Container {
 		// Copying bytes costs little memory; the CPU is the TLS itself, and it
 		// scales with the traffic rather than with anything this request could
 		// predict, so there is no limit to throttle it by.
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("20m"),
-				corev1.ResourceMemory: resource.MustParse("32Mi"),
-			},
-		},
+		Resources:       corev1.ResourceRequirements{Requests: terminatorRequests()},
 		SecurityContext: hardenedRoot(),
 	}
 }

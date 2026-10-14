@@ -72,6 +72,14 @@ func TestEveryAppliedTypeIsReadableClusterWide(t *testing.T) {
 		t.Fatal("mergeDesired no longer switches on types; this guard needs rewriting")
 	}
 	for _, m := range matches {
+		// The one exception, and it is the client's rule rather than this
+		// module's: an unstructured object is never read from the cache (the
+		// manager does not set client.CacheOptions.Unstructured), so it starts no
+		// informer and needs nothing cluster-wide. It still has to be writable in
+		// the namespace, which TestVPAIsWritableInTheNamespace checks.
+		if m[1] == "Unstructured" {
+			continue
+		}
 		// Every type in this switch is a Kubernetes kind whose resource name is
 		// the lower-cased plural of it: Secret -> secrets, StatefulSet ->
 		// statefulsets, PodDisruptionBudget -> poddisruptionbudgets.
@@ -82,4 +90,30 @@ func TestEveryAppliedTypeIsReadableClusterWide(t *testing.T) {
 				m[1], resource)
 		}
 	}
+}
+
+// TestVPAIsWritableInTheNamespace: the VerticalPodAutoscaler is applied
+// unstructured and read live, so its every verb is in the namespaced Role.
+func TestVPAIsWritableInTheNamespace(t *testing.T) {
+	rules, err := os.ReadFile(rbacTemplate)
+	if err != nil {
+		t.Fatalf("read %s: %v", rbacTemplate, err)
+	}
+	body := string(rules)
+	start, end := strings.Index(body, `"roleRules"`), strings.Index(body, `"clusterRoleRules"`)
+	if start < 0 || end < start {
+		t.Fatalf("%s has no roleRules before clusterRoleRules; this guard needs rewriting", rbacTemplate)
+	}
+	for _, line := range strings.Split(body[start:end], "\n") {
+		if !strings.Contains(line, `"verticalpodautoscalers"`) {
+			continue
+		}
+		for _, verb := range []string{"get", "create", "update", "delete"} {
+			if !strings.Contains(line, `"`+verb+`"`) {
+				t.Errorf("roleRules do not allow %q on verticalpodautoscalers", verb)
+			}
+		}
+		return
+	}
+	t.Error("roleRules do not mention verticalpodautoscalers; the data plane's autoscaler cannot be created")
 }

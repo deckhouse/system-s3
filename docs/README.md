@@ -58,6 +58,7 @@ One Garage cluster, deployed by the controller:
   same nodes side by side; each spreads itself and neither pushes the other off
   a node. The controller itself stays on the control-plane nodes and follows
   control-plane HA independently of the Garage replica mode;
+- resources: a Garage container requests 100m CPU and 256 MiB, its TLS terminator 20m and 32 MiB. With the `vertical-pod-autoscaler` module enabled, each Garage StatefulSet gets a VerticalPodAutoscaler in `Initial` mode: a replica receives the recommended requests (Garage between 100m/256 MiB and 2 CPU/4 GiB) when its Pod is created — on a module update, a configuration change, a replica move, or a node drain — and the autoscaler never evicts a running replica to resize it. Without the module the requests above stay as they are;
 - what this means for the StorageClass: it has to be able to give volumes on those nodes, and with `volumeBindingMode: WaitForFirstConsumer` — with `Immediate` the volume is allocated before a node is chosen, and the replica is bound to wherever it landed.
 
 {{< alert level="warning" >}}
