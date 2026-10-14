@@ -314,33 +314,26 @@ func TestAbortWhenTheSettingsMoveOn(t *testing.T) {
 	})
 }
 
-// TestDrainKeepsThePreviousClusterForADay: the way back from a migration whose
-// damage shows up after the switch.
-func TestDrainKeepsThePreviousClusterForADay(t *testing.T) {
+// TestDrainKeepsThePreviousClusterUntilTheNewOneIsChecked: the old cluster is
+// the only other copy, so it goes only once the new one has been looked at — and
+// a new cluster whose admin API cannot be reached has not been.
+func TestDrainKeepsThePreviousClusterUntilTheNewOneIsChecked(t *testing.T) {
 	ctx := context.Background()
-	c := fake.NewClientBuilder().WithScheme(coreScheme(t)).Build()
-	d := &Driver{client: c, apiReader: c, namespace: "d8-system-s3", log: testGarageLogger(t)}
 	serving := systemStore()
+	noToken := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName(serving), Namespace: "d8-system-s3"}}
+	c := fake.NewClientBuilder().WithScheme(coreScheme(t)).WithObjects(noToken).Build()
+	d := &Driver{client: c, apiReader: c, namespace: "d8-system-s3", log: testGarageLogger(t)}
 
-	fresh := migrationState{serving: 2, other: 1, phase: phaseDraining, cutoverAt: time.Now().Add(-time.Hour)}
-	got, msg, err := d.migrationDrain(ctx, serving, fresh)
+	state := migrationState{serving: 2, other: 1, phase: phaseDraining, cutoverAt: time.Now().Add(-48 * time.Hour)}
+	got, msg, err := d.migrationDrain(ctx, serving, state)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.phase != phaseDraining {
-		t.Errorf("phase=%q an hour after the cutover, want the old cluster kept", got.phase)
+	if got.phase != phaseDraining || got.other != 1 {
+		t.Errorf("state=%+v with the new cluster unchecked, want the old cluster kept", got)
 	}
 	if !strings.Contains(msg, "read-only") {
-		t.Errorf("message=%q, want it to say what the old cluster is for", msg)
-	}
-
-	old := migrationState{serving: 2, other: 1, phase: phaseDraining, cutoverAt: time.Now().Add(-drainPeriod - time.Minute)}
-	got, _, err = d.migrationDrain(ctx, serving, old)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got.phase != phaseDecommission {
-		t.Errorf("phase=%q after the drain period, want %q", got.phase, phaseDecommission)
+		t.Errorf("message=%q, want it to say what the old cluster is kept for", msg)
 	}
 }
 

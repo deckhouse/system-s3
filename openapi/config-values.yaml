@@ -86,7 +86,8 @@ properties:
       minute while a source replica restarts; a single-replica store is
       restarted once during the switch, and reads are unavailable for that
       minute or two. The cluster
-      migrated away from is kept read-only for 24 hours afterwards. Putting the
+      migrated away from is kept read-only only until every replica of the new
+      one holds every block, and is then removed. Putting the
       setting back before the switch happens calls the migration off and removes
       the half-built cluster. A change of `highAvailability` made together with
       it is carried out by the same migration.

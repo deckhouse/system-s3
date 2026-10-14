@@ -60,8 +60,8 @@ const (
 	// revoked on the serving plane, the delta and deletions are synchronized, and
 	// the endpoint is switched. Consumers must obtain new temporary credentials.
 	phaseCutover migrationPhase = "Cutover"
-	// phaseDraining: the incoming plane serves; the old one is kept read-only as
-	// the way back, for drainPeriod.
+	// phaseDraining: the incoming plane serves; the old one is kept read-only
+	// until the new one is confirmed to hold the data, and not a moment longer.
 	phaseDraining migrationPhase = "Draining"
 	// phaseDecommission: the plane that no longer serves is being torn down. It
 	// is also where an aborted migration ends up — "tear down the plane that is
@@ -111,14 +111,6 @@ func (p migrationPhase) resizing() bool {
 // re-enters it on the next pass and says how long it has been waiting. A failed
 // state would be a second way to spell "still in Provisioning" that an operator
 // would then have to get out of by hand.
-
-// drainPeriod is how long the migrated-from cluster is kept after cutover.
-//
-// It is the way back from a migration whose damage shows up after the switch,
-// and it costs the space of the old cluster for a day. The old cluster is
-// read-only for the whole period: it cannot diverge from the new one, it can only
-// be read back from.
-const drainPeriod = 24 * time.Hour
 
 // migrationStateKey names the keys of the ConfigMap the phase is kept in.
 const (
@@ -181,8 +173,7 @@ type migrationState struct {
 	// what bounds the freeze: a cutover that cannot finish gives the writes back
 	// rather than holding them until somebody notices.
 	frozenAt time.Time
-	// cutoverAt is when the endpoint moved, which starts the clock on keeping the
-	// cluster it moved away from.
+	// cutoverAt is when the endpoint moved.
 	cutoverAt time.Time
 	// frozenKeys are the bucket keys whose write access an in-place change took
 	// away. A cutover never gives write access back — the endpoint moves to a
@@ -288,7 +279,7 @@ func parseMigrationState(data map[string]string) migrationState {
 	// Reading 1 as "no other plane" is what a first version of this did, and it
 	// cost the whole drain: the state written by the cutover read back as
 	// converged, the phase never reached the decommission, and the cluster that
-	// was supposed to be kept for a day and then removed was kept forever.
+	// was supposed to be removed after the switch was kept forever.
 	if n, err := strconv.Atoi(data[migrationKeyOther]); err == nil && n >= int(firstIncarnation) {
 		state.other = int32(n)
 	}

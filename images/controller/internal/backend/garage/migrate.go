@@ -497,8 +497,8 @@ func aggregateDifference(source, target int64, exact bool) int64 {
 // endpoint move. Temporary consumer keys are not imported into the new cluster.
 //
 // The point of no return is the endpoint. Everything before it can be undone by
-// deleting the incoming cluster; after it, the way back is the old cluster, kept
-// read-only for drainPeriod.
+// deleting the incoming cluster; after it, the old cluster is kept read-only only
+// until the new one is confirmed to hold the data (see migrationDrain).
 func (d *Driver) migrationCutover(
 	ctx context.Context,
 	serving *backend.Store,
@@ -671,8 +671,8 @@ func (d *Driver) migrationCutover(
 	d.log.Info("the endpoint now points at the new Garage cluster",
 		"store", serving.Name, "serving", switched.serving, "retiring", switched.other,
 		"writesFrozenOn", frozen)
-	return switched, fmt.Sprintf("the store now runs on the new Garage cluster; the old one is kept read-only for %s "+
-		"as the way back", drainPeriod), nil
+	return switched, "the store now runs on the new Garage cluster; the old one is kept read-only " +
+		"until the new one is confirmed to hold the data", nil
 }
 
 // freezeWrites revokes write access from every key of every bucket of a cluster,
@@ -718,19 +718,38 @@ func (d *Driver) restartDeltaPass(ctx context.Context, source, target *backend.S
 	return d.deleteCopyJob(ctx, job)
 }
 
-// migrationDrain keeps the migrated-from cluster for drainPeriod and then
-// removes it.
+// migrationDrain removes the migrated-from cluster as soon as the one now
+// serving is confirmed to hold the data.
+//
+// The content was confirmed before the switch: the final pass compared the
+// frozen source with the new cluster, and nothing has been written to the source
+// since. What is left is that the new cluster keeps it — every replica holds
+// every block it counts — which is what a replica that died right after the
+// switch, or a copy that landed on fewer replicas than it should, would show.
+// Until then the old cluster stays, read-only, as the copy to recover from.
+//
+// The pass that calls this has already found the serving cluster healthy, so
+// the wait is for its replicas to catch up, not for it to come up.
 func (d *Driver) migrationDrain(ctx context.Context, serving *backend.Store, state migrationState) (migrationState, string, error) {
-	left := time.Until(state.cutoverAt.Add(drainPeriod))
-	if left > 0 {
-		return state, fmt.Sprintf("the previous Garage cluster is kept read-only for another %s as the way back",
-			left.Round(time.Minute)), nil
+	svc, ready, err := d.adminClientFor(ctx, serving)
+	if err != nil {
+		return state, "", err
+	}
+	if !ready {
+		return state, "the previous Garage cluster is kept read-only until the new one can be checked", nil
+	}
+	synced, why, err := clusterInSync(ctx, svc, desiredReplicas(serving), d.blocksOnDisk(serving))
+	if err != nil {
+		return state, "", err
+	}
+	if !synced {
+		return state, fmt.Sprintf("the previous Garage cluster is kept read-only until the new one holds every block (%s)", why), nil
 	}
 	state.phase = phaseDecommission
 	if err := d.saveMigrationState(ctx, serving, state); err != nil {
 		return state, "", err
 	}
-	return state, "removing the previous Garage cluster", nil
+	return state, "the new Garage cluster holds the data; removing the previous one", nil
 }
 
 // migrationDecommission removes the plane that is not serving and closes the
