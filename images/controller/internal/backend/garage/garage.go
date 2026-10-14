@@ -49,6 +49,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/deckhouse/sds-common-lib/logger"
+	v1alpha1 "github.com/deckhouse/system-s3/api/v1alpha1"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 	"github.com/deckhouse/system-s3/images/controller/internal/tlsclient"
 )
@@ -61,6 +62,20 @@ const garageVersion = "v2.4.1"
 const (
 	secretKeyRPC   = "rpc-secret"
 	secretKeyAdmin = "admin-token"
+)
+
+// metricsTokenSecret holds the bearer token Garage accepts on /metrics and
+// nowhere else, and metricsTokenKey is its key. templates/garage-podmonitor.yaml
+// hands the same Secret to Prometheus.
+//
+// A Secret of its own rather than a key in the plane's: there is one plane
+// Secret per incarnation, created at run time, while the monitor is rendered once
+// by the chart and names one Secret. Every plane of every store shares this
+// token, so the monitor needs no knowledge of which planes exist, and Prometheus
+// is handed this key alone — the admin token stays with the controller.
+const (
+	metricsTokenSecret = "garage-metrics-token"
+	metricsTokenKey    = "token"
 )
 
 // Driver reconciles the system Garage store. It is constructed once at startup
@@ -589,8 +604,13 @@ func initialReplicationFactor(store *backend.Store) int32 {
 // EnsureBucket and DeleteBucket are implemented in buckets.go.
 
 // ensureSecret creates the Garage secret (rpc secret + admin token) on first
-// reconcile and never overwrites existing values.
+// reconcile and never overwrites existing values. The metrics token comes first:
+// the pods read it from their environment, so a plane whose workload is applied
+// before the Secret exists does not start.
 func (d *Driver) ensureSecret(ctx context.Context, store *backend.Store) error {
+	if err := d.ensureMetricsToken(ctx); err != nil {
+		return fmt.Errorf("ensure the metrics token: %w", err)
+	}
 	key := client.ObjectKey{Namespace: d.namespace, Name: secretName(store)}
 	existing := &corev1.Secret{}
 	err := d.client.Get(ctx, key, existing)
@@ -623,6 +643,37 @@ func (d *Driver) ensureSecret(ctx context.Context, store *backend.Store) error {
 		},
 	}
 	return d.client.Create(ctx, secret)
+}
+
+// ensureMetricsToken creates the metrics token Secret once and never rewrites
+// it. A new token reaches Garage only when its pods restart, so replacing it
+// under running pods would turn every scrape into a 403 until the next roll.
+func (d *Driver) ensureMetricsToken(ctx context.Context) error {
+	key := client.ObjectKey{Namespace: d.namespace, Name: metricsTokenSecret}
+	err := d.client.Get(ctx, key, &corev1.Secret{})
+	if err == nil || !apierrors.IsNotFound(err) {
+		return err
+	}
+	token, err := randomHex(32)
+	if err != nil {
+		return err
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      metricsTokenSecret,
+			Namespace: d.namespace,
+			Labels: map[string]string{
+				v1alpha1.ManagedByLabel:  v1alpha1.ManagedByValue,
+				"app.kubernetes.io/name": "garage",
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{metricsTokenKey: []byte(token)},
+	}
+	if err := d.client.Create(ctx, secret); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	return nil
 }
 
 // ensureWorkload creates/updates the StatefulSet — a fixed replica count on the

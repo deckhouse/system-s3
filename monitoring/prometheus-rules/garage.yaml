@@ -1,0 +1,238 @@
+- name: d8.system-s3.garage
+  rules:
+    # Garage's own view of itself, scraped from every Garage pod by
+    # templates/garage-podmonitor.yaml. The rules above this one (store-health,
+    # silent-failures) say what the module sees from the outside — a store that is
+    # not ready, a bucket that is full. These say why: which quorum is gone, which
+    # node is away, which disk is filling.
+    #
+    # Every node reports the cluster as IT sees it, so the cluster-wide gauges come
+    # in once per pod and are aggregated per data plane (store, incarnation). During
+    # a migration two planes are scraped side by side and each is judged on its own.
+    #
+    # A plane with no layout yet — a fresh installation, or the plane a migration is
+    # filling, for its first minute — reports itself unavailable with zero
+    # partitions. The cluster-wide rules skip that state: nothing has been promised
+    # yet, and D8SystemS3StoreNotReady covers a layout that never comes.
+
+    - alert: D8SystemS3GarageClusterUnavailable
+      # No node of the plane has a write quorum for every partition: reads and writes
+      # fail for whatever lands on the missing partitions, which with three nodes and
+      # two of them away is everything. cluster_available is 0 exactly when
+      # cluster_partitions_quorum < cluster_partitions.
+      #
+      # max: one node cut off from the others sees no quorum while the rest serve,
+      # and that is D8SystemS3GarageNodeDisconnected, not this.
+      expr: |
+        max by (namespace, store, incarnation) (cluster_available{job="system-s3-garage"}) == 0
+        and on (namespace, store, incarnation)
+        max by (namespace, store, incarnation) (cluster_partitions{job="system-s3-garage"}) > 0
+      for: 1m
+      labels:
+        severity_level: "3"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "store,incarnation"
+        summary: The system object storage has lost its quorum.
+        description: |
+          No node of the Garage cluster `{{ $labels.store }}` (incarnation
+          {{ $labels.incarnation }}) has a quorum of connected nodes for every partition.
+          Reads and writes of every platform component holding a `SystemBucket` fail.
+
+          The data is not lost: it is on the volumes of the nodes that are away. The cluster
+          comes back as soon as enough of them are connected again. Find which ones:
+
+          ```
+          d8 k -n {{ $labels.namespace }} get pods -l app.kubernetes.io/name=garage -o wide
+          d8 k -n {{ $labels.namespace }} exec <a running garage pod> -c garage -- /garage status
+          ```
+
+          The usual causes are replicas that cannot be scheduled (their nodes are drained or
+          gone), nodes that cannot reach each other on port 3901, and volumes that do not
+          attach. Do not delete the volumes of the missing replicas: they hold the data the
+          quorum needs.
+
+    - alert: D8SystemS3GarageClusterDegraded
+      # Some storage node is not connected, but every partition still has a quorum:
+      # the store serves and has less redundancy than it is supposed to. With one
+      # replica this cannot happen — the only node is either there or the cluster is
+      # unavailable — so a single-replica store does not fire it.
+      #
+      # min: if any node sees a peer missing, the redundancy is not what it should be.
+      expr: |
+        min by (namespace, store, incarnation) (cluster_healthy{job="system-s3-garage"}) == 0
+        and on (namespace, store, incarnation)
+        max by (namespace, store, incarnation) (cluster_available{job="system-s3-garage"}) == 1
+      for: 5m
+      labels:
+        severity_level: "5"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "store,incarnation"
+        summary: The system object storage is running without full redundancy.
+        description: |
+          A storage node of the Garage cluster `{{ $labels.store }}` (incarnation
+          {{ $labels.incarnation }}) has been disconnected for five minutes. The store still
+          serves, but one more node away loses the quorum and stops it.
+
+          Bring the missing replica back:
+
+          ```
+          d8 k -n {{ $labels.namespace }} get pods -l app.kubernetes.io/name=garage -o wide
+          ```
+
+          A replica that is `Pending` usually has no eligible node left (see the module's
+          node placement settings) or a volume that cannot attach on the node it is pinned
+          to. Do not drain another node of the data plane until this alert is gone.
+
+    - alert: D8SystemS3GarageNodeDisconnected
+      # Five minutes, as Garage's own recommendation: a pod restart is well under
+      # that, a node that is away for longer is not coming back by itself.
+      expr: |
+        max by (namespace, store, incarnation, id) (
+          cluster_layout_node_disconnected_time{job="system-s3-garage"}
+        ) > 300
+      for: 5m
+      labels:
+        severity_level: "5"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "store,incarnation,id"
+        summary: A node of the system object storage has been away for more than five minutes.
+        description: |
+          Garage node `{{ $labels.id }}` of the cluster `{{ $labels.store }}` (incarnation
+          {{ $labels.incarnation }}) is in the layout and has not been connected for more
+          than five minutes.
+
+          `garage status` maps the node ID to its hostname, which is the pod name:
+
+          ```
+          d8 k -n {{ $labels.namespace }} exec <a running garage pod> -c garage -- /garage status
+          ```
+
+          If that pod is running, it cannot reach its peers on port 3901 — check the network
+          between the nodes. If it is not, its events say why.
+
+    - alert: D8SystemS3GarageServerErrors
+      # 5xx only: a 4xx is the client's business (a missing object, a refused key,
+      # a full quota — the last has an alert of its own).
+      expr: |
+        sum by (namespace, store, incarnation) (
+          increase(api_s3_error_counter{job="system-s3-garage", status_code=~"5.."}[5m])
+        ) > 10
+      for: 5m
+      labels:
+        severity_level: "5"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "store,incarnation"
+        summary: The system object storage is answering S3 requests with server errors.
+        description: |
+          The Garage cluster `{{ $labels.store }}` (incarnation {{ $labels.incarnation }})
+          has been returning more than ten 5xx responses per five minutes for five minutes.
+          Platform components are getting failed reads or writes.
+
+          Which operations fail is on the "System S3 Garage" dashboard (S3 errors by status and
+          endpoint), and the reason is in the Garage log at `WARN`:
+
+          ```
+          d8 k -n {{ $labels.namespace }} logs -l app.kubernetes.io/name=garage -c garage --since=15m | grep -i error
+          ```
+
+          Most often this follows a degraded cluster (see D8SystemS3GarageClusterDegraded and
+          D8SystemS3GarageNodeDisconnected): a request that needs a node that is away times
+          out on the server side.
+
+    - alert: D8SystemS3GarageResyncErrors
+      # Garage's own documentation: this should be zero, or fall back to zero
+      # rapidly; a value that stays means data is likely to be lost.
+      expr: |
+        max by (namespace, store, incarnation, pod) (
+          block_resync_errored_blocks{job="system-s3-garage"}
+        ) > 0
+      for: 15m
+      labels:
+        severity_level: "4"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "store,incarnation,pod"
+        summary: A node of the system object storage cannot repair its data blocks.
+        description: |
+          `{{ $labels.pod }}` has had {{ $value }} data blocks it failed to resync for more than
+          fifteen minutes. These are blocks the node should hold and could not fetch from
+          its peers. If no peer has them either, objects that reference them are lost.
+
+          Garage lists the blocks and the reason:
+
+          ```
+          d8 k -n {{ $labels.namespace }} exec {{ $labels.pod }} -c garage -- /garage block list-errors
+          ```
+
+          While other nodes are away (D8SystemS3GarageNodeDisconnected), this is expected and
+          clears once they are back. If all nodes are connected and it persists, retry them
+          now with `/garage block retry-now --all`; a block that still fails is missing on
+          every node, and `/garage block info <hash>` names the objects that reference it.
+
+    - alert: D8SystemS3GarageDiskAlmostFull
+      # min over the volume label: Garage reports the data and the metadata
+      # directory separately, and here both are on the one volume of the replica.
+      expr: |
+        min by (namespace, store, incarnation, pod, node) (
+          garage_local_disk_avail{job="system-s3-garage"}
+          / garage_local_disk_total{job="system-s3-garage"}
+        ) < 0.1
+      for: 10m
+      labels:
+        severity_level: "4"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "store,incarnation,pod"
+        summary: The volume of a system object storage replica is almost full.
+        description: |
+          `{{ $labels.pod }}` has less than 10% of its volume free. When it is full Garage
+          refuses writes on that node, and with a quorum of three a full volume on one
+          replica fails writes for the whole store.
+
+          The module sizes the volumes from the sum of the `SystemBucket` sizes, so a volume
+          running out means one of two things. Either the volume did not grow when it was
+          asked to (D8SystemS3StoreCannotGrow says so, with the reason), or what is stored
+          is larger than the buckets account for — metadata and objects not yet collected
+          after deletion. Raising `spec.size` of a `SystemBucket` grows the volumes; the
+          `StorageClass` must allow expansion.
+
+    - alert: D8SystemS3GarageMetricsUnavailable
+      # The rules above are silent when there is nothing to read — a token Garage
+      # does not accept, a certificate the scrape does not trust. This is the sound
+      # of that.
+      expr: up{job="system-s3-garage"} == 0
+      for: 15m
+      labels:
+        severity_level: "6"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "pod"
+        summary: Prometheus cannot read the metrics of a system object storage replica.
+        description: |
+          Scraping `/metrics` of `{{ $labels.pod }}` has been failing for fifteen minutes.
+          The Garage alerts of this module do not see this replica while it lasts.
+
+          The reason is on the target, in Prometheus (Status → Targets, job
+          `system-s3-garage`). A 403 means Garage was started with a different metrics
+          token than the one in the `garage-metrics-token` Secret, which happens when the
+          Secret is deleted and the controller writes a new one. A Garage pod reads the token
+          when it starts: delete the pods one at a time, each after the previous one is
+          `Ready` again, and they come back with the current one.

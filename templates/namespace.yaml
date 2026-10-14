@@ -7,5 +7,13 @@ metadata:
     The rules-watcher label is what makes Prometheus read this namespace's
     PrometheusRules at all. Without it the module's alerts render into the
     cluster and nobody watches them, which looks exactly like having alerts.
+
+    The monitor-watcher label does the same for the PodMonitor of the data plane
+    (templates/garage-podmonitor.yaml). That monitor lives here rather than in
+    d8-monitoring because its bearer token is a Secret the controller writes, and
+    Prometheus reads a monitor's token from the monitor's own namespace.
   */ -}}
-  {{- include "helm_lib_module_labels" (list . (dict "prometheus.deckhouse.io/rules-watcher-enabled" "true")) | nindent 2 }}
+  {{- include "helm_lib_module_labels" (list . (dict
+    "prometheus.deckhouse.io/rules-watcher-enabled" "true"
+    "prometheus.deckhouse.io/monitor-watcher-enabled" "true"
+  )) | nindent 2 }}

@@ -1,0 +1,74 @@
+{{- /*
+  Garage's own metrics, from every Garage pod of every data plane: the S3 and
+  admin request rates, latencies and errors, block I/O and resync, disk space
+  and the cluster's view of its own health. The controller's metrics say what
+  the module did; these say what the storage is doing, and the alerts in
+  monitoring/prometheus-rules/garage.yaml are written against them.
+
+  A PodMonitor rather than a ServiceMonitor: the Services in front of the data
+  plane are the controller's, one per plane, created at run time, and a monitor
+  that went through them would see only the pods each happens to select. The
+  pods carry the same labels whichever plane they belong to.
+
+  The endpoint is the admin port of the TLS terminator, which forwards to
+  Garage's loopback listener. Garage requires the metrics token there once it
+  has one (GARAGE_METRICS_TOKEN in the pod), and that token opens /metrics and
+  nothing else — the admin token stays with the controller. The controller
+  creates the Secret before the first Garage pod; until it exists Prometheus
+  skips this monitor.
+
+  The certificate is verified against the module's CA, by the endpoint
+  Service's name, as the controller verifies it when it dials a pod by address:
+  no certificate can name a pod IP.
+
+  Unready pods are scraped too, on purpose. A Garage pod is ready when its node
+  holds a role in the layout and reaches enough peers, so a cluster that lost
+  its quorum has no ready pod at all — and a monitor that kept only ready pods
+  would go silent exactly when cluster_available should say 0.
+*/ -}}
+{{- if (include "helm_lib_api_version_exists" (list . "monitoring.coreos.com/v1/PodMonitor")) }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: garage
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list $ (dict "prometheus" "main" "app" "garage")) | nindent 2 }}
+spec:
+  podMetricsEndpoints:
+  - port: admin
+    scheme: https
+    path: /metrics
+    bearerTokenSecret:
+      name: garage-metrics-token
+      key: token
+    tlsConfig:
+      ca:
+        secret:
+          name: garage-tls
+          key: ca.crt
+      serverName: system-garage.d8-{{ .Chart.Name }}.svc
+    relabelings:
+    - regex: endpoint|container
+      action: labeldrop
+    - targetLabel: job
+      replacement: system-s3-garage
+    - targetLabel: tier
+      replacement: cluster
+    - sourceLabels: [__meta_kubernetes_pod_node_name]
+      targetLabel: node
+    - sourceLabels: [__meta_kubernetes_pod_label_storage_deckhouse_io_system_store]
+      targetLabel: store
+    - sourceLabels: [__meta_kubernetes_pod_label_storage_deckhouse_io_incarnation]
+      targetLabel: incarnation
+    - sourceLabels: [__meta_kubernetes_pod_phase]
+      regex: Running
+      action: keep
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: garage
+      app.kubernetes.io/managed-by: system-s3
+  namespaceSelector:
+    matchNames:
+    - d8-{{ .Chart.Name }}
+{{- end }}

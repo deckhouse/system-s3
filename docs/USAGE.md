@@ -297,6 +297,24 @@ kubectl -n d8-system-s3 get pods,sts,pvc
 kubectl -n d8-system-s3 logs deploy/controller -c controller
 ```
 
+### Garage metrics and alerts
+
+Prometheus scrapes `/metrics` of every Garage pod, of every data plane, as job `system-s3-garage`. Each series carries `pod`, `node`, `store` and `incarnation`; during a StorageClass migration both planes are scraped and told apart by `incarnation`. The scrape uses a token of its own, from the `garage-metrics-token` Secret in `d8-system-s3`: it opens `/metrics` and nothing else, and Prometheus never holds the admin token. The controller creates the Secret before the first Garage pod and never rewrites it; Garage reads the token when it starts.
+
+The **System S3 Garage** dashboard shows S3 requests, errors and p95/p99 latency by operation, block read and write throughput and duration, the resync queue, free space per replica, and the cluster's health as its nodes see it.
+
+| Alert | Fires when |
+|-------|------------|
+| `D8SystemS3GarageClusterUnavailable` | No node of a plane has a quorum for every partition, for 1 minute: reads and writes fail. |
+| `D8SystemS3GarageClusterDegraded` | A storage node is disconnected but the plane still serves, for 5 minutes. A single-replica store never reports this state. |
+| `D8SystemS3GarageNodeDisconnected` | A node in the layout has not been seen for more than 5 minutes. |
+| `D8SystemS3GarageServerErrors` | More than ten S3 `5xx` responses per 5 minutes. |
+| `D8SystemS3GarageResyncErrors` | A replica has data blocks it failed to resync for 15 minutes. |
+| `D8SystemS3GarageDiskAlmostFull` | A replica's volume has less than 10% free for 10 minutes. |
+| `D8SystemS3GarageMetricsUnavailable` | A Garage pod could not be scraped for 15 minutes; the alerts above do not see it. |
+
+Each alert's description says what to check and what to do.
+
 ## Disabling the module, and destroying the cluster
 
 Disabling the module is guarded: Deckhouse refuses `enabled: false` until the `ModuleConfig` carries the acknowledgement, because the data plane and every object stored in it go with it.

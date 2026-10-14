@@ -1,0 +1,1037 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "type": "row",
+      "title": "Cluster",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Cluster available",
+      "description": "cluster_available: some node of the plane has a write quorum for every partition. Zero means reads and writes fail; for one minute it is D8SystemS3GarageClusterUnavailable.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "max(cluster_available{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"})",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "All nodes connected",
+      "description": "cluster_healthy as the worst node sees it: every storage node connected. Zero while the cluster is available is lost redundancy, D8SystemS3GarageClusterDegraded after five minutes.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "min(cluster_healthy{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"})",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Storage nodes connected",
+      "description": "cluster_storage_nodes_ok out of cluster_storage_nodes, as the worst node sees it.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "min(cluster_storage_nodes_ok{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"}) / max(cluster_storage_nodes{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"})",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Partitions without quorum",
+      "description": "cluster_partitions - cluster_partitions_quorum on the best node. Anything above zero is data that cannot be read or written right now.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "min(cluster_partitions{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"} - cluster_partitions_quorum{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"})",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Blocks failing resync",
+      "description": "block_resync_errored_blocks summed over the nodes. Garage: this should be zero, or fall back to zero rapidly; a value that stays means data is likely to be lost.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(block_resync_errored_blocks{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"})",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Replication factor",
+      "description": "garage_replication_factor: copies of every block. 1 is a single replica with no redundancy, 3 the highly available mode.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "max(garage_replication_factor{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"})",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Layout nodes connected, by observing pod",
+      "description": "cluster_layout_node_connected summed per observing pod: how many layout nodes each pod reaches. A pod that sees fewer than the others is the one cut off.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (cluster_layout_node_connected{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"})",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Seconds since a node was last seen",
+      "description": "cluster_layout_node_disconnected_time per Garage node ID, worst observer. Zero while connected; above 300 for five minutes is D8SystemS3GarageNodeDisconnected. `garage status` maps the ID to the pod.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "max by (id) (cluster_layout_node_disconnected_time{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"})",
+          "legendFormat": "{{id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "S3 API",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "S3 requests per second, by endpoint",
+      "description": "api_s3_request_counter: every S3 call the plane answered, by operation.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (api_endpoint) (rate(api_s3_request_counter{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"}[$__rate_interval]))",
+          "legendFormat": "{{api_endpoint}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "S3 errors per second, by status",
+      "description": "api_s3_error_counter: the 4xx and 5xx answers, by status and operation. 4xx is the client's business (a missing object, a full quota); more than ten 5xx in five minutes is D8SystemS3GarageServerErrors.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (status_code, api_endpoint) (rate(api_s3_error_counter{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"}[$__rate_interval]))",
+          "legendFormat": "{{status_code}} {{api_endpoint}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "S3 latency p95, by endpoint",
+      "description": "api_s3_request_duration: time from request to response, across the plane's nodes.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (api_endpoint, le) (rate(api_s3_request_duration_bucket{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"}[$__rate_interval])))",
+          "legendFormat": "{{api_endpoint}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "S3 latency p99, by endpoint",
+      "description": "api_s3_request_duration: time from request to response, across the plane's nodes.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (api_endpoint, le) (rate(api_s3_request_duration_bucket{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"}[$__rate_interval])))",
+          "legendFormat": "{{api_endpoint}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Data blocks",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Disk throughput, by pod",
+      "description": "block_bytes_read and block_bytes_written: bytes Garage moved to and from the data directory, replication included.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 31
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (rate(block_bytes_read{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"}[$__rate_interval]))",
+          "legendFormat": "read {{pod}}",
+          "refId": "A"
+        },
+        {
+          "expr": "-sum by (pod) (rate(block_bytes_written{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"}[$__rate_interval]))",
+          "legendFormat": "write {{pod}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Block read and write duration p95, by pod",
+      "description": "block_read_duration and block_write_duration: one data block from or to disk. Slow here and slow S3 is a disk; fast here and slow S3 is the network or a peer.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 31
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (pod, le) (rate(block_read_duration_bucket{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"}[$__rate_interval])))",
+          "legendFormat": "read {{pod}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (pod, le) (rate(block_write_duration_bucket{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"}[$__rate_interval])))",
+          "legendFormat": "write {{pod}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Resync queue, by pod",
+      "description": "block_resync_queue_length: blocks queued for a local check and a possible fetch from peers. Garage notes it is normal for this to be non-zero for long periods, after a replica came back or the layout changed.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 39
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (block_resync_queue_length{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"})",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Blocks failing resync, by pod",
+      "description": "block_resync_errored_blocks: blocks whose last resync failed. Non-zero for fifteen minutes is D8SystemS3GarageResyncErrors; `garage block list-errors` in the pod names them.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 39
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (block_resync_errored_blocks{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"})",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Disk",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Free space on the replica's volume, by pod",
+      "description": "garage_local_disk_avail / garage_local_disk_total. Data and metadata share the one volume of a replica. Under 10% for ten minutes is D8SystemS3GarageDiskAlmostFull.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "min by (pod) (garage_local_disk_avail{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"} / garage_local_disk_total{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"})",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Free bytes, by pod",
+      "description": "garage_local_disk_avail of the data directory.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "min by (pod) (garage_local_disk_avail{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\", volume=\"data\"})",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "sds",
+    "system-s3",
+    "storage"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "default",
+          "value": "default"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Prometheus",
+        "multi": false,
+        "name": "ds_prometheus",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "$ds_prometheus"
+        },
+        "definition": "label_values(garage_build_info{job=\"system-s3-garage\"}, store)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Store",
+        "multi": true,
+        "name": "store",
+        "options": [],
+        "query": {
+          "query": "label_values(garage_build_info{job=\"system-s3-garage\"}, store)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "$ds_prometheus"
+        },
+        "definition": "label_values(garage_build_info{job=\"system-s3-garage\", store=~\"$store\"}, incarnation)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Incarnation",
+        "multi": true,
+        "name": "incarnation",
+        "options": [],
+        "query": {
+          "query": "label_values(garage_build_info{job=\"system-s3-garage\", store=~\"$store\"}, incarnation)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "",
+  "title": "System S3 Garage",
+  "uid": "system-s3-garage"
+}

@@ -340,8 +340,8 @@ func configHash(cfg string) string {
 }
 
 // renderConfig produces the garage.toml content for the given (already clamped)
-// replication factor. Secrets (rpc, admin token) are supplied via environment
-// variables, not the file.
+// replication factor. Secrets (rpc, admin and metrics tokens) are supplied via
+// environment variables, not the file.
 //
 // The S3 and admin APIs listen on the loopback, on ports of their own: the TLS
 // terminator in the same pod owns the ports clients dial (see tls.go). Garage
@@ -504,6 +504,14 @@ func garageContainer(image string) corev1.Container {
 			{Name: "GARAGE_CONFIG_FILE", Value: configMount + "/" + configFileName},
 			{Name: "GARAGE_RPC_SECRET", ValueFrom: secretKeyRef(secretKeyRPC)},
 			{Name: "GARAGE_ADMIN_TOKEN", ValueFrom: secretKeyRef(secretKeyAdmin)},
+			// Setting it is what closes /metrics: without a metrics token Garage
+			// serves the endpoint to anyone who reaches the admin port.
+			{Name: "GARAGE_METRICS_TOKEN", ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: metricsTokenSecret},
+					Key:                  metricsTokenKey,
+				},
+			}},
 		},
 		// Only RPC. The S3 and admin ports clients dial belong to the TLS
 		// terminator's container; Garage's own listeners are on the loopback.
@@ -587,7 +595,7 @@ func podSpec(store *backend.Store, image string) corev1.PodSpec {
 	c := garageContainer(image)
 	// Patch the secret name into the env sources now that we know the cluster.
 	for i := range c.Env {
-		if c.Env[i].ValueFrom != nil && c.Env[i].ValueFrom.SecretKeyRef != nil {
+		if c.Env[i].ValueFrom != nil && c.Env[i].ValueFrom.SecretKeyRef != nil && c.Env[i].ValueFrom.SecretKeyRef.Name == "" {
 			c.Env[i].ValueFrom.SecretKeyRef.Name = secretName(store)
 		}
 	}
