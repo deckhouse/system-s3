@@ -42,11 +42,15 @@ One Garage cluster, deployed by the controller:
 - placement follows the platform's rule for system components: the data plane
   runs on nodes with the `node-role.deckhouse.io/system-s3` role if the cluster
   has any, on system nodes (`node-role.deckhouse.io/system`) if it has those
-  instead, and on any node otherwise; it tolerates the `dedicated.deckhouse.io`
-  taint with the value `system-s3` or `system`. To give the store nodes of its
-  own, give a NodeGroup the `system-s3` role — with disks sized for it, since
-  that is where its volumes are ordered on a local class. The masters are not
-  used unless they are the only nodes without a taint. Required anti-affinity
+  instead, and on the masters otherwise; it tolerates the `dedicated.deckhouse.io`
+  taint with the value `system-s3` or `system`, and on the masters their
+  `node-role.kubernetes.io/control-plane` and `node-role.kubernetes.io/master`
+  taints. To give the store nodes of its own, give a NodeGroup the `system-s3`
+  role — with disks sized for it, since that is where its volumes are ordered on
+  a local class. With neither role, the highly available mode needs three
+  masters: on a cluster with one master the second and third replicas stay
+  Pending until the role is given or `highAvailability: false` is set.
+  Required anti-affinity
   separates HA replicas by `kubernetes.io/hostname`. If a `system-s3` role
   exists on too few nodes, placement does not fall back to other roles or
   recycle PVCs to consolidate the replicas. Add eligible nodes or explicitly

@@ -48,9 +48,10 @@
   what to set.
 
   DATA_PLANE_NODE_SELECTOR and DATA_PLANE_TOLERATIONS are where the Garage pods
-  may run, worked out with the platform's "system" strategy: nodes with the
-  module's own role (node-role.deckhouse.io/system-s3) if the cluster has any,
-  system nodes if it has those instead, any node otherwise. The controller builds
+  may run: nodes with the module's own role (node-role.deckhouse.io/system-s3) if
+  the cluster has any, system nodes if it has those instead (the platform's
+  "system" strategy), the masters otherwise (the "master" strategy, with their
+  taints tolerated). The controller builds
   the data plane, but the chart has the per-role node counts from discovery and
   lib-helm owns the rule, so the chart renders the answer as JSON and the
   controller applies it as it is.
@@ -73,6 +74,12 @@
   (controllerMetricsProxyPort) and reaches the ServiceMonitor through
   helm_lib_module_webhook_service, which is the only Service this chart has.
 */ -}}
+{{- $dataPlaneNodeSelector := (include "helm_lib_node_selector" (tuple . "system") | fromYaml).nodeSelector | default dict -}}
+{{- $dataPlaneTolerations := (include "helm_lib_tolerations" (tuple . "system") | fromYaml).tolerations | default list -}}
+{{- if not $dataPlaneNodeSelector -}}
+  {{- $dataPlaneNodeSelector = (include "helm_lib_node_selector" (tuple . "master") | fromYaml).nodeSelector | default dict -}}
+  {{- $dataPlaneTolerations = concat $dataPlaneTolerations (list (dict "key" "node-role.kubernetes.io/master") (dict "key" "node-role.kubernetes.io/control-plane")) -}}
+{{- end -}}
 {{- $controllerContext := deepCopy . -}}
 {{- $_ := unset $controllerContext.Values.systemS3 "highAvailability" -}}
 {{- $_ := unset $controllerContext.Values.global "highAvailability" -}}
@@ -98,8 +105,8 @@
     (dict "name" "STS_CERT_SECRET" "value" "webhooks-https-certs")
     (dict "name" "GARAGE_TLS_SECRET" "value" "garage-tls")
     (dict "name" "GARAGE_TLS_CA_FILE" "value" "/etc/garage-tls/ca.crt")
-    (dict "name" "DATA_PLANE_NODE_SELECTOR" "value" ((include "helm_lib_node_selector" (tuple . "system") | fromYaml).nodeSelector | default dict | toJson))
-    (dict "name" "DATA_PLANE_TOLERATIONS" "value" ((include "helm_lib_tolerations" (tuple . "system") | fromYaml).tolerations | default list | toJson))
+    (dict "name" "DATA_PLANE_NODE_SELECTOR" "value" ($dataPlaneNodeSelector | toJson))
+    (dict "name" "DATA_PLANE_TOLERATIONS" "value" ($dataPlaneTolerations | toJson))
   )
   "additionalControllerVolumeMounts" (list
     (dict "name" "webhook-certs" "mountPath" "/etc/sts-certs" "readOnly" true)

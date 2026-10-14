@@ -30,21 +30,24 @@ import (
 //
 // The chart decides it, with the platform's "system" strategy: the module's own
 // node role (node-role.deckhouse.io/system-s3) when a cluster has nodes with it,
-// the system role when it has those instead, and any node otherwise. The rule is
-// the one every Deckhouse component placed on system nodes follows, and an
-// operator who wants the store somewhere in particular does it the way they do
-// it for everything else — by giving a NodeGroup the role.
+// the system role when it has those instead, and the masters otherwise. The
+// first two steps are the rule every Deckhouse component placed on system nodes
+// follows, and an operator who wants the store somewhere in particular does it
+// the way they do it for everything else — by giving a NodeGroup the role.
 //
-// The masters are not part of it. They used to be the only place the data plane
-// ran, and that sized the control plane for object storage and put a third of
-// the replicas' disks on nodes nobody had chosen for them. A dedicated role puts
-// the store on nodes an operator provisioned for it, including their disks.
+// The masters are the last step, not the first. They used to be the only place
+// the data plane ran, and that sized the control plane for object storage; a
+// dedicated role puts the store on nodes an operator provisioned for it,
+// including their disks. Without a role, though, the masters are the one set of
+// nodes every cluster has and keeps: the worker nodes a NodeGroup grows, shrinks
+// and replaces for other workloads would cost a replica its copy on a local
+// class each time, so the store falls back to the masters and tolerates their
+// taints rather than to any node.
 //
 // The controller does not work the rule out itself: the chart has what it needs
 // (the per-role node counts from discovery) and renders the result, so the
 // driver only has to apply it. A zero Placement — no selector, no tolerations —
-// is "any node without a taint", which is what the chart renders for a cluster
-// with neither role.
+// is "any node without a taint"; the chart does not render it.
 type Placement struct {
 	NodeSelector map[string]string
 	Tolerations  []corev1.Toleration
