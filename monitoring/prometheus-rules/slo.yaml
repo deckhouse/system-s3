@@ -1,0 +1,151 @@
+- name: d8.system-s3.slo
+  rules:
+    # The service level the store promises its consumers, from the load test of
+    # 13–14.10: p99 per S3 operation over five minutes, and the share of answers
+    # that are not server errors. The thresholds are three to five times what the
+    # test measured on a network and on a node-pinned StorageClass.
+    #
+    # Garage times a request until its handler has a response to send. A GET or a
+    # HEAD streams the body after that, so their duration is the time to the first
+    # byte and does not grow with the object; a PUT reads the whole body first, so
+    # its duration does. The metrics carry no object size, which is why the write
+    # rule says "small objects" in its description rather than in its expression.
+    #
+    # A 501 is not a failure of the store: it is Garage saying it does not implement
+    # what the client asked for (object lock, for one, which some clients probe on
+    # every start). The availability rule and D8SystemS3GarageServerErrors leave it out.
+    #
+    # Every rule is per store across its planes (a migration runs two side by
+    # side), holds for fifteen minutes before it fires, and stays silent below one
+    # request every ten seconds: a p99 of three requests is one slow request.
+
+    - alert: D8SystemS3SLOReadLatency
+      expr: |
+        histogram_quantile(0.99,
+          sum by (le, namespace, store) (rate(api_s3_request_duration_bucket{job="system-s3-garage", api_endpoint="GetObject"}[5m]))
+        ) > 0.25
+        and on (namespace, store)
+        sum by (namespace, store) (rate(api_s3_request_counter{job="system-s3-garage", api_endpoint="GetObject"}[5m])) > 0.1
+      for: 15m
+      labels:
+        severity_level: "5"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "store"
+        summary: The system object storage answers reads slower than it promises.
+        description: |
+          The 99th percentile of the time to the first byte of a GET on the store `{{ $labels.store }}`
+          has been above 250 ms for fifteen minutes (it is {{ $value | humanizeDuration }}).
+
+          Open the **System S3 Garage** dashboard: response time and requests by operation
+          show whether the store is overloaded or a replica is slow, and the block read
+          duration shows whether the volumes are. A replica that is restarting or away
+          (`D8SystemS3GarageNodeDisconnected`) holds reads of its blocks for up to about
+          75 seconds; that clears on its own. Persistent slowness with no node away points
+          at the volumes of the StorageClass or at CPU: compare the Garage pods' usage
+          with their requests (the VerticalPodAutoscaler raises those on the next restart).
+
+    - alert: D8SystemS3SLOWriteLatency
+      expr: |
+        histogram_quantile(0.99,
+          sum by (le, namespace, store) (rate(api_s3_request_duration_bucket{job="system-s3-garage", api_endpoint="PutObject"}[5m]))
+        ) > 0.5
+        and on (namespace, store)
+        sum by (namespace, store) (rate(api_s3_request_counter{job="system-s3-garage", api_endpoint="PutObject"}[5m])) > 0.1
+      for: 15m
+      labels:
+        severity_level: "5"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "store"
+        summary: The system object storage accepts writes slower than it promises.
+        description: |
+          The 99th percentile of a PUT on the store `{{ $labels.store }}` has been above 500 ms
+          for fifteen minutes (it is {{ $value | humanizeDuration }}).
+
+          The promise is for objects up to 1 MiB. A PUT is timed until its body has been
+          received and stored, and the metrics carry no object size: a consumer that
+          uploads large objects raises this percentile without anything being wrong. Check
+          on the **System S3 Garage** dashboard whether block write throughput is high
+          (large uploads) or block write duration is (slow volumes).
+
+          A store that is migrating refuses writes during the switch to the new cluster;
+          that shows as `D8SystemS3WritesFrozen`, not as slowness.
+
+    - alert: D8SystemS3SLOHeadLatency
+      expr: |
+        histogram_quantile(0.99,
+          sum by (le, namespace, store) (rate(api_s3_request_duration_bucket{job="system-s3-garage", api_endpoint="HeadObject"}[5m]))
+        ) > 0.1
+        and on (namespace, store)
+        sum by (namespace, store) (rate(api_s3_request_counter{job="system-s3-garage", api_endpoint="HeadObject"}[5m])) > 0.1
+      for: 15m
+      labels:
+        severity_level: "5"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "store"
+        summary: The system object storage answers metadata requests slower than it promises.
+        description: |
+          The 99th percentile of a HEAD on the store `{{ $labels.store }}` has been above 100 ms
+          for fifteen minutes (it is {{ $value | humanizeDuration }}).
+
+          A HEAD reads only metadata, so its time is the time of Garage's metadata tables:
+          check on the **System S3 Garage** dashboard whether table operations are slow, and
+          whether a replica is away (its metadata reads wait for it).
+
+    - alert: D8SystemS3SLOListLatency
+      expr: |
+        histogram_quantile(0.99,
+          sum by (le, namespace, store) (rate(api_s3_request_duration_bucket{job="system-s3-garage", api_endpoint="ListObjectsV2"}[5m]))
+        ) > 1
+        and on (namespace, store)
+        sum by (namespace, store) (rate(api_s3_request_counter{job="system-s3-garage", api_endpoint="ListObjectsV2"}[5m])) > 0.1
+      for: 15m
+      labels:
+        severity_level: "5"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "store"
+        summary: The system object storage lists objects slower than it promises.
+        description: |
+          The 99th percentile of a ListObjectsV2 on the store `{{ $labels.store }}` has been above
+          1 s for fifteen minutes (it is {{ $value | humanizeDuration }}).
+
+          A listing reads a page of up to a thousand keys from the metadata tables. Check on
+          the **System S3 Garage** dashboard whether table operations are slow and whether a
+          replica is away.
+
+    - alert: D8SystemS3SLOAvailability
+      expr: |
+        (
+          sum by (namespace, store) (rate(api_s3_error_counter{job="system-s3-garage", status_code=~"5..", status_code!="501"}[5m]))
+          /
+          sum by (namespace, store) (rate(api_s3_request_counter{job="system-s3-garage"}[5m]))
+        ) > 0.001
+        and on (namespace, store)
+        sum by (namespace, store) (rate(api_s3_request_counter{job="system-s3-garage"}[5m])) > 0.1
+      for: 15m
+      labels:
+        severity_level: "4"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "store"
+        summary: The system object storage fails more requests than it promises.
+        description: |
+          More than 0.1 % of the S3 requests to the store `{{ $labels.store }}` have ended in a
+          server error (5xx) for fifteen minutes (it is {{ $value | humanizePercentage }}).
+
+          `D8SystemS3GarageServerErrors` and the **System S3 Garage** dashboard show which
+          operations fail and with which code; `D8SystemS3GarageClusterUnavailable` and
+          `D8SystemS3GarageClusterDegraded` say whether a quorum or a replica is missing.

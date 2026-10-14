@@ -121,10 +121,12 @@
 
     - alert: D8SystemS3GarageServerErrors
       # 5xx only: a 4xx is the client's business (a missing object, a refused key,
-      # a full quota — the last has an alert of its own).
+      # a full quota — the last has an alert of its own). 501 is left out too: it is
+      # Garage declining a feature it does not have, such as object lock, which some
+      # clients probe on every start.
       expr: |
         sum by (namespace, store, incarnation) (
-          increase(api_s3_error_counter{job="system-s3-garage", status_code=~"5.."}[5m])
+          increase(api_s3_error_counter{job="system-s3-garage", status_code=~"5..", status_code!="501"}[5m])
         ) > 10
       for: 5m
       labels:

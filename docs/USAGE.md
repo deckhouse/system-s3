@@ -309,12 +309,26 @@ The **System S3 Garage** dashboard shows S3 requests, errors and p95/p99 latency
 | `D8SystemS3GarageClusterUnavailable` | No node of a plane has a quorum for every partition, for 1 minute: reads and writes fail. |
 | `D8SystemS3GarageClusterDegraded` | A storage node is disconnected but the plane still serves, for 5 minutes. A single-replica store never reports this state. |
 | `D8SystemS3GarageNodeDisconnected` | A node in the layout has not been seen for more than 5 minutes. |
-| `D8SystemS3GarageServerErrors` | More than ten S3 `5xx` responses per 5 minutes. |
+| `D8SystemS3GarageServerErrors` | More than ten S3 `5xx` responses per 5 minutes (`501`, a feature Garage does not implement, is not counted). |
 | `D8SystemS3GarageResyncErrors` | A replica has data blocks it failed to resync for 15 minutes. |
 | `D8SystemS3GarageDiskAlmostFull` | A replica's volume has less than 10% free for 10 minutes. |
 | `D8SystemS3GarageMetricsUnavailable` | A Garage pod could not be scraped for 15 minutes; the alerts above do not see it. |
 
 Each alert's description says what to check and what to do.
+
+### Service level
+
+The store promises, per S3 operation, over 5 minutes:
+
+| Operation | Promise | Alert |
+|-----------|---------|-------|
+| `GetObject` | p99 time to the first byte ≤ 250 ms | `D8SystemS3SLOReadLatency` |
+| `PutObject`, objects up to 1 MiB | p99 ≤ 500 ms | `D8SystemS3SLOWriteLatency` |
+| `HeadObject` | p99 ≤ 100 ms | `D8SystemS3SLOHeadLatency` |
+| `ListObjectsV2` (one page) | p99 ≤ 1 s | `D8SystemS3SLOListLatency` |
+| every request | ≥ 99.9% answered without a server error | `D8SystemS3SLOAvailability` |
+
+The thresholds are three to five times what a load test measured on a three-replica store, on a network and on a node-pinned StorageClass. An alert fires after fifteen minutes over its threshold, and only while the store sees at least one such request every ten seconds. A `PutObject` is timed until its body has been stored and the metrics carry no object size, so a consumer uploading large objects can raise the write percentile without anything being wrong; the alert's description says how to tell.
 
 ## Disabling the module, and destroying the cluster
 
