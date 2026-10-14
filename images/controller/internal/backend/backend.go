@@ -194,6 +194,31 @@ type (
 	AccessState = objectstorage.AccessState
 )
 
+// DataPlane is one Garage cluster of the store as it runs: the shape it was
+// built in and the pods it has. There is one, and two for the hours of a
+// migration.
+//
+// The shape is the applied one, not the settings: the StorageClass the volumes
+// are bound to and the mode the pinned replication factor implies. Comparing it
+// with the settings is how a change that is still pending is told from one that
+// has landed.
+type DataPlane struct {
+	Incarnation      int32
+	Serving          bool
+	StorageClass     string
+	HighAvailability bool
+	Replicas         int32
+	Pods             []DataPlanePod
+}
+
+// DataPlanePod is one existing pod of a data plane. Node is empty while the pod
+// is not scheduled.
+type DataPlanePod struct {
+	Name  string
+	Node  string
+	Ready bool
+}
+
 // TemporaryKey is one unexpired key the credentials endpoint minted, as Garage
 // holds it: the bucket it is granted on, the ServiceAccount it was issued to and
 // whether it may write. The secret half is not here — Garage hands it out once.

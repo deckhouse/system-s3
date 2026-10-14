@@ -84,3 +84,51 @@ func TestBucketUsagePublishesTheObjectCount(t *testing.T) {
 		t.Errorf("%d bucket_quota_objects series after the bucket was forgotten", n)
 	}
 }
+
+// A migration that finished must leave nothing of the old cluster behind: its
+// pods drawn next to the new ones would read as a store with twice the replicas.
+// And store_info is the serving plane's shape alone, replaced rather than added
+// to when the shape changes, or the console would compare the settings with two
+// answers.
+func TestDataPlanesReplacesWhatWasPublished(t *testing.T) {
+	DataPlanes([]DataPlane{
+		{Incarnation: 1, Serving: true, StorageClass: "local", HighAvailability: true, Replicas: 3,
+			Pods: []DataPlanePod{{Name: "system-garage-0", Node: "a", Ready: true}, {Name: "system-garage-1"}}},
+		{Incarnation: 2, StorageClass: "replicated", Replicas: 1,
+			Pods: []DataPlanePod{{Name: "system-garage-i2-0", Node: "b", Ready: true}}},
+	})
+	if n := testutil.CollectAndCount(replicaReady); n != 3 {
+		t.Fatalf("%d replica_ready series during the migration, want 3", n)
+	}
+	if got := testutil.ToFloat64(replicaReady.WithLabelValues("1", "system-garage-1", "", "true")); got != 0 {
+		t.Errorf("replica_ready of the unscheduled pod = %v, want 0", got)
+	}
+	if n := testutil.CollectAndCount(planeInfo); n != 2 {
+		t.Errorf("%d plane_info series during the migration, want 2", n)
+	}
+	if got := testutil.ToFloat64(storeInfo.WithLabelValues("local", "true", "3")); got != 1 {
+		t.Errorf("store_info of the serving plane = %v, want 1", got)
+	}
+
+	DataPlanes([]DataPlane{
+		{Incarnation: 2, Serving: true, StorageClass: "replicated", Replicas: 1,
+			Pods: []DataPlanePod{{Name: "system-garage-i2-0", Node: "b", Ready: true}}},
+	})
+	if n := testutil.CollectAndCount(replicaReady); n != 1 {
+		t.Errorf("%d replica_ready series after the migration, want 1", n)
+	}
+	if got := testutil.ToFloat64(replicaReady.WithLabelValues("2", "system-garage-i2-0", "b", "true")); got != 1 {
+		t.Errorf("replica_ready of the new serving pod = %v, want 1", got)
+	}
+	if n := testutil.CollectAndCount(storeInfo); n != 1 {
+		t.Fatalf("%d store_info series, want exactly one", n)
+	}
+	if got := testutil.ToFloat64(storeInfo.WithLabelValues("replicated", "false", "1")); got != 1 {
+		t.Errorf("store_info of the new shape = %v, want 1", got)
+	}
+
+	DataPlanes(nil)
+	if n := testutil.CollectAndCount(storeInfo) + testutil.CollectAndCount(planeInfo) + testutil.CollectAndCount(replicaReady); n != 0 {
+		t.Errorf("%d series for a store with no data plane, want none", n)
+	}
+}

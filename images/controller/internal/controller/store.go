@@ -51,6 +51,10 @@ type storeDriver interface {
 	// TemporaryKeys lists the unexpired temporary keys, for the metric that is
 	// the only place outside Garage they can be seen.
 	TemporaryKeys(ctx context.Context, store *backend.Store) ([]backend.TemporaryKey, error)
+
+	// DataPlanes lists the Garage clusters of the store with their pods, for the
+	// metrics the console draws the data plane from.
+	DataPlanes(ctx context.Context, store *backend.Store) ([]backend.DataPlane, error)
 }
 
 // StoreManager owns the module's single system data plane.
@@ -179,6 +183,10 @@ func (m *StoreManager) ensureOnce(ctx context.Context) (backend.StoreState, erro
 	defer m.mu.Unlock()
 
 	state, err := m.driver.EnsureStore(ctx, m.store)
+	// Before the error check: a pass that failed half way still leaves pods that
+	// are ready or not, and which ones is what an operator looking into the
+	// failure wants to see.
+	m.publishDataPlanes(ctx)
 	if m.moduleStatus != nil {
 		if publishErr := m.moduleStatus.Publish(ctx, state); publishErr != nil {
 			// A reporting failure must not turn functioning S3 into a dependency
@@ -223,6 +231,34 @@ func (m *StoreManager) publish(state backend.StoreState) {
 		capacity = &v
 	}
 	monitoring.StoreCapacityBytes(m.store.Name, capacity)
+}
+
+// publishDataPlanes refreshes replica_ready, store_info and plane_info. A failed
+// read keeps the previous series rather than clearing them, for the same reason
+// as publishTemporaryKeys: no replicas is a claim, not an absence of one.
+//
+// It runs on every pass rather than on a slower clock of its own. The pass is
+// what the background loop does every REQUEUE_INTERVAL_SECONDS (30 by default),
+// which bounds how stale a pod's readiness can be, and nothing here watches pods
+// to do better: a readiness flip is not something the controller acts on.
+func (m *StoreManager) publishDataPlanes(ctx context.Context) {
+	planes, err := m.driver.DataPlanes(ctx, m.store)
+	if err != nil {
+		m.log.Error("unable to read the data planes for the metrics", logger.Err(err))
+		return
+	}
+	series := make([]monitoring.DataPlane, 0, len(planes))
+	for _, p := range planes {
+		pods := make([]monitoring.DataPlanePod, 0, len(p.Pods))
+		for _, pod := range p.Pods {
+			pods = append(pods, monitoring.DataPlanePod{Name: pod.Name, Node: pod.Node, Ready: pod.Ready})
+		}
+		series = append(series, monitoring.DataPlane{
+			Incarnation: p.Incarnation, Serving: p.Serving, StorageClass: p.StorageClass,
+			HighAvailability: p.HighAvailability, Replicas: p.Replicas, Pods: pods,
+		})
+	}
+	monitoring.DataPlanes(series)
 }
 
 // sweepInterval is how often the expired temporary keys are cleaned up. They are

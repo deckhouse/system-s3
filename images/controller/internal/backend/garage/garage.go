@@ -413,7 +413,11 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 	state.TotalCapacity = mesh.total
 	state.Ready = mesh.ready
 	state.Message = mesh.msg
-	storageCondition(&state, state.Ready, mesh.msg)
+	class := boundClass
+	if class == "" {
+		class = store.StorageClass
+	}
+	storageCondition(&state, state.Ready, appendNote(mesh.msg, fmt.Sprintf("%s on %s", workloadMsg, class)))
 
 	// Said on the object, not only in the log. A replica with no stored identity
 	// works fine until the next placement move, and then rejoins under a new node
@@ -656,7 +660,8 @@ func (d *Driver) ensureWorkload(ctx context.Context, store *backend.Store, cfgHa
 }
 
 // workloadRolledOut reports whether the StatefulSet is serving the revision that
-// was just applied, and what to say while it is not.
+// was just applied, and what to say about it: where the rollout is while it is
+// not, and how many replicas are ready once it is (StorageReady carries that).
 //
 // Revision matters as much as count, and readyReplicas cannot tell them apart.
 // Garage reads garage.toml once, at startup. When the config hash changes the pod
@@ -681,7 +686,7 @@ func workloadRolledOut(sts *appsv1.StatefulSet, desired int32) (bool, string) {
 		return false, fmt.Sprintf("Garage StatefulSet rolling out (%d/%d pods ready)",
 			sts.Status.ReadyReplicas, desired)
 	}
-	return true, ""
+	return true, fmt.Sprintf("%d of %d replicas ready", sts.Status.ReadyReplicas, desired)
 }
 
 // apply creates or updates obj. On update it overwrites the spec-bearing fields

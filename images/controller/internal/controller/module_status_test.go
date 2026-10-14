@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -28,6 +29,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/deckhouse/sds-common-lib/logger"
 	v1alpha1 "github.com/deckhouse/system-s3/api/v1alpha1"
@@ -218,8 +220,10 @@ func TestGarageConditionsDoNotLeakIntoSystemBucketAndLegacyConditionsAreRemoved(
 }
 
 type reportingStoreDriver struct {
-	state backend.StoreState
-	err   error
+	state     backend.StoreState
+	err       error
+	planes    []backend.DataPlane
+	planesErr error
 }
 
 func TestSizeUpToDateReplacesAllLegacySizeAppliedStatuses(t *testing.T) {
@@ -282,6 +286,10 @@ func (*reportingStoreDriver) TemporaryKeys(context.Context, *backend.Store) ([]b
 func (*reportingStoreDriver) SweepExpiredTemporaryAccess(context.Context, *backend.Store) (int, error) {
 	return 0, nil
 }
+func (d *reportingStoreDriver) DataPlanes(context.Context, *backend.Store) ([]backend.DataPlane, error) {
+	return d.planes, d.planesErr
+}
+
 func (*reportingStoreDriver) SweepIncompleteUploads(context.Context, *backend.Store) (int, error) {
 	return 0, nil
 }
@@ -300,6 +308,42 @@ func TestStoreManagerReportsFailedReconciliationWithoutAnyBuckets(t *testing.T) 
 	cond := moduleCondition(t, readModule(t, c), backend.ReplicationReady)
 	if cond["status"] != "False" || cond["message"] != d.err.Error() {
 		t.Fatalf("failed state was not published: %v", cond)
+	}
+}
+
+// The replicas are published from a pass that failed too: which pods are not
+// ready is what explains the failure. And a pass that could not read them keeps
+// what was published, because an empty list would claim the store has no pods.
+func TestStoreManagerPublishesTheDataPlanesOfAFailedPass(t *testing.T) {
+	d := &reportingStoreDriver{err: errors.New("layout not applied"), planes: []backend.DataPlane{{
+		Incarnation: 1, Serving: true, StorageClass: "local", HighAvailability: true, Replicas: 3,
+		Pods: []backend.DataPlanePod{{Name: "system-garage-0", Node: "a", Ready: true}, {Name: "system-garage-1"}},
+	}}}
+	m := &StoreManager{driver: d, store: &backend.Store{Name: "system"}, log: logger.NewNop()}
+	if _, err := m.Ensure(context.Background()); err == nil {
+		t.Fatal("the driver error was lost")
+	}
+	count := func(name string) int {
+		t.Helper()
+		n, err := testutil.GatherAndCount(metrics.Registry, name)
+		if err != nil {
+			t.Fatalf("gather %s: %v", name, err)
+		}
+		return n
+	}
+	if n := count("system_s3_replica_ready"); n != 2 {
+		t.Fatalf("%d replica_ready series, want 2", n)
+	}
+	if n := count("system_s3_store_info"); n != 1 {
+		t.Fatalf("%d store_info series, want 1", n)
+	}
+
+	d.planes, d.planesErr = nil, errors.New("the API server is not answering")
+	if _, err := m.Ensure(context.Background()); err == nil {
+		t.Fatal("the driver error was lost")
+	}
+	if n := count("system_s3_replica_ready"); n != 2 {
+		t.Errorf("%d replica_ready series after a failed read, want the previous 2", n)
 	}
 }
 

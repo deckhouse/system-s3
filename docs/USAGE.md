@@ -279,6 +279,16 @@ Shared Garage state is published only in `Module/system-s3.status.conditions`, i
 
 The quota condition was renamed from `SizeApplied` to `SizeUpToDate`. Reconciliation removes the old name, including when Garage is unavailable. Update consumer JSONPath expressions and readiness checks. The Prometheus metric name `system_s3_bucket_size_applied` is retained for compatibility.
 
+The data plane itself is described by the controller's metrics, refreshed on every reconciliation pass (every 30 seconds by default). The console draws the storage page from them, not from the pods and StatefulSets in `d8-system-s3`:
+
+| Metric | Labels | Value |
+|--------|--------|-------|
+| `system_s3_replica_ready` | `plane`, `replica`, `node`, `serving` | `1` if the Garage pod is `Ready`, `0` otherwise. One series per existing pod; `node` is empty while the pod is not scheduled. |
+| `system_s3_store_info` | `storage_class`, `high_availability`, `replicas` | `1`. The shape the serving cluster actually runs in: the StorageClass its volumes are bound to, the mode of its pinned replication factor and the replica count. Differs from the module settings while a change is pending. |
+| `system_s3_plane_info` | `plane`, `storage_class`, `high_availability`, `replicas`, `serving` | `1` for each existing Garage cluster. |
+
+`plane` is the number of the Garage cluster; during a migration there are two, and `serving="true"` marks the one the endpoint points at. Pods and clusters that no longer exist lose their series. Only the controller replica holding the leader lease publishes them.
+
 To inspect the storage itself:
 
 ```shell

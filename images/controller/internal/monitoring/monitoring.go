@@ -183,6 +183,39 @@ var (
 		Help:      "Unix time an unexpired temporary key stops being honoured, by bucket, access key ID, the ServiceAccount it was issued to and whether it may write.",
 	}, []string{"bucket", "access_key_id", "subject", "write"})
 
+	// replicaReady, storeInfo and planeInfo are the data plane as the console
+	// draws it: which Garage pods exist, on which node, whether each is ready, and
+	// what shape the cluster was actually built in.
+	//
+	// They are here so that nothing outside the controller has to read the
+	// module namespace's StatefulSets and pods to answer that. Which pods belong
+	// to which plane, which plane serves and what "the applied shape" means are
+	// this controller's decisions; a reader rebuilding them from labels would be
+	// a second implementation of them, wrong the first time either changes.
+	//
+	// plane is the incarnation. There are two for the hours of a migration, and
+	// serving says which one the endpoint points at.
+	replicaReady = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "replica_ready",
+		Help:      "Whether an existing Garage pod of the data plane is Ready (1) or not (0), by plane, pod, node and whether the plane serves.",
+	}, []string{"plane", "replica", "node", "serving"})
+
+	// storeInfo is the applied shape of the serving plane, compared with the
+	// module settings to tell a pending change from a landed one. The settings
+	// are desired state and say nothing about the cluster that runs.
+	storeInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "store_info",
+		Help:      "1 for the applied shape of the serving data plane: bound StorageClass, high-availability mode and replica count.",
+	}, []string{"storage_class", "high_availability", "replicas"})
+
+	planeInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "plane_info",
+		Help:      "1 for each existing data plane, with its applied shape and whether it serves.",
+	}, []string{"plane", "storage_class", "high_availability", "replicas", "serving"})
+
 	stsRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "sts_requests_total",
@@ -280,6 +313,9 @@ func init() {
 	metrics.Registry.MustRegister(storeVolumeCapacityBytes)
 	metrics.Registry.MustRegister(stsRequestsTotal)
 	metrics.Registry.MustRegister(temporaryKeyExpiration)
+	metrics.Registry.MustRegister(replicaReady)
+	metrics.Registry.MustRegister(storeInfo)
+	metrics.Registry.MustRegister(planeInfo)
 }
 
 // TemporaryKey is one series of temporary_key_expiration_seconds.
@@ -319,4 +355,48 @@ func StoreCapacityBytes(store string, bytes *int64) {
 		return
 	}
 	storeCapacityBytes.WithLabelValues(store).Set(float64(*bytes))
+}
+
+// DataPlane is one data plane as replica_ready, store_info and plane_info
+// publish it.
+type DataPlane struct {
+	Incarnation      int32
+	Serving          bool
+	StorageClass     string
+	HighAvailability bool
+	Replicas         int32
+	Pods             []DataPlanePod
+}
+
+// DataPlanePod is one series of replica_ready.
+type DataPlanePod struct {
+	Name, Node string
+	Ready      bool
+}
+
+// DataPlanes replaces the published data planes. A pod that is gone, a plane
+// that was torn down and a shape that changed all drop out rather than linger:
+// a replica left behind by a migration would be drawn as a fourth replica of a
+// three-replica store.
+func DataPlanes(planes []DataPlane) {
+	replicaReady.Reset()
+	storeInfo.Reset()
+	planeInfo.Reset()
+	for _, p := range planes {
+		plane := strconv.FormatInt(int64(p.Incarnation), 10)
+		serving := strconv.FormatBool(p.Serving)
+		ha := strconv.FormatBool(p.HighAvailability)
+		replicas := strconv.FormatInt(int64(p.Replicas), 10)
+		for _, pod := range p.Pods {
+			v := 0.0
+			if pod.Ready {
+				v = 1
+			}
+			replicaReady.WithLabelValues(plane, pod.Name, pod.Node, serving).Set(v)
+		}
+		planeInfo.WithLabelValues(plane, p.StorageClass, ha, replicas, serving).Set(1)
+		if p.Serving {
+			storeInfo.WithLabelValues(p.StorageClass, ha, replicas).Set(1)
+		}
+	}
 }
