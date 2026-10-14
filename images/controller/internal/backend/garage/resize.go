@@ -310,12 +310,38 @@ func clusterInSync(ctx context.Context, svc *adminClient, want int32, held heldB
 }
 
 // blocksHeld compares each node's block files with the blocks it counts.
+//
+// A node that holds as many files as the fullest node holds everything too, even
+// with fewer files than it counts. Garage keeps a reference count for a block
+// whose last object was deleted (Deletable) until the block file is removed — and
+// it removes that entry only while removing the file. A node that was away while
+// an object was written and deleted learns the deletion from the table sync but
+// never had the file, so the entry stays for good (block/resync.rs: the
+// "offloading and deleting" branch is the only caller of
+// clear_deleted_block_rc). On a store that consumers delete from, which a
+// platform's store is, a replica that restarted at the wrong moment would
+// otherwise never count as full: the cutover froze writes, gave up after its
+// deadline and froze them again, the drain kept the old cluster and the replica
+// change never finished — found on the load-test stand on 14.10.
+//
+// The fullest node is the yardstick because every replica holds every block (the
+// replication factor is the replica count), and a node still being filled has
+// fewer files than its peers whatever it counts. heldBlocksSlack allows for the
+// blocks written between the reads of the volumes and for a peer that still has
+// the files of deleted blocks waiting for Garage's collection delay.
 func blocksHeld(stats *nodeStatisticsResponse, files map[string]int64) (bool, string) {
 	ids := make([]string, 0, len(stats.Success))
 	for id := range stats.Success {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+	var fullest int64
+	for _, id := range ids {
+		if have, ok := files[id]; ok && have > fullest {
+			fullest = have
+		}
+	}
+	slack := max(heldBlocksSlackMin, fullest/heldBlocksSlackFraction)
 	var short []string
 	for _, id := range ids {
 		rc := stats.Success[id].BlockManagerStats.RCEntries
@@ -323,7 +349,8 @@ func blocksHeld(stats *nodeStatisticsResponse, files map[string]int64) (bool, st
 		switch {
 		case !ok:
 			short = append(short, fmt.Sprintf("node %s: its volume could not be read", shortID(id)))
-		case have < rc:
+		case have >= rc, have >= fullest-slack:
+		default:
 			short = append(short, fmt.Sprintf("node %s holds %d of %d blocks", shortID(id), have, rc))
 		}
 	}
@@ -332,6 +359,15 @@ func blocksHeld(stats *nodeStatisticsResponse, files map[string]int64) (bool, st
 	}
 	return true, ""
 }
+
+// heldBlocksSlackMin and heldBlocksSlackFraction bound how far a node may fall
+// behind the fullest one and still count as full: two blocks, or a thousandth of
+// the fullest node's, whichever is more. Small enough that an empty replica of
+// even a small store never passes.
+const (
+	heldBlocksSlackMin      = 2
+	heldBlocksSlackFraction = 1000
+)
 
 // blocksOnDisk counts the block files on the volume of every running replica,
 // keyed by the node id its admin API reports.

@@ -443,6 +443,32 @@ func TestResizeOfflineReadsPastTheCache(t *testing.T) {
 	}
 }
 
+// TestBlocksHeldWithDeletedBlocksANodeNeverHad: the stand of 14.10. A replica
+// restarted while objects were written and deleted counts five blocks it never
+// had and never will; Garage keeps their entries for good. It is as full as its
+// peers, and the gate must open.
+func TestBlocksHeldWithDeletedBlocksANodeNeverHad(t *testing.T) {
+	rc := func(n int64) nodeStatistics {
+		var s nodeStatistics
+		s.BlockManagerStats = &struct {
+			RCEntries      int64 `json:"rcEntries"`
+			ResyncQueueLen int64 `json:"resyncQueueLen"`
+			ResyncErrors   int64 `json:"resyncErrors"`
+		}{RCEntries: n}
+		return s
+	}
+	stats := &nodeStatisticsResponse{Success: map[string]nodeStatistics{"a": rc(5006), "b": rc(5011), "c": rc(5006)}}
+	if got, why := blocksHeld(stats, map[string]int64{"a": 5006, "b": 5006, "c": 5006}); !got {
+		t.Errorf("blocksHeld=false %q for a node as full as its peers", why)
+	}
+	// Its peers may still have the files of those blocks until Garage collects
+	// them, ten minutes after the deletion; five of five thousand is within the
+	// slack.
+	if got, why := blocksHeld(stats, map[string]int64{"a": 5011, "b": 5006, "c": 5011}); !got {
+		t.Errorf("blocksHeld=false %q while the peers wait to collect five deleted blocks", why)
+	}
+}
+
 // TestBlocksHeld: a node is full when it has a file for every block it counts.
 // Its reference counts arrive with the table sync, long before the blocks do,
 // which is exactly the window this has to see.
@@ -467,6 +493,7 @@ func TestBlocksHeld(t *testing.T) {
 		{"a block written between the two reads", map[string]int64{"a": 2103, "b": 2103, "c": 2103}, true, ""},
 		{"a node that started empty", map[string]int64{"a": 2102, "b": 2102, "c": 40}, false, "holds 40 of 2103"},
 		{"a node whose volume was not read", map[string]int64{"a": 2102, "b": 2102}, false, "could not be read"},
+		{"a node nearly filled is still being filled", map[string]int64{"a": 2102, "b": 2102, "c": 2000}, false, "holds 2000 of 2103"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
