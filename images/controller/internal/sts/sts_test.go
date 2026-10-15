@@ -19,6 +19,7 @@ package sts
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -69,6 +70,7 @@ type fakeIssuer struct {
 	bucket    string
 	subject   string
 	expiresAt time.Time
+	err       error
 }
 
 func (f *fakeIssuer) IssueTemporaryAccess(
@@ -76,6 +78,9 @@ func (f *fakeIssuer) IssueTemporaryAccess(
 ) (garage.TemporaryCredentials, error) {
 	f.calls++
 	f.bucket, f.subject, f.write, f.expiresAt = bucketName, subject, write, expiresAt
+	if f.err != nil {
+		return garage.TemporaryCredentials{}, f.err
+	}
 	return garage.TemporaryCredentials{
 		AccessKeyID:     "GK-temp",
 		SecretAccessKey: "secret-half",
@@ -331,5 +336,47 @@ func TestOnlyPostIsAccepted(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status=%d, want 405", rec.Code)
+	}
+}
+
+// A store that will take the request again shortly answers 503 with
+// Retry-After, which an SDK retries on its own; anything else stays a 500.
+func TestATemporaryRefusalIsServiceUnavailableWithRetryAfter(t *testing.T) {
+	cases := []struct {
+		name           string
+		err            error
+		wantCode       int
+		wantRetryAfter string
+	}{
+		{
+			name:           "the backend will be back: 503 and when to ask again",
+			err:            backend.Unavailable(20*time.Second, errors.New("look up bucket: context deadline exceeded")),
+			wantCode:       http.StatusServiceUnavailable,
+			wantRetryAfter: "20",
+		},
+		{
+			name:     "a fault: 500, no hint",
+			err:      errors.New("garage admin GET /v2/GetBucketInfo: status 400"),
+			wantCode: http.StatusInternalServerError,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := &fakeAuthorizer{
+				user:    authnv1.UserInfo{Username: "system:serviceaccount:d8-monitoring:loki"},
+				ok:      true,
+				allowed: map[string]bool{subresourceWrite: true},
+			}
+			srv := testServer(t, auth, &fakeIssuer{err: tc.err}, readyBucket("d8-monitoring-loki"))
+
+			rec := post(t, srv, "/d8-monitoring/loki", url.Values{"WebIdentityToken": {"a-token"}})
+
+			if rec.Code != tc.wantCode {
+				t.Fatalf("status=%d, want %d (body %s)", rec.Code, tc.wantCode, rec.Body.String())
+			}
+			if got := rec.Header().Get("Retry-After"); got != tc.wantRetryAfter {
+				t.Errorf("Retry-After=%q, want %q", got, tc.wantRetryAfter)
+			}
+		})
 	}
 }

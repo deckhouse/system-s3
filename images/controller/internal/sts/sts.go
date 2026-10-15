@@ -221,6 +221,17 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 
 	expiresAt := s.now().Add(duration)
 	creds, err := s.Issuer.IssueTemporaryAccess(ctx, s.Store, bucketName, user.Username, write, expiresAt)
+	if unavailable, ok := backend.AsUnavailable(err); ok {
+		// Not a fault: the store will take the request again shortly — a switch to
+		// a new cluster, a replica the others have not given up on yet. A 503 with
+		// Retry-After is what an SDK retries on its own, at the time it is told.
+		s.Log.Warn("temporary credentials not issued for now", "error", err.Error(),
+			"systemBucket", namespace+"/"+name, "subject", user.Username,
+			"retryAfter", unavailable.RetryAfter.String())
+		w.Header().Set("Retry-After", strconv.Itoa(int(unavailable.RetryAfter.Seconds())))
+		writeError(w, http.StatusServiceUnavailable, "ServiceUnavailable", err.Error())
+		return
+	}
 	if err != nil {
 		s.Log.Error("unable to issue temporary credentials", logger.Err(err),
 			"systemBucket", namespace+"/"+name, "subject", user.Username)

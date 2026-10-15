@@ -19,9 +19,11 @@ package garage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -174,5 +176,34 @@ func TestTemporaryKeysWithoutLiveKeysDoesNotReadBuckets(t *testing.T) {
 	got, err := temporaryKeysOf(context.Background(), newAdminClient(srv.URL, "token"))
 	if err != nil || len(got) != 0 {
 		t.Fatalf("got %+v, %v; want no keys", got, err)
+	}
+}
+
+// TestUnreachableTellsAPassingFailureFromAFault: a Garage that did not answer in
+// time, could not be reached or answered 5xx will be back; a 4xx or anything
+// else is a fault, and the endpoint must not tell the consumer to come back for
+// it.
+func TestUnreachableTellsAPassingFailureFromAFault(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"timed out", fmt.Errorf("look up bucket: %w", context.DeadlineExceeded), true},
+		{"transport failure", fmt.Errorf("look up bucket: %w", &url.Error{Op: "Get", URL: "https://garage", Err: errors.New("connection refused")}), true},
+		{"garage 503", &apiError{Method: "GET", Path: "/v2/GetBucketInfo", StatusCode: 503}, true},
+		{"garage 400", &apiError{Method: "GET", Path: "/v2/GetBucketInfo", StatusCode: 400}, false},
+		{"anything else", errors.New("decode: unexpected end of JSON input"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u, got := backend.AsUnavailable(unreachable(tc.err))
+			if got != tc.want {
+				t.Fatalf("unavailable=%v, want %v", got, tc.want)
+			}
+			if got && u.RetryAfter != retryAfterUnreachable {
+				t.Errorf("RetryAfter=%v, want %v", u.RetryAfter, retryAfterUnreachable)
+			}
+		})
 	}
 }

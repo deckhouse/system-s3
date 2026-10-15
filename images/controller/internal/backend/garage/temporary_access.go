@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -59,6 +61,39 @@ type TemporaryCredentials struct {
 	ExpiresAt       time.Time
 }
 
+// How long the credentials endpoint tells a consumer to wait before asking
+// again, by why it could not answer now.
+//
+// A Garage node that went away holds every request that reaches it until the
+// others give up on it, after five missed pings fifteen seconds apart (fixed in
+// Garage); a quarter of that is a retry that has a fair chance and does not
+// hammer. A cutover lasts minutes, and a store that is still being provisioned
+// is a store that has just been enabled.
+const (
+	retryAfterUnreachable    = 20 * time.Second
+	retryAfterFrozen         = 60 * time.Second
+	retryAfterNotProvisioned = 30 * time.Second
+)
+
+// unreachable marks a failure to talk to Garage as one that will pass: a
+// request that timed out, a connection that failed, or Garage answering 5xx.
+// Anything else — a 4xx, a decoding error — is a fault and stays one.
+func unreachable(err error) error {
+	var api *apiError
+	if errors.As(err, &api) {
+		if api.StatusCode >= 500 {
+			return backend.Unavailable(retryAfterUnreachable, err)
+		}
+		return err
+	}
+	var netErr net.Error
+	var urlErr *url.Error
+	if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &netErr) || errors.As(err, &urlErr) {
+		return backend.Unavailable(retryAfterUnreachable, err)
+	}
+	return err
+}
+
 // IssueTemporaryAccess mints a key that Garage stops honouring at expiresAt and
 // grants it on the bucket.
 //
@@ -82,21 +117,22 @@ func (d *Driver) IssueTemporaryAccess(
 		// with the new one, and the difference would be copied over or lost.
 		// Refusing is the honest answer: for the length of the switch, this store
 		// takes no writes from anybody.
-		return TemporaryCredentials{}, fmt.Errorf(
-			"the system object storage is switching to a new Garage cluster and is refusing writes; " +
-				"ask again in a few minutes, or ask for read-only credentials")
+		return TemporaryCredentials{}, backend.Unavailable(retryAfterFrozen, fmt.Errorf(
+			"the system object storage is switching to a new Garage cluster and is refusing writes; "+
+				"ask again in a few minutes, or ask for read-only credentials"))
 	}
 	svc, ready, err := d.adminClientFor(ctx, store)
 	if err != nil {
 		return TemporaryCredentials{}, err
 	}
 	if !ready {
-		return TemporaryCredentials{}, fmt.Errorf("the system object storage is not provisioned yet")
+		return TemporaryCredentials{}, backend.Unavailable(retryAfterNotProvisioned,
+			fmt.Errorf("the system object storage is not provisioned yet"))
 	}
 
 	b, found, err := svc.getBucketByAlias(ctx, bucketName)
 	if err != nil {
-		return TemporaryCredentials{}, fmt.Errorf("look up bucket %q: %w", bucketName, err)
+		return TemporaryCredentials{}, unreachable(fmt.Errorf("look up bucket %q: %w", bucketName, err))
 	}
 	if !found {
 		return TemporaryCredentials{}, fmt.Errorf("bucket %q does not exist", bucketName)
@@ -104,7 +140,7 @@ func (d *Driver) IssueTemporaryAccess(
 
 	live, err := d.liveTemporaryKeys(ctx, svc, b)
 	if err != nil {
-		return TemporaryCredentials{}, err
+		return TemporaryCredentials{}, unreachable(err)
 	}
 	if live >= maxLiveTemporaryKeysPerBucket {
 		// Refused, not queued and not silently granted. The caller is asking faster
@@ -121,7 +157,7 @@ func (d *Driver) IssueTemporaryAccess(
 
 	key, err := svc.createExpiringKey(ctx, temporaryKeyName(bucketName, subject), expiresAt)
 	if err != nil {
-		return TemporaryCredentials{}, fmt.Errorf("create a temporary access key: %w", err)
+		return TemporaryCredentials{}, unreachable(fmt.Errorf("create a temporary access key: %w", err))
 	}
 
 	if err := d.grantTemporaryKey(ctx, store, svc, b.ID, key.AccessKeyID, write); err != nil {
@@ -130,7 +166,7 @@ func (d *Driver) IssueTemporaryAccess(
 		if !errors.Is(err, errWriteGrantPending) {
 			_ = svc.deleteKey(ctx, key.AccessKeyID)
 		}
-		return TemporaryCredentials{}, fmt.Errorf("grant the temporary key on bucket %q: %w", bucketName, err)
+		return TemporaryCredentials{}, unreachable(fmt.Errorf("grant the temporary key on bucket %q: %w", bucketName, err))
 	}
 
 	return TemporaryCredentials{
