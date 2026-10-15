@@ -54,9 +54,9 @@ shell:
     # where the v2.1.17 one had curl compiled in statically. The `cargo` package
     # carries only /usr/bin/cargo, so without `curl` in the image every cargo
     # invocation dies with "error while loading shared libraries: libcurl.so.4".
-    - pm install rust cargo curl gnu-gcc gnu-gcc-devel binutils make pkgconf protobuf linux-headers
+    - pm install rust cargo curl gcc gcc-devel glibc-devel libatomic-devel binutils make pkgconf protobuf linux-headers
     # The container-base `rust` package defaults to `clang` as the linker, which
-    # is not installed; force the GNU toolchain (gnu-gcc, pulls gnu-glibc) via
+    # is not installed; force the GNU toolchain (gcc, pulls glibc) via
     # RUSTFLAGS (rustc command line — outranks any baked-in default/config).
     - export CARGO_HOME=/root/.cargo CARGO_NET_GIT_FETCH_WITH_CLI=true CC=gcc RUSTFLAGS="-C linker=gcc"
     - mkdir -p "${CARGO_HOME}"
@@ -92,11 +92,13 @@ shell:
     #
     # base/distroless does not carry it by default: base/vex in this same
     # repository installs coreutils explicitly for the same reason.
-    - pm install --rootDir /relocate libc gnu-gcc-lib coreutils bash findutils
+    - pm install -n --rootDir /relocate libc libgcc coreutils bash findutils
     - for d in /relocate/usr/bin /relocate/bin; do if [ -x "$d/bash" ] && [ ! -e "$d/sh" ]; then ln -s bash "$d/sh"; fi; done
     - mkdir -p /relocate/etc
     - if [ -x /relocate/sbin/ldconfig ]; then chroot /relocate /sbin/ldconfig; fi
+    - ln -s usr/lib /relocate/lib64
     - chroot /relocate sh -c 'command -v find && command -v wc && command -v base64'
+    - rm /relocate/lib64
 
 ---
 image: {{ .ModuleNamePrefix }}{{ .ImageName }}
