@@ -49,6 +49,8 @@ func TestCapacityConditionsReportGrowthAndCSIFailureIndependentlyOfServing(t *te
 		{"available", backend.StoreCapacity{WantBytes: 15 << 30, HaveBytes: 20 << 30}, metav1.ConditionTrue, "Available", "20Gi"},
 		{"growing", backend.StoreCapacity{WantBytes: 20 << 30, HaveBytes: 15 << 30, Detail: "filesystem resize pending"}, metav1.ConditionFalse, "Growing", "filesystem resize pending"},
 		{"CSI failure", backend.StoreCapacity{WantBytes: 20 << 30, HaveBytes: 15 << 30, Problem: "CSI rejected expansion"}, metav1.ConditionFalse, "CannotGrow", "CSI rejected expansion"},
+		{"volume full", backend.StoreCapacity{WantBytes: 15 << 30, HaveBytes: 15 << 30, Exhausted: "the volume of system-garage-i2-1 has 0 of 14Gi free"}, metav1.ConditionFalse, "Exhausted", "system-garage-i2-1"},
+		{"volume full while growing", backend.StoreCapacity{WantBytes: 20 << 30, HaveBytes: 15 << 30, Problem: "CSI rejected expansion", Exhausted: "the volume of system-garage-i2-1 has 0 of 14Gi free"}, metav1.ConditionFalse, "Exhausted", "CSI rejected expansion"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			state := backend.StoreState{Ready: true, Capacity: tc.capacity}

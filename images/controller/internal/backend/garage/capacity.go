@@ -19,6 +19,7 @@ package garage
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -314,4 +315,60 @@ func (d *Driver) statefulSetVolumeSize(ctx context.Context, store *backend.Store
 		return sts.Spec.VolumeClaimTemplates[i].Spec.Resources.Requests[corev1.ResourceStorage], nil
 	}
 	return resource.Quantity{}, nil
+}
+
+// exhaustedFraction is how little free space on a replica's volume counts as
+// none. Garage does not slow down as its volume fills: LMDB keeps working until
+// the write that does not fit, and from then on the node refuses every write to
+// its metadata while still answering as a healthy member of the cluster. Five
+// per cent of a 15Gi volume is about what one burst of garbage collection on a
+// bloated metadata file takes in a minute, which is the warning there is.
+const exhaustedFraction = 0.05
+
+// exhaustedVolumes names the replicas whose data or metadata partition has less
+// than exhaustedFraction of it free, or "" when none has.
+//
+// A full replica does not show anywhere else. It stays up, in the layout and
+// ready; the cluster health counts it among the storage nodes that are fine. But
+// a key, a bucket or an object written by the others never reaches it, and the
+// requests it answers fail on what it does not have: the S3 API looks an access
+// key up in the node's own copy of the key table, so a key the endpoint has just
+// issued is unknown to it ("No such key").
+func exhaustedVolumes(nodes []clusterNode) string {
+	var full []string
+	for _, n := range nodes {
+		if len(n.Role) == 0 || string(n.Role) == "null" || !n.IsUp {
+			continue
+		}
+		name := n.ID
+		if len(name) > 16 {
+			name = name[:16]
+		}
+		if n.Hostname != nil && *n.Hostname != "" {
+			name = *n.Hostname
+		}
+		// On one volume the two partitions are the same file system and report the
+		// same numbers; the lower of the two is what matters either way.
+		var worst *partitionSpace
+		for _, p := range []*partitionSpace{n.DataPartition, n.MetadataPartition} {
+			if p == nil || p.Total == 0 {
+				continue
+			}
+			if worst == nil || float64(p.Available)/float64(p.Total) < float64(worst.Available)/float64(worst.Total) {
+				worst = p
+			}
+		}
+		if worst == nil || float64(worst.Available) >= exhaustedFraction*float64(worst.Total) {
+			continue
+		}
+		full = append(full, fmt.Sprintf("%s has %s of %s free",
+			name,
+			resource.NewQuantity(int64(worst.Available), resource.BinarySI).String(),
+			resource.NewQuantity(int64(worst.Total), resource.BinarySI).String()))
+	}
+	if len(full) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("the volume of %s; Garage cannot write there, and requests that reach the replica fail",
+		strings.Join(full, ", "))
 }

@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -118,6 +119,12 @@ type StoreManager struct {
 	// lastSweep is when the expired temporary keys were last cleaned up. Touched
 	// only from Start's goroutine.
 	lastSweep time.Time
+
+	// lastUploadSweep is when the unfinished uploads were last cleaned up, and
+	// uploadSweeping is set while that runs. lastUploadSweep is touched only from
+	// Start's goroutine; the sweep itself runs in one of its own.
+	lastUploadSweep time.Time
+	uploadSweeping  atomic.Bool
 
 	// lastKeys is when the list of temporary keys was last published. Touched
 	// only from Start's goroutine.
@@ -285,14 +292,43 @@ func (m *StoreManager) sweep(ctx context.Context) {
 	// Not gated on the first sweep succeeding: the two clean up different things,
 	// and an admin API that failed to list keys is no reason to leave a day's worth
 	// of abandoned upload parts on the volume.
-	uploads, err := m.driver.SweepIncompleteUploads(ctx, m.store)
-	if err != nil {
-		m.log.Error("unable to sweep unfinished uploads", logger.Err(err))
+	m.sweepUploads(ctx, now)
+}
+
+// uploadSweepInterval is how often the unfinished uploads are cleaned up.
+//
+// Only uploads older than a day are removed, so a sweep every few hours loses
+// nothing. And a sweep is not cheap: Garage looks for unfinished uploads by
+// walking the whole bucket in one read of its metadata, and in a bucket with
+// millions of deleted objects that read lasts minutes. Run every ten minutes, it
+// outlived the admin client's timeout and was started again while Garage still
+// ran the previous one — and a long read keeps LMDB from reusing the pages that
+// writes free, so the metadata file grew until it filled the volume.
+const uploadSweepInterval = 6 * time.Hour
+
+// sweepUploads starts a sweep of the unfinished uploads, no more often than
+// uploadSweepInterval and never while the previous one runs. It does not wait:
+// the sweep can take as long as Garage needs, and the loop that converges the
+// store is not to wait with it.
+func (m *StoreManager) sweepUploads(ctx context.Context, now time.Time) {
+	if !m.lastUploadSweep.IsZero() && now.Sub(m.lastUploadSweep) < uploadSweepInterval {
 		return
 	}
-	if uploads > 0 {
-		m.log.Info("removed unfinished multipart uploads", "count", uploads)
+	if !m.uploadSweeping.CompareAndSwap(false, true) {
+		return
 	}
+	m.lastUploadSweep = now
+	go func() {
+		defer m.uploadSweeping.Store(false)
+		uploads, err := m.driver.SweepIncompleteUploads(ctx, m.store)
+		if err != nil {
+			m.log.Error("unable to sweep unfinished uploads", logger.Err(err))
+			return
+		}
+		if uploads > 0 {
+			m.log.Info("removed unfinished multipart uploads", "count", uploads)
+		}
+	}()
 }
 
 // keysInterval is how often the list of unexpired temporary keys is published.

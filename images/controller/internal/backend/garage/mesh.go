@@ -47,9 +47,10 @@ const garageStatusHealthy = "healthy"
 
 // meshResult is the outcome of a meshing+layout reconcile pass.
 type meshResult struct {
-	ready bool
-	msg   string
-	total *resource.Quantity
+	ready     bool
+	msg       string
+	total     *resource.Quantity
+	exhausted string
 }
 
 // nodePeer is a discovered Garage pod with its node identity.
@@ -126,21 +127,28 @@ func (d *Driver) ensureMeshAndLayout(ctx context.Context, store *backend.Store, 
 		}
 	}
 
-	// 3. Health gate.
+	// 3. Health gate. The free space is read first and reported either way: a
+	// replica that has filled its volume counts as up in the cluster health.
+	exhausted := ""
+	if status, err := svc.clusterStatus(ctx); err != nil {
+		d.log.Warn("unable to read the free space of the Garage nodes", "store", store.Name, "error", err.Error())
+	} else {
+		exhausted = exhaustedVolumes(status.Nodes)
+	}
 	health, err := svc.health(ctx)
 	if err != nil {
-		return meshResult{msg: fmt.Sprintf("reading health: %v", err)}, nil
+		return meshResult{msg: fmt.Sprintf("reading health: %v", err), exhausted: exhausted}, nil
 	}
 	total := layoutTotalCapacity(layout)
 	if health.Status != garageStatusHealthy {
-		return meshResult{msg: fmt.Sprintf("Garage store health is %q (%d/%d storage nodes ok)", health.Status, health.StorageNodesOk, health.StorageNodes), total: total}, nil
+		return meshResult{msg: fmt.Sprintf("Garage store health is %q (%d/%d storage nodes ok)", health.Status, health.StorageNodesOk, health.StorageNodes), total: total, exhausted: exhausted}, nil
 	}
 
 	// 4. A node that is never coming back must stop holding the cluster on an old
 	// layout version.
 	d.skipDeadNodesIfStuck(ctx, store, svc, len(peers), desiredReplicas(store))
 
-	return meshResult{ready: true, msg: "Garage store is healthy", total: total}, nil
+	return meshResult{ready: true, msg: "Garage store is healthy", total: total, exhausted: exhausted}, nil
 }
 
 // skipDeadNodesIfStuck advances the layout trackers past nodes that are gone, and

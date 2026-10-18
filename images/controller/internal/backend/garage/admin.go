@@ -125,6 +125,34 @@ func (c *adminClient) status(ctx context.Context) (*statusResponse, error) {
 	return &statusResponse{}, nil
 }
 
+// clusterStatus is GET /v2/GetClusterStatus: every node the cluster knows of,
+// with the free space each reports for its data and metadata partitions.
+type clusterStatus struct {
+	Nodes []clusterNode `json:"nodes"`
+}
+
+type clusterNode struct {
+	ID                string          `json:"id"`
+	Hostname          *string         `json:"hostname"`
+	IsUp              bool            `json:"isUp"`
+	Role              json.RawMessage `json:"role"`
+	DataPartition     *partitionSpace `json:"dataPartition"`
+	MetadataPartition *partitionSpace `json:"metadataPartition"`
+}
+
+type partitionSpace struct {
+	Available uint64 `json:"available"`
+	Total     uint64 `json:"total"`
+}
+
+func (c *adminClient) clusterStatus(ctx context.Context) (*clusterStatus, error) {
+	var out clusterStatus
+	if err := c.do(ctx, http.MethodGet, "/v2/GetClusterStatus", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *adminClient) health(ctx context.Context) (*healthResponse, error) {
 	var out healthResponse
 	if err := c.do(ctx, http.MethodGet, "/v2/GetClusterHealth", nil, &out); err != nil {
@@ -486,6 +514,11 @@ type bucketListItem struct {
 	GlobalAliases []string `json:"globalAliases"`
 }
 
+// cleanupTimeout bounds one CleanupIncompleteUploads call. Garage answers it only
+// after walking the whole bucket, and giving up on the answer does not stop the
+// walk: a client that gives up early only gets to start another one beside it.
+const cleanupTimeout = 30 * time.Minute
+
 // cleanupIncompleteUploads removes the multipart uploads of a bucket that were
 // started more than olderThan ago and never finished, and reports how many went.
 //
@@ -502,7 +535,10 @@ func (c *adminClient) cleanupIncompleteUploads(ctx context.Context, bucketID str
 	var out struct {
 		UploadsDeleted int64 `json:"uploadsDeleted"`
 	}
-	if err := c.do(ctx, http.MethodPost, "/v2/CleanupIncompleteUploads", body, &out); err != nil {
+	ctx, cancel := context.WithTimeout(ctx, cleanupTimeout)
+	defer cancel()
+	slow := &adminClient{http: &http.Client{Transport: c.http.Transport}, baseURL: c.baseURL, token: c.token}
+	if err := slow.do(ctx, http.MethodPost, "/v2/CleanupIncompleteUploads", body, &out); err != nil {
 		return 0, err
 	}
 	return out.UploadsDeleted, nil

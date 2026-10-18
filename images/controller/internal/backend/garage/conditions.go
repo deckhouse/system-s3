@@ -40,6 +40,12 @@ func capacityCondition(state *backend.StoreState) {
 	status, reason := metav1.ConditionTrue, "Available"
 	msg := fmt.Sprintf("each replica volume has %s; required %s", quantity(c.HaveBytes), quantity(c.WantBytes))
 	switch {
+	case c.Exhausted != "":
+		status, reason = metav1.ConditionFalse, "Exhausted"
+		msg = appendNote(msg, c.Exhausted)
+		if c.Problem != "" {
+			msg = appendNote(msg, c.Problem)
+		}
 	case c.Problem != "":
 		status, reason = metav1.ConditionFalse, "CannotGrow"
 		msg = appendNote(msg, c.Problem)

@@ -425,6 +425,11 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 	if err != nil {
 		return state, err
 	}
+	if mesh.exhausted != "" {
+		state.Capacity.Exhausted = mesh.exhausted
+		capacityCondition(&state)
+		d.log.Error("a data plane volume is full", "store", store.Name, "reason", mesh.exhausted)
+	}
 	if !workloadReady {
 		state.Message = appendNote(workloadMsg, mesh.msg)
 		storageCondition(&state, false, state.Message)

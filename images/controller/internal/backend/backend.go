@@ -162,11 +162,16 @@ type StoreState struct {
 // Detail is what the claims say about a growth that is under way — the resizer
 // working, or the node yet to grow the file system — so that "growing" comes
 // with where it is stuck when it is.
+//
+// Exhausted names the replicas whose volume is all but full, whatever the sizes
+// say: the sum of quotas does not bound what the metadata engine occupies, and a
+// replica that cannot write any more keeps serving as if nothing happened.
 type StoreCapacity struct {
 	WantBytes int64
 	HaveBytes int64
 	Problem   string
 	Detail    string
+	Exhausted string
 }
 
 // The values that cross the driver seam — what the driver reports back about a

@@ -18,6 +18,7 @@ package garage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -324,6 +325,61 @@ func TestResizeStateReadsWhereAGrowthIsStuck(t *testing.T) {
 			}
 			if (tc.wantRefused == "") != (refused == "") || !strings.Contains(refused, tc.wantRefused) {
 				t.Errorf("refused=%q, want it to mention %q", refused, tc.wantRefused)
+			}
+		})
+	}
+}
+
+func TestExhaustedVolumes(t *testing.T) {
+	const gi = uint64(1) << 30
+	role := json.RawMessage(`{"zone":"system-s3"}`)
+	host := func(s string) *string { return &s }
+	space := func(avail, total uint64) *partitionSpace { return &partitionSpace{Available: avail, Total: total} }
+	node := func(name string, data, meta *partitionSpace) clusterNode {
+		return clusterNode{ID: name + "0123456789abcdef", Hostname: host(name), IsUp: true, Role: role, DataPartition: data, MetadataPartition: meta}
+	}
+
+	for _, tc := range []struct {
+		name  string
+		nodes []clusterNode
+		want  []string
+	}{
+		{"room everywhere", []clusterNode{node("i2-0", space(9*gi, 15*gi), space(9*gi, 15*gi))}, nil},
+		{"one volume full", []clusterNode{
+			node("i2-0", space(9*gi, 15*gi), space(9*gi, 15*gi)),
+			node("i2-1", space(0, 15*gi), space(0, 15*gi)),
+		}, []string{"i2-1 has 0 of 15Gi free"}},
+		{"only the metadata partition is short", []clusterNode{node("i2-1", space(9*gi, 15*gi), space(gi/4, 15*gi))}, []string{"i2-1 has 256Mi of 15Gi free"}},
+		{"just above the threshold", []clusterNode{node("i2-1", space(gi, 15*gi), space(gi, 15*gi))}, nil},
+		{"a node without a role is not a replica", []clusterNode{func() clusterNode {
+			n := node("gateway", space(0, 15*gi), space(0, 15*gi))
+			n.Role = json.RawMessage("null")
+			return n
+		}()}, nil},
+		{"a node that is down reports nothing current", []clusterNode{func() clusterNode {
+			n := node("i2-2", space(0, 15*gi), space(0, 15*gi))
+			n.IsUp = false
+			return n
+		}()}, nil},
+		{"no figures yet", []clusterNode{node("i2-0", nil, nil)}, nil},
+		{"named by id without a hostname", []clusterNode{func() clusterNode {
+			n := node("i2-1", space(0, 15*gi), nil)
+			n.Hostname = nil
+			return n
+		}()}, []string{"i2-10123456789ab has 0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := exhaustedVolumes(tc.nodes)
+			if len(tc.want) == 0 {
+				if got != "" {
+					t.Fatalf("want nothing, got %q", got)
+				}
+				return
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Fatalf("%q does not mention %q", got, w)
+				}
 			}
 		})
 	}
