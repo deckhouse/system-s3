@@ -443,7 +443,8 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 		d.log.Error("a data plane volume is full", "store", store.Name, "reason", mesh.exhausted)
 	}
 	if !workloadReady {
-		state.Message = appendNote(appendNote(workloadMsg, notReadyNote(replicas)), mesh.msg)
+		state.Message = appendNote(appendNote(appendNote(workloadMsg, notReadyNote(replicas)),
+			d.pendingClaimsNote(ctx, store, time.Now())), mesh.msg)
 		storageCondition(&state, false, state.Message)
 		return state, nil
 	}

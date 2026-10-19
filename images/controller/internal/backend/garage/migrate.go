@@ -263,6 +263,7 @@ func (d *Driver) migrationProvision(
 		return state, "", fmt.Errorf("the layout of the incoming cluster: %w", err)
 	}
 	if !ready {
+		msg = appendNote(msg, d.pendingClaimsNote(ctx, incoming, time.Now()))
 		return state, d.waitingNote(state, appendNote(msg, mesh.msg)), nil
 	}
 	if !mesh.ready {
