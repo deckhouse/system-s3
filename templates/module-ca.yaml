@@ -18,6 +18,14 @@ metadata:
   name: system-s3-ca
   namespace: d8-{{ .Chart.Name }}
   {{- include "helm_lib_module_labels" (list . (dict "app" "system-s3")) | nindent 2 }}
+  {{- /*
+    Kept when the module is disabled, like the namespace (templates/namespace.yaml).
+    The consumers' connection ConfigMaps outlive the module and carry this CA; a
+    Secret deleted with the release let the module come back with a new one, and
+    every consumer stopped trusting both endpoints.
+  */}}
+  annotations:
+    helm.sh/resource-policy: keep
 type: kubernetes.io/tls
 data:
   tls.crt: {{ .Values.systemS3.internal.customWebhookCA.crt | quote }}

@@ -362,7 +362,7 @@ kubectl patch moduleconfig system-s3 --type merge -p '{"spec":{"enabled":false}}
 
 What is left behind afterwards, and what is not:
 
-- the `d8-system-s3` namespace stays (`helm.sh/resource-policy: keep`), and with it the data: the Garage StatefulSets, scaled to zero, their `PersistentVolumeClaim`s and the Secrets with the cluster's RPC secret, admin token and node identities. Copier Jobs of a migration that was under way are deleted; the migration resumes from its saved state when the module is enabled again;
+- the `d8-system-s3` namespace stays (`helm.sh/resource-policy: keep`), and with it the data: the Garage StatefulSets, scaled to zero, their `PersistentVolumeClaim`s and the Secrets with the cluster's RPC secret, admin token and node identities, and the module CA (`system-s3-ca`), so the CA in consumers' connection ConfigMaps stays valid. Copier Jobs of a migration that was under way are deleted; the migration resumes from its saved state when the module is enabled again;
 - what the chart rendered goes: the controller, its Services, the credentials endpoint;
 - the `SystemBucket` resources stay, frozen at their last status, and so do their CRDs — disabling a module does not delete either. The module's own finalizers are released on the way out, so they can be deleted by hand;
 - a `SystemBucket` admission webhook configuration left over from an earlier version of the module is removed, because a webhook whose backend is gone would block work with the resources it guarded.
