@@ -277,6 +277,17 @@ kubectl -n d8-monitoring delete systembucket loki
 
 `False` может означать нормальную операцию в процессе, не только ошибку; подробности находятся в `reason` и `message`. `Unknown/NotEvaluated` означает, что текущая попытка reconcile не дошла до этой проверки. После завершения операции соответствующее условие становится `True`. Conditions — текущие состояния, не журнал всех событий. При обновлении контроллер убирает старые условия Garage из бакетов; ожидание `SystemBucket.StorageReady` нужно заменить на `Module.StorageReady`.
 
+Когда ничего не идёт, сообщения говорят, в каком виде работает хранилище, и состояние читается по одному модулю:
+
+```text
+StorageReady=True     Serving    Garage store is healthy; 3 of 3 replicas ready on huawei-storage-stable
+PlacementReady=True   Placed     one replica per node: debian-0, ubuntu-0, ubuntu-1
+ReplicationReady=True Stable     3 replicas, high availability on; the highly available mode follows the number of control-plane nodes
+MigrationReady=True   Converged  the volumes are on StorageClass huawei-storage-stable, the configured one; no migration is pending
+```
+
+Пока реплика не готова, `StorageReady` называет её и узел (`not ready: system-garage-i2-1 (on ubuntu-1)`).
+
 Условие квоты переименовано из `SizeApplied` в `SizeUpToDate`. Старое имя удаляется из статуса при reconcile, в том числе при недоступности Garage. Обновите JSONPath и проверки готовности в потребителях. Имя Prometheus-метрики `system_s3_bucket_size_applied` сохранено для совместимости.
 
 Само хранилище описывают метрики контроллера; они обновляются при каждом проходе reconcile (по умолчанию раз в 30 секунд). По ним, а не по подам и StatefulSet в `d8-system-s3`, консоль рисует страницу хранилища:

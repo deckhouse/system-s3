@@ -278,6 +278,17 @@ Shared Garage state is published only in `Module/system-s3.status.conditions`, i
 
 `False` can mean a normal operation in progress, not only a failure; inspect `reason` and `message`. `Unknown/NotEvaluated` means this reconciliation did not reach the check. Completed operations return to `True`. Conditions show current state, not an event history. On upgrade the controller removes legacy Garage conditions from buckets; replace waits for `SystemBucket.StorageReady` with `Module.StorageReady`.
 
+When nothing is in progress the messages say what the store runs as, so the state can be read from the module alone:
+
+```text
+StorageReady=True     Serving    Garage store is healthy; 3 of 3 replicas ready on huawei-storage-stable
+PlacementReady=True   Placed     one replica per node: debian-0, ubuntu-0, ubuntu-1
+ReplicationReady=True Stable     3 replicas, high availability on; the highly available mode follows the number of control-plane nodes
+MigrationReady=True   Converged  the volumes are on StorageClass huawei-storage-stable, the configured one; no migration is pending
+```
+
+While a replica is not ready, `StorageReady` names it and its node (`not ready: system-garage-i2-1 (on ubuntu-1)`).
+
 The quota condition was renamed from `SizeApplied` to `SizeUpToDate`. Reconciliation removes the old name, including when Garage is unavailable. Update consumer JSONPath expressions and readiness checks. The Prometheus metric name `system_s3_bucket_size_applied` is retained for compatibility.
 
 The data plane itself is described by the controller's metrics, refreshed on every reconciliation pass (every 30 seconds by default). The console draws the storage page from them, not from the pods and StatefulSets in `d8-system-s3`:

@@ -267,6 +267,7 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 	migrationAdvanced := false
 	plan := migrationTrigger(desired, store, boundClass)
 	migrationKind := migrationConditions(&state, migration, plan, "")
+	describeSettledShape(&state, pinned.rf, desired.HighAvailabilityExplicit, desired.StorageClass)
 	if migrationKind == backend.MigrationReady && desired.HighAvailability != store.HighAvailability {
 		state.SetCondition(backend.ReplicationReady, metav1.ConditionFalse, "WaitingForMigration", "the replica count will change with the StorageClass migration")
 	}
@@ -364,7 +365,11 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 		storageCondition(&state, false, "Garage readiness will be checked after the placement move")
 		return state, nil
 	}
-	state.SetCondition(backend.PlacementReady, metav1.ConditionTrue, "Placed", "replica placement matches the eligible nodes")
+	replicas, err := d.planeReplicas(ctx, store)
+	if err != nil {
+		return state, err
+	}
+	state.SetCondition(backend.PlacementReady, metav1.ConditionTrue, "Placed", placedMessage(replicas))
 	if placementMsg != "" {
 		state.SetCondition(backend.PlacementReady, metav1.ConditionFalse, "PlacementBlocked", placementMsg)
 	} else if identitiesMissing > 0 {
@@ -431,7 +436,7 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 		d.log.Error("a data plane volume is full", "store", store.Name, "reason", mesh.exhausted)
 	}
 	if !workloadReady {
-		state.Message = appendNote(workloadMsg, mesh.msg)
+		state.Message = appendNote(appendNote(workloadMsg, notReadyNote(replicas)), mesh.msg)
 		storageCondition(&state, false, state.Message)
 		return state, nil
 	}
@@ -479,6 +484,7 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 		plan = migrationPlan{}
 	}
 	migrationConditions(&state, nextMigration, plan, migrationMsg)
+	describeSettledShape(&state, pinned.rf, desired.HighAvailabilityExplicit, desired.StorageClass)
 	if nextMigration.migrating() && desired.HighAvailability != store.HighAvailability {
 		state.SetCondition(backend.ReplicationReady, metav1.ConditionFalse, "WaitingForMigration", "the replica count will change with the StorageClass migration")
 	}
