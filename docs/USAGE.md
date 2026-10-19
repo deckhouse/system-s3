@@ -272,7 +272,7 @@ Shared Garage state is published only in `Module/system-s3.status.conditions`, i
 |-----------|---------|
 | `StorageReady` | Bootstrap, Garage health, quorum and layout. |
 | `PlacementReady` | Replica placement, eligible-node shortages, relocation and saved node identities. |
-| `CapacityReady` | Shared PVC capacity, expansion and CSI failures; `Exhausted` when a replica's volume has less than 5% free (the replica stays up but refuses every write, and requests it answers fail). |
+| `CapacityReady` | Shared PVC capacity, expansion and CSI failures; `Exhausted` when a replica's volume has less than 5% free (the replica stays up but refuses every write, and requests it answers fail); the volumes are then grown one 5 GiB step at a time, which needs a StorageClass that allows expansion. |
 | `ReplicationReady` | HA mode convergence: `ResizeFreeze`, `ResizeStop`, `ResizePurge`, `ResizeSync`. |
 | `MigrationReady` | StorageClass migration: `Provisioning`, `Copying`, `Verifying`, `Cutover`, `Draining`, `Decommission`. |
 

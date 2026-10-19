@@ -271,7 +271,7 @@ kubectl -n d8-monitoring delete systembucket loki
 |-----------|--------------|
 | `StorageReady` | Запуск, здоровье Garage, quorum и layout. |
 | `PlacementReady` | Размещение реплик, нехватку подходящих узлов, перемещение и сохранение идентичности узлов. |
-| `CapacityReady` | Общую ёмкость PVC, их рост и ошибки CSI; `Exhausted` — на томе реплики свободно меньше 5 % (реплика остаётся в строю, но не принимает записи, и запросы, которые она обслуживает, завершаются ошибкой). |
+| `CapacityReady` | Общую ёмкость PVC, их рост и ошибки CSI; `Exhausted` — на томе реплики свободно меньше 5 % (реплика остаётся в строю, но не принимает записи, и запросы, которые она обслуживает, завершаются ошибкой); тогда тома растут по шагу в 5 ГиБ, для этого StorageClass должен позволять расширение. |
 | `ReplicationReady` | Соответствие режима HA настройкам; переходы `ResizeFreeze`, `ResizeStop`, `ResizePurge`, `ResizeSync`. |
 | `MigrationReady` | Миграцию StorageClass: `Provisioning`, `Copying`, `Verifying`, `Cutover`, `Draining`, `Decommission`. |
 

@@ -118,6 +118,11 @@ type Driver struct {
 	execOnce   sync.Once
 	execClient *kubernetes.Clientset
 	execErr    error
+
+	// fullnessTarget is the size a plane's volumes are grown to because a replica
+	// reported its volume nearly full, by plane (see growForFullness).
+	fullnessMu     sync.Mutex
+	fullnessTarget map[string]int64
 }
 
 // clientset returns the shared exec clientset, building it on first use.
@@ -390,7 +395,7 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 	if err != nil {
 		return state, fmt.Errorf("sum the SystemBucket sizes: %w", err)
 	}
-	volumeSize := volumeSizeFor(sumBytes)
+	volumeSize := d.growForFullness(store, volumeSizeFor(sumBytes))
 
 	// Claims first, workload second. The claims are what actually hold the space;
 	// the template is brought in line below so a replica created later asks for the
@@ -431,7 +436,9 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 		return state, err
 	}
 	if mesh.exhausted != "" {
-		state.Capacity.Exhausted = mesh.exhausted
+		target := d.recordFullness(store, state.Capacity.HaveBytes)
+		state.Capacity.Exhausted = appendNote(mesh.exhausted, fmt.Sprintf("the volumes are being grown to %s",
+			resource.NewQuantity(target, resource.BinarySI).String()))
 		capacityCondition(&state)
 		d.log.Error("a data plane volume is full", "store", store.Name, "reason", mesh.exhausted)
 	}

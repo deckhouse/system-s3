@@ -50,9 +50,9 @@ func TestVolumeSizeFor(t *testing.T) {
 		{"no buckets at all: the floor", 0, gi(10)},
 		{"one default bucket: still the floor", gi(1), gi(10)},
 		{"a sum that fits under the floor with its headroom", gi(5), gi(10)},
-		// 20Gi + 10% + 2Gi = 24Gi, rounded up to the 5Gi step.
-		{"past the floor: headroom, reserve, and the step", gi(20), gi(25)},
-		// 100Gi + 10% + 2Gi = 112Gi -> 115Gi.
+		// 20Gi + 10% + 4Gi = 26Gi, rounded up to the 5Gi step.
+		{"past the floor: headroom, reserve, and the step", gi(20), gi(30)},
+		// 100Gi + 10% + 4Gi = 114Gi -> 115Gi.
 		{"a large sum", gi(100), gi(115)},
 	}
 	for _, tc := range cases {
@@ -382,5 +382,41 @@ func TestExhaustedVolumes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestAFullReplicaGrowsTheVolumeOneStepAtATime: a replica found nearly full asks
+// for one step above the volume it has; the target is never lowered, does not
+// leak into another plane, and gives way to a larger size the quotas ask for.
+func TestAFullReplicaGrowsTheVolumeOneStepAtATime(t *testing.T) {
+	gi := func(n int64) int64 { return n << 30 }
+	q := func(n int64) resource.Quantity { return *resource.NewQuantity(n, resource.BinarySI) }
+	d := &Driver{}
+	plane2 := &backend.Store{Name: backend.StoreName, Incarnation: 2}
+	plane3 := &backend.Store{Name: backend.StoreName, Incarnation: 3}
+
+	if got := d.growForFullness(plane2, q(gi(15))); got.Value() != gi(15) {
+		t.Fatalf("nothing reported full, yet the size is %s", got.String())
+	}
+	if target := d.recordFullness(plane2, gi(15)); target != gi(20) {
+		t.Fatalf("a full 15Gi volume asks for %d, want 20Gi", target)
+	}
+	if got := d.growForFullness(plane2, q(gi(15))); got.Value() != gi(20) {
+		t.Errorf("the plane is not grown to its target: %s", got.String())
+	}
+	if got := d.growForFullness(plane3, q(gi(15))); got.Value() != gi(15) {
+		t.Errorf("another plane picked up the target: %s", got.String())
+	}
+	// Still reporting full while the resize is under way, with the old size: the
+	// target does not run away.
+	if target := d.recordFullness(plane2, gi(15)); target != gi(20) {
+		t.Errorf("the target moved while the growth was under way: %d", target)
+	}
+	// Grown and still full: one more step.
+	if target := d.recordFullness(plane2, gi(20)); target != gi(25) {
+		t.Errorf("a full 20Gi volume asks for %d, want 25Gi", target)
+	}
+	if got := d.growForFullness(plane2, q(gi(40))); got.Value() != gi(40) {
+		t.Errorf("the quotas asked for more than the target and got %s", got.String())
 	}
 }

@@ -46,7 +46,11 @@ import (
 //     top of it and not a second ceiling.
 //   - metadataReserve is the metadata engine's own space (LMDB, the block index,
 //     the layout). It does not scale with the objects in any way this module can
-//     predict, and it must not be squeezed out by them.
+//     predict, and it must not be squeezed out by them. Four gibibytes: after a
+//     load test that wrote and deleted millions of objects the LMDB file of a
+//     healthy replica held 2.9 GiB, more than the two this used to reserve. What
+//     a reserve cannot cover — the file growing past it — is handled by growing
+//     the volume when a replica reports it nearly full (see growForFullness).
 //   - floorSize keeps a store with one tiny bucket — or none at all — on a volume
 //     Garage can actually start on.
 //   - stepSize is what keeps this from being a resize per bucket: the answer is
@@ -58,7 +62,7 @@ import (
 // costs the platform its writes.
 const (
 	headroomPercent = 10
-	metadataReserve = 2 << 30  // 2Gi
+	metadataReserve = 4 << 30  // 4Gi
 	floorSize       = 10 << 30 // 10Gi
 	stepSize        = 5 << 30  // 5Gi
 )
@@ -146,7 +150,7 @@ func (d *Driver) ensureVolumeCapacity(ctx context.Context, store *backend.Store,
 			// keeps serving at the size it has, and the buckets that do not fit stay
 			// unable to write.
 			capacity.Problem = fmt.Sprintf(
-				"unable to grow the data plane's volume %s to %s (the sum of the SystemBucket sizes): %v — "+
+				"unable to grow the data plane's volume %s to %s: %v — "+
 					"a StorageClass with allowVolumeExpansion is required to grow the system object storage",
 				name, want.String(), err)
 			break
@@ -371,4 +375,47 @@ func exhaustedVolumes(nodes []clusterNode) string {
 	}
 	return fmt.Sprintf("the volume of %s; Garage cannot write there, and requests that reach the replica fail",
 		strings.Join(full, ", "))
+}
+
+// growForFullness raises want to the size the volumes of store's plane were last
+// asked to grow to because a replica reported its volume nearly full.
+//
+// The sum of the quotas does not bound what a replica occupies: the metadata
+// engine has a file that grows with every write and delete and does not shrink,
+// and on 15.10 one replica's grew from 3 to 12 GiB and filled its volume while
+// the quotas said the store was half empty. Reporting it (CapacityReady=Exhausted)
+// tells an operator; growing the volume is what keeps the replica writing. So a
+// replica found nearly full sets a target one step above the volume it has, and
+// the next passes grow the claims to it the way they grow them for the quotas —
+// one step at a time, each only once the previous one has landed and the
+// replica still reports itself full.
+//
+// The target lives in the controller's memory. A controller that restarts
+// forgets it and finds the volumes already grown — a claim is never shrunk — or
+// finds the replica still full and sets it again.
+func (d *Driver) growForFullness(store *backend.Store, want resource.Quantity) resource.Quantity {
+	d.fullnessMu.Lock()
+	defer d.fullnessMu.Unlock()
+	if target, ok := d.fullnessTarget[resourceName(store)]; ok && target > want.Value() {
+		return *resource.NewQuantity(target, resource.BinarySI)
+	}
+	return want
+}
+
+// recordFullness sets the target growForFullness grows to: one step above the
+// volume a nearly full replica has now. It never lowers a target already set.
+func (d *Driver) recordFullness(store *backend.Store, haveBytes int64) int64 {
+	target := haveBytes + stepSize
+	if rem := target % stepSize; rem != 0 {
+		target += stepSize - rem
+	}
+	d.fullnessMu.Lock()
+	defer d.fullnessMu.Unlock()
+	if d.fullnessTarget == nil {
+		d.fullnessTarget = map[string]int64{}
+	}
+	if target > d.fullnessTarget[resourceName(store)] {
+		d.fullnessTarget[resourceName(store)] = target
+	}
+	return d.fullnessTarget[resourceName(store)]
 }
