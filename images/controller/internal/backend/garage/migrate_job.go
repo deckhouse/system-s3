@@ -29,6 +29,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -270,8 +271,47 @@ func (d *Driver) runCopyPass(
 		}
 		return copyFailed, "the copy failed and is starting again; see the logs of the previous copier pod", nil
 	default:
-		return copyRunning, fmt.Sprintf("copying %d bucket(s) into the new cluster", len(buckets)), nil
+		return copyRunning, appendNote(fmt.Sprintf("copying %d bucket(s) into the new cluster", len(buckets)),
+			d.copyProgress(ctx, source, target)), nil
 	}
+}
+
+// copyProgress says how much of the source the new cluster already holds, or ""
+// when that cannot be read this pass.
+//
+// The copier knows exactly, but it is a Job: its counts are in its log, and a
+// migration measured in hours that reports only "copying 3 bucket(s)" leaves
+// an operator — and the console page that shows this message under the phase —
+// with no idea whether it is at a tenth or nine tenths. The two clusters' bucket
+// totals are what the verification compares anyway; compared while the copy
+// runs, the part already there is the progress. It is an estimate in the same
+// way the verification is: aggregate counts, not keys.
+func (d *Driver) copyProgress(ctx context.Context, source, target *backend.Store) string {
+	diff, err := d.compareClusters(ctx, source, target, false)
+	if err != nil {
+		d.log.Debug("unable to measure the copy's progress", "store", source.Name, "error", err.Error())
+		return ""
+	}
+	return copyProgressNote(diff)
+}
+
+// copyProgressNote renders diff as the part of the source that has been copied.
+func copyProgressNote(diff difference) string {
+	if diff.totalObjects == 0 && diff.totalBytes == 0 {
+		return ""
+	}
+	copiedObjects := min(max(diff.totalObjects-diff.objects, 0), diff.totalObjects)
+	copiedBytes := min(max(diff.totalBytes-diff.bytes, 0), diff.totalBytes)
+	percent := int64(100)
+	switch {
+	case diff.totalBytes > 0:
+		percent = copiedBytes * 100 / diff.totalBytes
+	case diff.totalObjects > 0:
+		percent = copiedObjects * 100 / diff.totalObjects
+	}
+	quantity := func(n int64) string { return resource.NewQuantity(n, resource.BinarySI).String() }
+	return fmt.Sprintf("%s of %s, %d of %d objects (%d%%)",
+		quantity(copiedBytes), quantity(diff.totalBytes), copiedObjects, diff.totalObjects, percent)
 }
 
 func configureCopyPass(job *batchv1.Job, pass string) {

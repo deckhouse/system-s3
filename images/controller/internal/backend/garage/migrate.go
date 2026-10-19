@@ -421,6 +421,10 @@ type difference struct {
 	// bucket names the first bucket the two clusters disagree about, for the
 	// message. A number alone does not tell an operator where to look.
 	bucket string
+	// totalObjects and totalBytes are what the source holds, the whole the
+	// difference is a part of: with them a running copy can say how far it got.
+	totalObjects int64
+	totalBytes   int64
 }
 
 // compareClusters compares aggregate counts, not object checksums or key sets.
@@ -447,6 +451,8 @@ func (d *Driver) compareClusters(ctx context.Context, source, target *backend.St
 		if err != nil {
 			return difference{}, fmt.Errorf("read bucket %s: %w", b.ID, err)
 		}
+		diff.totalObjects += src.Objects
+		diff.totalBytes += src.Bytes
 		for _, alias := range b.GlobalAliases {
 			dst, found, err := to.getBucketByAlias(ctx, alias)
 			if err != nil {
