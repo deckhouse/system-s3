@@ -47,14 +47,32 @@ One Garage cluster, deployed by the controller:
   `node-role.kubernetes.io/control-plane` and `node-role.kubernetes.io/master`
   taints. To give the store nodes of its own, give a NodeGroup the `system-s3`
   role — with disks sized for it, since that is where its volumes are ordered on
-  a local class. With neither role, the highly available mode needs three
-  masters: on a cluster with one master the second and third replicas stay
-  Pending until the role is given or `highAvailability: false` is set.
-  Required anti-affinity
-  separates HA replicas by `kubernetes.io/hostname`. If a `system-s3` role
-  exists on too few nodes, placement does not fall back to other roles or
-  recycle PVCs to consolidate the replicas. Add eligible nodes or explicitly
-  change `highAvailability`. During a migration two Garage clusters run on the
+  a local class. Required anti-affinity separates HA replicas by
+  `kubernetes.io/hostname`, so the highly available mode needs three nodes of the
+  chosen step. The step is chosen by whether the cluster has nodes with a role,
+  not by whether there are enough of them: a single node with the `system-s3` (or
+  `system`) role takes the data plane to that role, and it does not move on to the
+  next step however many replicas are left without a place. With fewer nodes
+  than replicas:
+  - each node gets one replica and the remaining Pods stay Pending;
+    `PlacementReady=False/PlacementBlocked` says how many nodes are needed and how
+    many there are. PVCs are not recycled to consolidate the replicas;
+  - a store that already ran on three replicas keeps working on two: Garage holds
+    its 2-of-3 write quorum, with no redundancy left. With one replica left there
+    is no quorum and the store is unavailable;
+  - a new installation does not start at all: Garage refuses a layout with fewer
+    nodes than the replication factor, and `StorageReady=False` reports the
+    failure to apply the layout;
+  - with neither the `system-s3` nor the `system` role the replicas go to the
+    masters. The default mode follows the control plane, and Deckhouse counts it
+    as highly available from two masters on. So with one master the store runs
+    one replica, with three it runs one replica per master, and with two masters
+    it gets three replicas, the third of which has nowhere to go. The same holds
+    for `highAvailability: true` with one or two masters.
+
+  In every case the way out is one of three: give three nodes the `system-s3`
+  role, bring the nodes of the chosen step up to three, or set
+  `highAvailability: false`. During a migration two Garage clusters run on the
   same nodes side by side; each spreads itself and neither pushes the other off
   a node. The controller itself stays on the control-plane nodes and follows
   control-plane HA independently of the Garage replica mode;
