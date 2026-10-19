@@ -28,6 +28,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/sds-common-lib/logger"
@@ -130,6 +131,12 @@ func (d *Driver) reconcileMigration(
 	state migrationState,
 	sumBytes int64,
 ) (migrationState, string, error) {
+	switch state.phase {
+	case phaseCopying, phaseVerifying, phaseCutover:
+		if err := d.restartStoppedIncoming(ctx, d.incomingPlane(serving, state)); err != nil {
+			return state, "", err
+		}
+	}
 	switch state.phase {
 	case phaseConverged:
 		return d.migrationStart(ctx, desired, serving, boundClass, state)
@@ -819,6 +826,37 @@ func (d *Driver) abortIfSettingsMovedOn(
 		"store", serving.Name, "incoming", state.other)
 	return aborted, "the settings changed while the migration was in flight; the half-built cluster is being removed " +
 		"and the store keeps running on the cluster it is on", true
+}
+
+// restartStoppedIncoming gives the cluster being built its replicas back when
+// something stopped it after it was provisioned.
+//
+// Its replica count is set once, in Provisioning; the phases after it only talk
+// to its admin API. Disabling the module stops every Garage StatefulSet (hooks/go
+// 050-stop-data-plane-on-module-delete), and enabling it again brings the serving
+// cluster back through its own workload pass — but not this one, so the
+// migration would wait on an admin API with no pod behind it for ever. A count
+// of zero is never what a migration past Provisioning asks for: the in-place
+// replica change, the one thing that stops a StatefulSet on purpose, does not
+// build a second cluster.
+func (d *Driver) restartStoppedIncoming(ctx context.Context, incoming *backend.Store) error {
+	sts := &appsv1.StatefulSet{}
+	err := d.apiReader.Get(ctx, client.ObjectKey{Namespace: d.namespace, Name: resourceName(incoming)}, sts)
+	switch {
+	case apierrors.IsNotFound(err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("read the StatefulSet of the incoming cluster: %w", err)
+	case sts.Spec.Replicas == nil || *sts.Spec.Replicas != 0:
+		return nil
+	}
+	want := desiredReplicas(incoming)
+	d.log.Info("the incoming cluster was stopped; starting it again", "statefulSet", sts.Name, "replicas", want)
+	sts.Spec.Replicas = ptr.To(want)
+	if err := d.client.Update(ctx, sts); err != nil {
+		return fmt.Errorf("start the incoming cluster again: %w", err)
+	}
+	return nil
 }
 
 // incomingPlane is the description of the cluster being built.
