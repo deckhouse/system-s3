@@ -23,6 +23,7 @@ import (
 	_ "github.com/deckhouse/system-s3/hooks/go/021-garage-certs"
 	_ "github.com/deckhouse/system-s3/hooks/go/030-remove-finalizers-on-module-delete"
 	_ "github.com/deckhouse/system-s3/hooks/go/040-storage-class"
+	_ "github.com/deckhouse/system-s3/hooks/go/050-stop-data-plane-on-module-delete"
 )
 
 func main() {

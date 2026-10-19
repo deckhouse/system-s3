@@ -17,3 +17,16 @@ metadata:
     "prometheus.deckhouse.io/rules-watcher-enabled" "true"
     "prometheus.deckhouse.io/monitor-watcher-enabled" "true"
   )) | nindent 2 }}
+  {{- /*
+    Kept when the module is disabled. The namespace holds the data plane — the
+    Garage StatefulSets, their PersistentVolumeClaims and the Secrets with the
+    cluster's RPC secret, admin token and node identities, all created by the
+    controller rather than by this chart — and a namespace deleted with the
+    release took every platform component's system bucket with it. Disabling the
+    module removes what the chart rendered and stops Garage (the
+    050-stop-data-plane-on-module-delete hook); enabling it again finds the store
+    as it was. Deleting the data is a separate, explicit step: deleting this
+    namespace once the module is disabled.
+  */}}
+  annotations:
+    helm.sh/resource-policy: keep

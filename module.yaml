@@ -13,12 +13,13 @@ disable:
   message: |
     Attention!
 
-    Disabling this module deletes the system object storage. The Garage data plane goes with the module namespace, and so do the claims of its volumes; the stored objects go with the volumes unless the StorageClass keeps released volumes (reclaimPolicy: Retain). Platform components that have a SystemBucket lose access to their data at once: the S3 endpoint and the credentials endpoint stop answering.
+    Disabling this module stops the system object storage; it does not delete it. The Garage data plane is scaled to zero and stays in the d8-system-s3 namespace with its volumes and the Secrets that make them a cluster again. Platform components that have a SystemBucket lose access at once: the S3 endpoint and the credentials endpoint stop answering until the module is enabled again, and then the store comes back with its data.
 
     Before disabling the module:
 
-    - List the buckets with `kubectl get systembuckets.storage.deckhouse.io -A` (short name: `sb`). Every component listed keeps data in the system object storage.
-    - Make sure none of them still needs it: disable those components or delete their SystemBucket resources first.
-    - If the data has to be kept, copy it out with an S3 client first. A re-enabled module does not reattach retained volumes: it starts with an empty store.
+    - List the buckets with `kubectl get systembuckets.storage.deckhouse.io -A` (short name: `sb`). Every component listed keeps data in the system object storage and stops working while the module is disabled.
+    - Disable those components, or accept that they are down until the module is back.
 
-    SystemBucket resources are not deleted with the module. They stay, with their connection ConfigMaps, and when the module is enabled again their buckets are created again — empty.
+    SystemBucket resources are not deleted with the module. They stay, with their connection ConfigMaps.
+
+    The data is deleted only by an explicit step: with the module disabled, delete the namespace (`kubectl delete namespace d8-system-s3`). The volumes then follow the reclaim policy of their StorageClass. Do this, too, before destroying the cluster with dhctl.

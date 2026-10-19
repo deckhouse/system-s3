@@ -353,7 +353,7 @@ The thresholds are three to five times what a load test measured on a three-repl
 
 ## Disabling the module, and destroying the cluster
 
-Disabling the module is guarded: Deckhouse refuses `enabled: false` until the `ModuleConfig` carries the acknowledgement, because the data plane and every object stored in it go with it.
+Disabling the module is guarded: Deckhouse refuses `enabled: false` until the `ModuleConfig` carries the acknowledgement, because every component with a `SystemBucket` loses its storage while the module is off.
 
 ```shell
 kubectl annotate moduleconfig system-s3 modules.deckhouse.io/allow-disabling=true
@@ -362,12 +362,23 @@ kubectl patch moduleconfig system-s3 --type merge -p '{"spec":{"enabled":false}}
 
 What is left behind afterwards, and what is not:
 
+- the `d8-system-s3` namespace stays (`helm.sh/resource-policy: keep`), and with it the data: the Garage StatefulSets, scaled to zero, their `PersistentVolumeClaim`s and the Secrets with the cluster's RPC secret, admin token and node identities. Copier Jobs of a migration that was under way are deleted; the migration resumes from its saved state when the module is enabled again;
+- what the chart rendered goes: the controller, its Services, the credentials endpoint;
 - the `SystemBucket` resources stay, frozen at their last status, and so do their CRDs — disabling a module does not delete either. The module's own finalizers are released on the way out, so they can be deleted by hand;
-- the data plane's `PersistentVolumeClaim`s go with the namespace, and what happens to the volumes behind them is the `StorageClass`'s reclaim policy to decide: `Delete` removes them with everything stored in them, `Retain` keeps them. The module deliberately does not interfere — it no longer owns a volume layer of its own, and overriding somebody else's policy on the way out is not its call;
 - a `SystemBucket` admission webhook configuration left over from an earlier version of the module is removed, because a webhook whose backend is gone would block work with the resources it guarded.
 
+Enabling the module again finds the store as it was: the controller scales the StatefulSets back, the cluster comes up on the same volumes, and the buckets and their data are there.
+
+To delete the data, delete the namespace once the module is disabled:
+
+```shell
+kubectl delete namespace d8-system-s3
+```
+
+The volumes behind the claims then follow the `StorageClass`'s reclaim policy: `Delete` removes them with everything stored in them, `Retain` keeps them, though a module enabled afterwards starts with an empty store and does not reattach them.
+
 {{< alert level="warning" >}}
-**Destroying a cluster requires disabling the module first.** `dhctl destroy` deletes every `PersistentVolumeClaim` and waits for them to go; the data plane's `StatefulSet` re-creates its claims for as long as it exists, so the step times out and the cluster is left half-removed. Disabling the module takes the `StatefulSet` away, and the destroy then completes.
+**Destroying a cluster: disable the module and delete its namespace first.** `dhctl destroy` deletes every `PersistentVolumeClaim` and waits for them to go. With the module disabled the data plane is at zero replicas and does not re-create its claims, but deleting the namespace first is what says the data is meant to go.
 {{< /alert >}}
 
 {{< alert level="info" >}}

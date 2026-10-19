@@ -119,19 +119,24 @@ Garage is used as-is, through its standard admin API. It is AGPL-licensed, which
 
 ## Removing the module
 
-Disabling the module asks for confirmation, and it deletes the system object
-storage. The module namespace goes, and with it the Garage workload, its
-configuration, its Secrets and the claims of its volumes. What happens to the
-volumes behind the claims is the StorageClass's reclaim policy: `Delete` removes
-them with the objects in them, `Retain` keeps them. A re-enabled module does not
-reattach retained volumes — it starts with an empty store — so data that has to
-survive is copied out with an S3 client before the module is disabled.
+Disabling the module asks for confirmation, and it stops the system object
+storage without deleting it. What the chart rendered goes — the controller, its
+Services, the credentials endpoint — and the Garage workload is scaled to zero.
+The module namespace stays, and with it the StatefulSets, the claims of their
+volumes and the Secrets that make those volumes a cluster again. Platform
+components lose access while the module is disabled; enabling it again brings
+the store back with its data and its buckets.
 
 `SystemBucket` resources are not deleted. The module releases its finalizer on
-them so that they can be deleted later without it, and they stay with their
-connection ConfigMaps. When the module is enabled again, their buckets are created
-again, empty.
+them so that they can be deleted without it, and they stay with their
+connection ConfigMaps.
+
+Deleting the data is a separate, explicit step: with the module disabled, delete
+the namespace (`kubectl delete namespace d8-system-s3`). What happens to the
+volumes behind the claims is then the StorageClass's reclaim policy: `Delete`
+removes them with the objects in them, `Retain` keeps them, but a module enabled
+afterwards does not reattach retained volumes — it starts with an empty store.
 
 Before disabling the module, list the buckets with `kubectl get sb -A`: every
 component listed keeps data in the system object storage and loses access to it
-the moment the module goes.
+until the module is back.
