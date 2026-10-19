@@ -111,6 +111,21 @@ func TestTerminatorIsInThePod(t *testing.T) {
 	if ports[rpcPort] != "garage" {
 		t.Errorf("RPC port belongs to %q, want Garage", ports[rpcPort])
 	}
+	if ports[proxyMetricsPort] != terminatorContainer {
+		t.Errorf("the terminator's metrics port belongs to %q", ports[proxyMetricsPort])
+	}
+	if env[tlsproxy.EnvMetricsListen] != "[::]:3904" {
+		t.Errorf("metrics listen %q", env[tlsproxy.EnvMetricsListen])
+	}
+	var token *corev1.SecretKeySelector
+	for _, e := range term.Env {
+		if e.Name == tlsproxy.EnvMetricsToken && e.ValueFrom != nil {
+			token = e.ValueFrom.SecretKeyRef
+		}
+	}
+	if token == nil || token.Name != metricsTokenSecret || token.Key != metricsTokenKey {
+		t.Errorf("the terminator's metrics token comes from %+v, want the Secret Garage's /metrics uses", token)
+	}
 
 	var mounted bool
 	for _, v := range spec.Volumes {

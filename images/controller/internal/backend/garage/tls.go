@@ -121,12 +121,22 @@ func terminatorSidecar(image string) corev1.Container {
 				s3Port, garageS3Loopback, adminPort, garageAdminLoopback)},
 			{Name: tlsproxy.EnvCertFile, Value: tlsMountPath + "/tls.crt"},
 			{Name: tlsproxy.EnvKeyFile, Value: tlsMountPath + "/tls.key"},
+			{Name: tlsproxy.EnvMetricsListen, Value: fmt.Sprintf("[::]:%d", proxyMetricsPort)},
+			// The token that opens Garage's /metrics opens these too: the PodMonitor
+			// scrapes both with the one Secret it already has.
+			{Name: tlsproxy.EnvMetricsToken, ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: metricsTokenSecret},
+					Key:                  metricsTokenKey,
+				},
+			}},
 		},
 		// The ports every client dials. They are declared here, on the container
 		// that listens on them, and the Services reach them by number.
 		Ports: []corev1.ContainerPort{
 			{Name: "s3", ContainerPort: s3Port},
 			{Name: "admin", ContainerPort: adminPort},
+			{Name: proxyMetricsPortName, ContainerPort: proxyMetricsPort},
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: tlsVolume, MountPath: tlsMountPath, ReadOnly: true},

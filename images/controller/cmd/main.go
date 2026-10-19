@@ -312,10 +312,13 @@ func runTerminator(ctx context.Context, log logger.Logger) {
 		os.Exit(1)
 	}
 	p := &tlsproxy.Proxy{
-		Routes:   routes,
-		CertFile: os.Getenv(tlsproxy.EnvCertFile),
-		KeyFile:  os.Getenv(tlsproxy.EnvKeyFile),
-		Log:      log,
+		Routes:        routes,
+		CertFile:      os.Getenv(tlsproxy.EnvCertFile),
+		KeyFile:       os.Getenv(tlsproxy.EnvKeyFile),
+		Log:           log,
+		Metrics:       tlsproxy.NewMetrics(),
+		MetricsListen: os.Getenv(tlsproxy.EnvMetricsListen),
+		MetricsToken:  os.Getenv(tlsproxy.EnvMetricsToken),
 	}
 	if err := p.Run(ctx); err != nil {
 		log.Error("the TLS terminator stopped", logger.Err(err))

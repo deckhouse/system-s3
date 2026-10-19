@@ -44,22 +44,36 @@ type ruleGroup struct {
 	} `json:"rules"`
 }
 
+// metricSources are the files the module's own metrics are declared in: the
+// controller's, and the TLS terminator's in the Garage pods.
+var metricSources = []string{"monitoring.go", "../tlsproxy/metrics.go"}
+
+// publishedMetrics is every system_s3_* metric declared in metricSources.
+func publishedMetrics(t *testing.T) map[string]bool {
+	t.Helper()
+	published := map[string]bool{}
+	for _, f := range metricSources {
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		found := metricNameInCode.FindAllStringSubmatch(string(src), -1)
+		if len(found) == 0 {
+			t.Fatalf("no metrics found in %s; this guard needs rewriting", f)
+		}
+		for _, m := range found {
+			published["system_s3_"+m[1]] = true
+		}
+	}
+	return published
+}
+
 // TestEveryAlertIsAboutAMetricThatExists is the guard on a coupling nothing else
 // checks: an alert names a metric as a string, and a metric renamed or removed in
 // this file leaves the rule syntactically perfect and permanently silent. A rule
 // that never fires looks exactly like a system that never fails.
 func TestEveryAlertIsAboutAMetricThatExists(t *testing.T) {
-	src, err := os.ReadFile("monitoring.go")
-	if err != nil {
-		t.Fatalf("read monitoring.go: %v", err)
-	}
-	published := map[string]bool{}
-	for _, m := range metricNameInCode.FindAllStringSubmatch(string(src), -1) {
-		published["system_s3_"+m[1]] = true
-	}
-	if len(published) == 0 {
-		t.Fatal("no metrics found in monitoring.go; this guard needs rewriting")
-	}
+	published := publishedMetrics(t)
 
 	files, err := filepath.Glob(filepath.Join(rulesDir, "*.yaml"))
 	if err != nil {
@@ -110,14 +124,7 @@ const dashboardsDir = "../../../../monitoring/grafana-dashboards"
 // metric nobody publishes does not look broken, it looks like a system with
 // nothing to report. "No data" and "nothing is wrong" are drawn identically.
 func TestEveryDashboardPanelIsAboutAMetricThatExists(t *testing.T) {
-	src, err := os.ReadFile("monitoring.go")
-	if err != nil {
-		t.Fatalf("read monitoring.go: %v", err)
-	}
-	published := map[string]bool{}
-	for _, m := range metricNameInCode.FindAllStringSubmatch(string(src), -1) {
-		published["system_s3_"+m[1]] = true
-	}
+	published := publishedMetrics(t)
 
 	files, err := filepath.Glob(filepath.Join(dashboardsDir, "*", "*.json"))
 	if err != nil {

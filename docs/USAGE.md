@@ -290,6 +290,16 @@ The data plane itself is described by the controller's metrics, refreshed on eve
 
 `plane` is the number of the Garage cluster; during a migration there are two, and `serving="true"` marks the one the endpoint points at. Pods and clusters that no longer exist lose their series. Only the controller replica holding the leader lease publishes them.
 
+The traffic is counted by the TLS terminator in each Garage pod, which every client connection passes through; Garage itself counts requests but not bytes. These series carry `job="system-s3-tls-terminator"`, `pod`, `node`, `store` and `incarnation`:
+
+| Metric | Labels | Value |
+|--------|--------|-------|
+| `system_s3_proxy_received_bytes_total` | `port` | Bytes clients sent: `3900` is S3, `3903` the admin API. |
+| `system_s3_proxy_sent_bytes_total` | `port` | Bytes clients received. |
+| `system_s3_proxy_connections_total` | `port` | Client connections that completed the TLS handshake. |
+
+The bytes are plaintext HTTP, headers included, and grow while a transfer runs rather than when it ends. Replication between replicas is not in them, and there is no breakdown by bucket: the terminator does not read the requests.
+
 To inspect the storage itself:
 
 ```shell

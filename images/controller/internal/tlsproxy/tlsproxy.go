@@ -40,10 +40,13 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/deckhouse/sds-common-lib/logger"
 )
@@ -101,11 +104,18 @@ func ParseRoutes(raw string) ([]Route, error) {
 }
 
 // Proxy terminates TLS on every route.
+//
+// Metrics, when set, count the traffic of every route, and MetricsListen is where
+// they are served (see EnvMetricsListen).
 type Proxy struct {
 	Routes   []Route
 	CertFile string
 	KeyFile  string
 	Log      logger.Logger
+
+	Metrics       *Metrics
+	MetricsListen string
+	MetricsToken  string
 }
 
 // Run serves every route until ctx is cancelled or a listener fails.
@@ -136,15 +146,20 @@ func (p *Proxy) Run(ctx context.Context) error {
 			return fmt.Errorf("listen on %s: %w", r.Listen, err)
 		}
 		p.Log.Info("terminating TLS", "listen", r.Listen, "backend", r.Backend)
+		lm := p.Metrics.listener(listenPort(r.Listen))
 		wg.Add(1)
 		go func(r Route, ln net.Listener) {
 			defer wg.Done()
-			errs <- p.serve(ctx, ln, r.Backend, cfg)
+			errs <- p.serve(ctx, ln, r.Backend, cfg, lm)
 		}(r, ln)
 		go func(ln net.Listener) {
 			<-ctx.Done()
 			_ = ln.Close()
 		}(ln)
+	}
+
+	if p.Metrics != nil && p.MetricsListen != "" {
+		p.serveMetrics(ctx, &lc, cfg)
 	}
 
 	var first error
@@ -160,7 +175,7 @@ func (p *Proxy) Run(ctx context.Context) error {
 	return first
 }
 
-func (p *Proxy) serve(ctx context.Context, ln net.Listener, backend string, cfg *tls.Config) error {
+func (p *Proxy) serve(ctx context.Context, ln net.Listener, backend string, cfg *tls.Config, lm *listenerMetrics) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -173,11 +188,11 @@ func (p *Proxy) serve(ctx context.Context, ln net.Listener, backend string, cfg 
 			}
 			return fmt.Errorf("accept on %s: %w", ln.Addr(), err)
 		}
-		go p.handle(conn, backend, cfg)
+		go p.handle(conn, backend, cfg, lm)
 	}
 }
 
-func (p *Proxy) handle(raw net.Conn, backend string, cfg *tls.Config) {
+func (p *Proxy) handle(raw net.Conn, backend string, cfg *tls.Config, lm *listenerMetrics) {
 	defer raw.Close()
 
 	client := tls.Server(raw, cfg)
@@ -190,6 +205,9 @@ func (p *Proxy) handle(raw net.Conn, backend string, cfg *tls.Config) {
 		return
 	}
 	_ = raw.SetDeadline(time.Time{})
+	if lm != nil {
+		lm.connections.Inc()
+	}
 
 	conn, err := net.DialTimeout("tcp", backend, dialTimeout)
 	if err != nil {
@@ -203,7 +221,11 @@ func (p *Proxy) handle(raw net.Conn, backend string, cfg *tls.Config) {
 		return
 	}
 
-	pipe(client, upstream)
+	var received, sent prometheus.Counter
+	if lm != nil {
+		received, sent = lm.received, lm.sent
+	}
+	pipe(client, upstream, sent, received)
 }
 
 // halfCloser is a connection whose write side can be closed on its own:
@@ -213,23 +235,63 @@ type halfCloser interface {
 	CloseWrite() error
 }
 
-// pipe copies both ways until both directions have finished.
+// pipe copies both ways until both directions have finished, adding what goes
+// from b to a to toA and what goes from a to b to toB; a nil counter counts
+// nothing.
 //
 // Each direction closes the write side of its destination when its source is
 // done, instead of tearing the whole connection down. A request whose client has
 // finished sending may still be receiving its response, and closing both halves
 // at the first EOF would cut that response off.
-func pipe(a, b halfCloser) {
+func pipe(a, b halfCloser, toA, toB prometheus.Counter) {
 	var wg sync.WaitGroup
 	wg.Add(2)
-	cp := func(dst, src halfCloser) {
+	cp := func(dst, src halfCloser, c prometheus.Counter) {
 		defer wg.Done()
-		_, _ = io.Copy(dst, src)
+		var w io.Writer = dst
+		if c != nil {
+			w = counting{Writer: dst, c: c}
+		}
+		_, _ = io.Copy(w, src)
 		_ = dst.CloseWrite()
 	}
-	go cp(a, b)
-	go cp(b, a)
+	go cp(a, b, toA)
+	go cp(b, a, toB)
 	wg.Wait()
+}
+
+// serveMetrics serves the counters on MetricsListen until ctx is done.
+//
+// Its failure is logged, not returned: a terminator that cannot report its
+// traffic still carries it, and taking S3 down over a metrics port would be the
+// wrong way round.
+func (p *Proxy) serveMetrics(ctx context.Context, lc *net.ListenConfig, cfg *tls.Config) {
+	ln, err := lc.Listen(ctx, "tcp", p.MetricsListen)
+	if err != nil {
+		p.Log.Error("unable to serve the terminator's metrics", logger.Err(err), "listen", p.MetricsListen)
+		return
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", p.Metrics.Handler(p.MetricsToken))
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: handshakeTimeout}
+	go func() {
+		<-ctx.Done()
+		_ = srv.Close()
+	}()
+	go func() {
+		if err := srv.Serve(tls.NewListener(ln, cfg)); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			p.Log.Error("the terminator's metrics stopped", logger.Err(err), "listen", p.MetricsListen)
+		}
+	}()
+	p.Log.Info("serving the terminator's metrics", "listen", p.MetricsListen)
+}
+
+// listenPort is the port of a listen address, the label the counters carry.
+func listenPort(listen string) string {
+	if _, port, err := net.SplitHostPort(listen); err == nil {
+		return port
+	}
+	return listen
 }
 
 // certLoader serves the certificate from files that the kubelet replaces when

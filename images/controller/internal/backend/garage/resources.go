@@ -43,6 +43,14 @@ const (
 	adminPort = 3903
 )
 
+// proxyMetricsPort is where the TLS terminator serves its own traffic counters,
+// and proxyMetricsPortName the container port's name templates/garage-podmonitor.yaml
+// scrapes by.
+const (
+	proxyMetricsPort     = 3904
+	proxyMetricsPortName = "proxy-metrics"
+)
+
 // Fixed paths inside the Garage container.
 const (
 	dataMountPath  = "/var/lib/garage"
