@@ -446,6 +446,7 @@ func (r *SystemBucketReconciler) ensureConnectionConfigMap(
 		// would be invisible to the cached client and to the Owns() watch, so a
 		// consumer deleting it by hand would go unnoticed.
 		cm.Labels[v1alpha1.ManagedByLabel] = v1alpha1.ManagedByValue
+		previous := cm.Data
 		cm.Data = map[string]string{
 			v1alpha1.ConnectionKeyS3Endpoint: state.Endpoint,
 			v1alpha1.ConnectionKeyS3Region:   state.Region,
@@ -454,9 +455,7 @@ func (r *SystemBucketReconciler) ensureConnectionConfigMap(
 		// The CA the S3 endpoint is verified with. The endpoint is https and its
 		// certificate comes from the module's own CA, so a consumer that is not
 		// given it cannot talk to the store at all.
-		if ca := r.garageCA(ctx); len(ca) > 0 {
-			cm.Data[v1alpha1.ConnectionKeyS3CACert] = string(ca)
-		}
+		setCA(cm.Data, previous, v1alpha1.ConnectionKeyS3CACert, r.garageCA(ctx))
 		// Where to ask for credentials, what audience the token has to carry, and
 		// the CA to verify the endpoint with (the module's own, so nothing trusts
 		// it by default). Added only while the module actually serves the endpoint,
@@ -464,9 +463,7 @@ func (r *SystemBucketReconciler) ensureConnectionConfigMap(
 		if endpoint := r.stsEndpoint(); endpoint != "" {
 			cm.Data[v1alpha1.ConnectionKeySTSEndpoint] = endpoint
 			cm.Data[v1alpha1.ConnectionKeySTSAudience] = sts.TokenAudience
-			if ca := r.stsCA(ctx); len(ca) > 0 {
-				cm.Data[v1alpha1.ConnectionKeySTSCACert] = string(ca)
-			}
+			setCA(cm.Data, previous, v1alpha1.ConnectionKeySTSCACert, r.stsCA(ctx))
 			// The same, for the SDKs' own web identity flow (see
 			// ConnectionKeyAWSRoleARN).
 			cm.Data[v1alpha1.ConnectionKeyAWSRoleARN] = v1alpha1.RoleARNPrefix + bucket.Namespace + "/" + bucket.Name
@@ -480,6 +477,25 @@ func (r *SystemBucketReconciler) ensureConnectionConfigMap(
 		return "", err
 	}
 	return cm.Name, nil
+}
+
+// setCA puts ca under key, or — when the Secret it is read from could not be read
+// on this pass — keeps what the ConfigMap already held under that key.
+//
+// The data is rebuilt on every pass, and a CA that is simply left out for one
+// pass is a CA every consumer loses: the ConfigMap is mounted or read into the
+// environment, and a consumer that (re)starts in that window has no way to verify
+// the endpoint. The window is real — the certificate hook deletes and re-creates
+// its Secret when it re-issues — and a CA does not stop being the right one
+// because it could not be read for a moment.
+func setCA(data, previous map[string]string, key string, ca []byte) {
+	if len(ca) > 0 {
+		data[key] = string(ca)
+		return
+	}
+	if old := previous[key]; old != "" {
+		data[key] = old
+	}
 }
 
 // stsEndpoint is the address of the credentials endpoint, or empty when the

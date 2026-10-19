@@ -409,3 +409,62 @@ func TestTheConnectionSpeaksTheSDKsNames(t *testing.T) {
 		})
 	}
 }
+
+// TestTheConnectionKeepsItsCAWhileTheSecretIsAway: a pass that cannot read the
+// certificate Secret — deleted and not yet re-created by the hook that re-issues
+// it — must not strip the CA out of every consumer's connection ConfigMap.
+func TestTheConnectionKeepsItsCAWhileTheSecretIsAway(t *testing.T) {
+	const ns, name = "d8-monitoring", "loki"
+	tlsSecret := func(n, ca string) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "d8-system-s3", Name: n},
+			Data:       map[string][]byte{"ca.crt": []byte(ca)},
+		}
+	}
+	r, c := newReconciler(t, &fakeDriver{}, platformNS(ns), bucketFor(ns, name),
+		tlsSecret("garage-tls", "garage-ca"), tlsSecret("webhooks-https-certs", "sts-ca"))
+	r.Cfg.ControllerNamespace = "d8-system-s3"
+	r.Cfg.GarageTLSSecret = "garage-tls"
+	r.Cfg.STSCertSecret = "webhooks-https-certs"
+	r.Cfg.STSEndpoint = "https://system-s3-sts.d8-system-s3.svc"
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: client.ObjectKey{Namespace: ns, Name: name}}
+	key := client.ObjectKey{Namespace: ns, Name: connectionConfigMapName(bucketFor(ns, name))}
+	read := func() map[string]string {
+		t.Helper()
+		cm := &corev1.ConfigMap{}
+		if err := c.Get(ctx, key, cm); err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		return cm.Data
+	}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if d := read(); d[v1alpha1.ConnectionKeyS3CACert] != "garage-ca" || d[v1alpha1.ConnectionKeySTSCACert] != "sts-ca" {
+		t.Fatalf("the CAs were not published: %v", d)
+	}
+
+	for _, n := range []string{"garage-tls", "webhooks-https-certs"} {
+		if err := c.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "d8-system-s3", Name: n}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("reconcile without the Secrets: %v", err)
+	}
+	if d := read(); d[v1alpha1.ConnectionKeyS3CACert] != "garage-ca" || d[v1alpha1.ConnectionKeySTSCACert] != "sts-ca" {
+		t.Errorf("a pass that could not read the Secrets dropped the CAs: %v", d)
+	}
+
+	if err := c.Create(ctx, tlsSecret("garage-tls", "new-garage-ca")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if d := read(); d[v1alpha1.ConnectionKeyS3CACert] != "new-garage-ca" {
+		t.Errorf("a CA that can be read again is not the one published: %v", d)
+	}
+}
