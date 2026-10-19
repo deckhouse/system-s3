@@ -27,6 +27,14 @@ properties:
       customWebhookCert:
         type: object
         default: {}
+        description: |
+          The certificate the credentials endpoint serves, issued by the
+          020-webhook-certs hook and rendered into the Secret webhooks-https-certs.
+
+          The name is left over from the admission webhook the controller pod used
+          to run, which served the same certificate. It is kept, with the Secret's
+          name, because renaming either would reissue the certificate on every
+          cluster and gain nothing.
         x-required-for-helm:
           - crt
           - key
@@ -45,8 +53,8 @@ properties:
         type: object
         default: {}
         description: |
-          The CA the webhook and credentials-endpoint certificate is signed by,
-          kept apart from the certificate itself.
+          The CA the credentials-endpoint certificate (customWebhookCert) is
+          signed by, kept apart from the certificate itself.
 
           It is separate so that the CA can be given a common name of its own. A
           CA sharing the certificate's CN produces a chain that Go accepts and
@@ -77,8 +85,9 @@ properties:
           Garage has no TLS of its own; a sidecar in every Garage pod terminates it
           with this certificate, and the controller, the migration Job and every
           consumer verify it against the CA. A key of its own rather than the
-          webhook certificate: the Garage pods hold it, and a compromised data-plane
-          pod must not be able to impersonate the credentials endpoint.
+          credentials endpoint's certificate: the Garage pods hold it, and a
+          compromised data-plane pod must not be able to impersonate the
+          credentials endpoint.
         x-required-for-helm:
           - crt
           - key
@@ -105,9 +114,11 @@ properties:
         type: integer
         default: 8444
         description: |
-          The port the controller serves the credentials endpoint on. Not 8443:
-          that is the webhook container's, in the same Pod and the same network
-          namespace.
+          The port the controller serves the credentials endpoint on. Not 8443,
+          because that was the port of the admission webhook container the
+          controller Pod used to run in the same network namespace. Consumers
+          reach the endpoint through its Service on 443, so the number is internal
+          to the Pod and there is no reason to move it.
       controllerMetricsProxyPort:
         type: integer
         default: 8080

@@ -113,7 +113,8 @@ type SystemBucketSpec struct {
 	// letters, digits and dashes, starting and ending with a letter or a digit.
 	// The derived form is bounded too, but not by the schema, which cannot see
 	// it: a namespace and a name compose to as much as 127 characters, so the
-	// admission webhook and the controller both refuse a name S3 would not take.
+	// controller refuses a name S3 would not take. Nothing refuses it at
+	// admission: the resource is created and reports BucketReady=False.
 
 	// Name of the bucket in S3. Defaults to
 	// `<metadata.namespace>-<metadata.name>` when omitted: the
@@ -305,10 +306,11 @@ const (
 // GVK lookups.
 const SystemBucketKind = "SystemBucket"
 
-// Namespace admission gate for SystemBucket. Every namespace a DKP module owns
-// carries these through helm_lib_module_labels, so the label is an authoritative
-// "this is a platform namespace" marker — unlike a d8-* name pattern, which is a
-// convention a tenant can imitate.
+// Namespace gate for SystemBucket, checked by the controller before it
+// provisions anything. Every namespace a DKP module owns carries these through
+// helm_lib_module_labels, so the label is an authoritative "this is a platform
+// namespace" marker — unlike a d8-* name pattern, which is a convention a tenant
+// can imitate.
 const (
 	LabelHeritage     = "heritage"
 	HeritageDeckhouse = "deckhouse"

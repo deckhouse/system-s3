@@ -30,8 +30,9 @@ import (
 // Without CommonCAValuesPath the SDK generates the CA with the CERTIFICATE's
 // common name, so the CA and the certificate it signs both end up as
 // "CN=webhooks". Go's verifier tolerates that — it matches an issuer by name and
-// key id — and the API server's webhook client is a Go verifier, so the webhook
-// worked and nothing said otherwise. OpenSSL does not: it sees a certificate
+// key id — and the API server's client for the admission webhook this
+// certificate was first issued for is a Go verifier, so the webhook worked and
+// nothing said otherwise. OpenSSL does not: it sees a certificate
 // whose issuer name equals its own subject name, concludes it is self-issued,
 // and stops at depth 0 with "self-signed certificate". Every consumer that
 // verifies the credentials endpoint with curl, Python or Java — which is every
@@ -54,8 +55,8 @@ var _ = persistedca.Register(tlscertificate.GenSelfSignedTLSHookConf{
 		// %CLUSTER_DOMAIN%:// is a special value to generate SAN like 'svc_name.svc_namespace.svc.cluster.local'
 		fmt.Sprintf("%%CLUSTER_DOMAIN%%://%s.%s.svc", consts.WebhookCertCn, consts.ModuleNamespace),
 
-		// The credentials endpoint is served by the controller container in the same
-		// Pod, behind a Service of its own, and it presents this same certificate.
+		// The credentials endpoint is served by the controller container, behind a
+		// Service of its own, and it is what presents this certificate now.
 		// Its names have to be in here: a consumer that cannot verify the endpoint
 		// is a consumer that either refuses to fetch credentials or fetches them
 		// from whatever answered.

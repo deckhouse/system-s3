@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/deckhouse/sds-common-lib/logger"
+	"github.com/deckhouse/system-s3/images/controller/internal/servingcert"
 )
 
 // readHeaderTimeout bounds how long a client may take to send its request
@@ -55,21 +56,36 @@ type Runnable struct {
 func (r *Runnable) NeedLeaderElection() bool { return false }
 
 // Start serves until the context is cancelled.
+//
+// The certificate is read through servingcert rather than handed to
+// ListenAndServeTLS as file names, which would read it once. It is the module's
+// shared certificate, renewed by its hook and swapped in the mount by the
+// kubelet, and nothing rolls the controller when that happens; the endpoint
+// picks the new pair up on the next handshake instead of serving the old one
+// until it expires. A pair that cannot be read at all is still an error here,
+// at start, rather than a refusal on every handshake.
 func (r *Runnable) Start(ctx context.Context) error {
+	certs := servingcert.New(r.CertFile, r.KeyFile)
+	if _, err := certs.Certificate(); err != nil {
+		return err
+	}
 	srv := &http.Server{
 		Addr:              r.Addr,
 		Handler:           r.Server.Handler(),
 		ReadHeaderTimeout: readHeaderTimeout,
-		// Not the Go default, which is a property of the toolchain rather than a
-		// decision of this module. What travels over this connection is a secret
-		// key, so the floor is stated.
-		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+		TLSConfig: &tls.Config{
+			// Not the Go default, which is a property of the toolchain rather than a
+			// decision of this module. What travels over this connection is a secret
+			// key, so the floor is stated.
+			MinVersion:     tls.VersionTLS12,
+			GetCertificate: certs.GetCertificate,
+		},
 	}
 
 	done := make(chan error, 1)
 	go func() {
 		r.Log.Info("serving the credentials endpoint", "address", r.Addr)
-		err := srv.ListenAndServeTLS(r.CertFile, r.KeyFile)
+		err := srv.ListenAndServeTLS("", "")
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil
 		}

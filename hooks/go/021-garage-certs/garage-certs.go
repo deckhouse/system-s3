@@ -30,7 +30,7 @@ import (
 // Garage has no TLS of its own; a sidecar in every Garage pod terminates it (see
 // internal/tlsproxy in the controller). This is its certificate.
 //
-// Same CA as the webhook and credentials-endpoint certificate — the shared
+// Same CA as the credentials endpoint's certificate — the shared
 // CommonCAValuesPath — so a consumer is handed one CA and it verifies both
 // endpoints it talks to. A different certificate and key, though: the Garage
 // pods hold this key, and a data-plane pod that is compromised must not be able

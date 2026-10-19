@@ -214,11 +214,13 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 	status := newStatusBuilder(systemBucketStageOrder, bucket.Generation)
 	observed := &bucketObserved{}
 
-	// Re-check the namespace the admission webhook already checked. The webhook
-	// can be bypassed — a failurePolicy that lets writes through while the
-	// webhook pod is down, or a CRD applied without it — and this is the gate
-	// that keeps the system storage out of tenant namespaces, so it is enforced
-	// where the credentials are actually issued as well.
+	// The namespace gate: the only check that keeps the system storage out of
+	// tenant namespaces. There is no admission webhook in front of it, so any
+	// SystemBucket a user may create is accepted as an object, and the refusal is
+	// made here, before anything is provisioned and where the credentials would be
+	// issued. A webhook would only have given faster feedback; it could not have
+	// been the invariant anyway — a failurePolicy that lets writes through while
+	// its pod is down, or a CRD applied without it, bypasses it.
 	platform, err := r.platformNamespace(ctx, bucket.Namespace)
 	if err != nil {
 		status.Set(v1alpha1.SystemBucketConditionBucketReady, metav1.ConditionFalse, conditions.ReasonReconcileFailed, err.Error())
@@ -259,8 +261,10 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 	store := r.Store.Store()
 	name := effectiveBucketName(bucket)
 
-	// Re-check the bucket name the admission webhook already checked, for the
-	// reason the namespace gate is re-checked above: the webhook can be bypassed.
+	// The bucket-name check, made here for the reason the namespace gate is: no
+	// admission webhook stands in front of the controller, so a name S3 will not
+	// take is accepted as an object and has to be refused before the backend is
+	// asked for it.
 	//
 	// This is a terminal refusal, so it carries the reason the phase derivation
 	// understands rather than one of its own — see the namespace gate for why.
@@ -377,8 +381,9 @@ var bucketNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 // name is derived as <namespace>-<name>, and nothing checked that: two labels of
 // up to 63 characters each compose to as much as 127, against an S3 limit of 63.
 //
-// Mirrors bucketNameProblem in images/webhooks; the two must agree, for the same
-// reason the two copies of effectiveBucketName must.
+// It is the only check of the derived name: there is no admission webhook, so
+// the resource is accepted as an object and the refusal is reported in its
+// BucketReady condition.
 func bucketNameProblem(name string) string {
 	switch {
 	case len(name) < bucketNameMinLength:

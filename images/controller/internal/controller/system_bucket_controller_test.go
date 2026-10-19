@@ -239,12 +239,11 @@ func (f *failingDeleteDriver) DeleteBucket(_ context.Context, _ *backend.Store, 
 	return apierrors.NewServiceUnavailable("garage is down")
 }
 
-// The admission webhook refuses a derived bucket name S3 will not take, but a
-// webhook can be bypassed — the module re-checks the namespace gate for exactly
-// that reason, and this is the other guard that has to hold where the bucket is
-// actually created. Without it the backend answered instead, on the first
-// reconcile, and the operator got the refusal from Garage rather than from the
-// write that caused it.
+// Nothing refuses a derived bucket name S3 will not take at admission — the
+// module runs no webhook — so the controller is the guard, next to the namespace
+// gate, and it has to hold before the bucket is created. Without it the backend
+// answered instead, on the first reconcile, and the operator got the refusal from
+// Garage rather than a condition naming the field to set.
 func TestADerivedBucketNameOverTheS3LimitIsRefusedBeforeTheBackend(t *testing.T) {
 	ns := "d8-" + strings.Repeat("n", 40)
 	name := strings.Repeat("b", 30)

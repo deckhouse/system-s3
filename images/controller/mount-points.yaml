@@ -1,6 +1,6 @@
 dirs:
-  # The module's webhook certificate, mounted into the controller container as
-  # well: the credentials endpoint (internal/sts) serves it, and it is issued for
-  # names in this namespace that now include the endpoint's Service.
+  # The module's serving certificate (Secret webhooks-https-certs, named after
+  # the admission webhook that used to serve it): the credentials endpoint
+  # (internal/sts) serves it, and it is issued for the endpoint's Service names.
   - /etc/sts-certs
   - /etc/garage-tls

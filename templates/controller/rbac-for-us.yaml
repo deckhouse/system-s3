@@ -20,10 +20,8 @@
   cluster serves the API: RBAC does not need the kind to exist.
 
   Namespaces are read because the label heritage: deckhouse is what admits a
-  SystemBucket: both the webhook and the reconciler check it, and neither can be
-  told the answer by the object itself.
-
-  The webhooks share the same ServiceAccount but exercise only the read verbs.
+  SystemBucket: the reconciler checks it before provisioning anything, and it
+  cannot be told the answer by the object itself.
 
   tokenreviews and subjectaccessreviews are what the credentials endpoint is:
   it takes a caller's ServiceAccount token, asks the API server who that is, and
@@ -39,7 +37,8 @@
   Secret has a controllerReference to its SystemBucket and is garbage-collected
   with it, and the module's own Secrets live in its namespace and are covered by
   the Role above. Nothing needs cluster-wide delete on Secrets, and the token
-  that would carry it is mounted in the same Pod as the admission webhook.
+  that would carry it is mounted in the Pod that serves the credentials
+  endpoint to every Pod in the cluster.
 
   Cluster-wide `list` and `watch` on Secrets stay because RBAC cannot be narrowed
   by label — a Kubernetes limitation, not an oversight here. What is narrowed is

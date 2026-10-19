@@ -59,7 +59,7 @@ func objectQuotaFor(size int64) int64 {
 //
 // A bucket another SystemBucket holds is not: the call reports not-ready with the
 // current owner and touches nothing. See bucket_owners.go for why this is decided
-// here and not only in the admission webhook.
+// here, and only here.
 //
 // Credentials are not issued here — EnsureAccess mints the key pair the
 // SystemBucket hands to its consumer.

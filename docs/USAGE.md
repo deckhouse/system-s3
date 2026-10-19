@@ -225,22 +225,22 @@ near the end of its lifetime.
 
 `spec.bucketName` is optional. When it is omitted the bucket is named `<namespace>-<name>`, because the backend's bucket names are flat while `SystemBucket` is namespaced: two components asking for `backups` must not end up sharing one bucket.
 
-Set it explicitly only when something outside the cluster needs a specific name. Two `SystemBucket` resources may not map to the same bucket name: the admission webhook rejects the second one, and if it is bypassed — two simultaneous creations, or a cluster where the webhook is not installed — the controller refuses it as well, reporting `BucketReady=False` with the owner it belongs to. Give that resource a different `spec.bucketName`.
+Set it explicitly only when something outside the cluster needs a specific name. Two `SystemBucket` resources may not map to the same bucket name. The second one is created, but the controller does not serve it: it reports `BucketReady=False`, reason `Pending`, with a message naming the `SystemBucket` the bucket already belongs to (`bucket "…" already belongs to SystemBucket <namespace>/<name>: refusing to issue credentials for it …`). Give that resource a different `spec.bucketName`. The decision is made in the controller and only there, so it holds for two simultaneous creations too.
 
 The refusal is not caution for its own sake: a `SystemBucket` owns its data outright and there is no reclaim policy, so two owners of one bucket means both write to the same storage and deleting either one destroys the other's objects.
 
 Whichever way the name is arrived at, it has to be one S3 accepts: 3 to 63 characters, lower-case letters, digits and dashes, starting and ending with a letter or a digit. The derived form is where that bites, because it is composed rather than typed — a namespace and a resource name of up to 63 characters each add up to as much as 127. Set `spec.bucketName` when the pair is too long:
 
 ```console
-$ kubectl -n d8-observability-long-term-metrics apply -f systembucket.yaml
-Error from server: admission webhook denied the request: the bucket name this
-SystemBucket maps to,
-"d8-observability-long-term-metrics-prometheus-remote-write-backend", cannot be
-used: it is 66 characters long, and S3 bucket names stop at 63. With
-spec.bucketName unset the name is derived as <namespace>-<name> …
+$ kubectl -n d8-observability-long-term-metrics get systembucket prometheus-remote-write-backend \
+    -o jsonpath='{.status.conditions[?(@.type=="BucketReady")].message}'
+the bucket name "d8-observability-long-term-metrics-prometheus-remote-write-backend"
+cannot be used: it is 66 characters long, and S3 bucket names stop at 63. With
+spec.bucketName unset it is derived as <namespace>-<name>; set spec.bucketName to
+something S3 accepts
 ```
 
-The controller refuses the same name for the same reason, so a resource created while the webhook was down reports `BucketReady=False` saying what to set instead of leaving the backend to answer.
+Such a resource is created, but the controller does not serve it: it reports `BucketReady=False`, reason `ReconcileFailed`, with the message above, before anything reaches the backend. Nothing changes until `spec.bucketName` is set; since the field is immutable, that means deleting the resource and creating it again with the name.
 
 ## Deleting a bucket
 
@@ -264,7 +264,7 @@ The resource keeps a finalizer until the bucket is gone from the backend, so a f
 | `ConnectionReady` | The `ConfigMap` with the connection parameters could not be written. |
 | `Ready` | Aggregate of the above. |
 
-A `SystemBucket` in a namespace without the `heritage: deckhouse` label is rejected by the webhook. If admission was bypassed and the resource exists anyway, the controller refuses to provision it with `BucketReady=False`, reason `ReconcileFailed`, and a message explaining the namespace label. An unavailable webhook also rejects requests because its `failurePolicy` is `Fail`.
+A `SystemBucket` in a namespace without the `heritage: deckhouse` label is created, but the controller does not serve it: nothing is provisioned, and the resource reports `BucketReady=False`, reason `ReconcileFailed`, with the message `namespace "<namespace>" is not a Deckhouse platform namespace (label heritage=deckhouse); the system object storage is not available to it`.
 
 Shared Garage state is published only in `Module/system-s3.status.conditions`, including before the first bucket exists. The system-s3 controller does not change Deckhouse conditions (`IsReady`, enablement conditions, etc.) or `Module.status.phase`.
 
@@ -364,7 +364,7 @@ What is left behind afterwards, and what is not:
 
 - the `SystemBucket` resources stay, frozen at their last status, and so do their CRDs — disabling a module does not delete either. The module's own finalizers are released on the way out, so they can be deleted by hand;
 - the data plane's `PersistentVolumeClaim`s go with the namespace, and what happens to the volumes behind them is the `StorageClass`'s reclaim policy to decide: `Delete` removes them with everything stored in them, `Retain` keeps them. The module deliberately does not interfere — it no longer owns a volume layer of its own, and overriding somebody else's policy on the way out is not its call;
-- the webhook configurations are removed, because an admission webhook whose backend is gone would block work with the resources it guards.
+- a `SystemBucket` admission webhook configuration left over from an earlier version of the module is removed, because a webhook whose backend is gone would block work with the resources it guarded.
 
 {{< alert level="warning" >}}
 **Destroying a cluster requires disabling the module first.** `dhctl destroy` deletes every `PersistentVolumeClaim` and waits for them to go; the data plane's `StatefulSet` re-creates its claims for as long as it exists, so the step times out and the cluster is left half-removed. Disabling the module takes the `StatefulSet` away, and the destroy then completes.

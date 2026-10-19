@@ -51,9 +51,10 @@ func (w *garageTestWriter) Write(p []byte) (int, error) {
 //
 // They would write to the same storage unaware of each other, and — a SystemBucket
 // owning its data outright, with no reclaim policy — deleting either would take
-// the other's objects. The admission webhook rejects the second resource, but
-// admission is not serialised (two simultaneous CREATEs each see the other
-// missing) and can be absent altogether, so the claim has to hold here.
+// the other's objects. Nothing rejects the second resource at admission — the
+// module runs no webhook, and admission is not serialised anyway (two
+// simultaneous CREATEs each see the other missing) — so the claim has to hold
+// here.
 func TestBucketOwnership(t *testing.T) {
 	ns := "d8-system-s3"
 	store := systemStore()

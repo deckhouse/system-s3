@@ -41,7 +41,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +48,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/deckhouse/sds-common-lib/logger"
+	"github.com/deckhouse/system-s3/images/controller/internal/servingcert"
 )
 
 // Command is the argument that starts the controller binary as the terminator.
@@ -125,13 +125,13 @@ type Proxy struct {
 // half a terminator — S3 answering, the admin API not — would pass the readiness
 // probe on one port while the controller could not manage the node on the other.
 func (p *Proxy) Run(ctx context.Context) error {
-	certs := &certLoader{certFile: p.CertFile, keyFile: p.KeyFile}
-	if _, err := certs.get(); err != nil {
+	certs := servingcert.New(p.CertFile, p.KeyFile)
+	if _, err := certs.Certificate(); err != nil {
 		return err
 	}
 	cfg := &tls.Config{
 		MinVersion:     tls.VersionTLS12,
-		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return certs.get() },
+		GetCertificate: certs.GetCertificate,
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -292,57 +292,4 @@ func listenPort(listen string) string {
 		return port
 	}
 	return listen
-}
-
-// certLoader serves the certificate from files that the kubelet replaces when
-// the certificate hook renews them.
-//
-// The files are stat'ed on every handshake and re-read when either changed. A
-// stat is a cheap syscall against a handshake that costs far more, and the
-// alternative — reading them once — would keep serving a certificate the hook has
-// already replaced, until it expired in the middle of the night.
-type certLoader struct {
-	certFile, keyFile string
-
-	mu      sync.Mutex
-	certSig string
-	cert    *tls.Certificate
-}
-
-func (l *certLoader) get() (*tls.Certificate, error) {
-	sig, err := fileSignature(l.certFile, l.keyFile)
-	if err != nil {
-		return nil, err
-	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.cert != nil && sig == l.certSig {
-		return l.cert, nil
-	}
-	cert, err := tls.LoadX509KeyPair(l.certFile, l.keyFile)
-	if err != nil {
-		if l.cert != nil {
-			// Mid-swap: the kubelet writes the pair as one atomic symlink flip, but
-			// a handshake that lands between two files of different generations
-			// would see a mismatch. Keep serving what worked; the next handshake
-			// reads again.
-			return l.cert, nil
-		}
-		return nil, fmt.Errorf("load the TLS certificate: %w", err)
-	}
-	l.cert, l.certSig = &cert, sig
-	return l.cert, nil
-}
-
-func fileSignature(paths ...string) (string, error) {
-	var b strings.Builder
-	for _, p := range paths {
-		st, err := os.Stat(p)
-		if err != nil {
-			return "", fmt.Errorf("read %s: %w", p, err)
-		}
-		fmt.Fprintf(&b, "%s:%d:%d;", p, st.Size(), st.ModTime().UnixNano())
-	}
-	return b.String(), nil
 }

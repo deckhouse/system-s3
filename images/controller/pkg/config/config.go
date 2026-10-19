@@ -56,9 +56,10 @@ const (
 	HighAvailabilityExplicitEnv = "HIGH_AVAILABILITY_EXPLICIT"
 
 	// The credentials endpoint (see internal/sts): where it listens and which
-	// certificate it serves. The certificate is the module's webhook certificate,
-	// mounted into this container by the chart, because it is issued for names in
-	// this namespace and there is no reason for a second one.
+	// certificate it serves. The certificate is the module's serving certificate
+	// from the webhooks-https-certs Secret (named after the admission webhook that
+	// used to serve it), mounted into this container by the chart. It is renewed
+	// in place, so the endpoint re-reads the files rather than loading them once.
 	STSBindAddressEnv = "STS_BIND_ADDRESS"
 	STSCertFileEnv    = "STS_TLS_CERT_FILE"
 	STSKeyFileEnv     = "STS_TLS_KEY_FILE"
@@ -114,9 +115,11 @@ const (
 	DefaultReconcileTimeoutSeconds = 300
 
 	// DefaultSTSBindAddress is the port the credentials endpoint listens on. Not
-	// 8443: that belongs to the webhook container in the same Pod, and two
-	// listeners on one port in one network namespace is one listener and one
-	// crash loop.
+	// 8443, because that was the port of the admission webhook container the Pod
+	// used to run, and two listeners on one port in one network namespace is one
+	// listener and one crash loop. Consumers reach the endpoint through its
+	// Service, so the number is internal to the Pod and there is no reason to
+	// move it now.
 	DefaultSTSBindAddress = ":8444"
 )
 

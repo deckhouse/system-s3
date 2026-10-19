@@ -36,12 +36,12 @@ import (
 // and — since a SystemBucket owns its data outright and there is no reclaim
 // policy — deleting either one would take the other's objects with it.
 //
-// The admission webhook rejects the second resource, and that is the fast
-// feedback, but it cannot be the invariant: admission is not serialised, so two
-// simultaneous CREATEs each see the other missing from the List and both pass.
-// The webhook can also be absent — a CRD applied without it, or a configuration
-// that no longer installs it. The controller is the last place the decision is
-// made and the only place it can be made once, so the claim lives here.
+// Nothing rejects the second resource at admission: the module runs no webhook,
+// and one could not have held the invariant anyway — admission is not
+// serialised, so two simultaneous CREATEs each see the other missing from the
+// List and both pass. The controller is the only place the decision can be made
+// once, so the claim lives here, and the second resource is accepted as an
+// object and refused in its status.
 //
 // The record is a ConfigMap in the module namespace: bucket name -> "namespace/
 // name" of the owning SystemBucket. A ConfigMap rather than the bucket itself

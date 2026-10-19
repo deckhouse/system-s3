@@ -224,22 +224,22 @@ subjects:
 
 `spec.bucketName` необязателен. Если он не задан, бакет называется `<namespace>-<name>`: пространство имён бакетов в бэкенде плоское, а `SystemBucket` — namespaced, поэтому два компонента, попросивших `backups`, не должны оказаться в одном бакете.
 
-Задавайте имя явно только тогда, когда конкретное имя нужно чему-то за пределами кластера. Два `SystemBucket` не могут указывать на один бакет: второй отклонит admission webhook, а если вебхук обойдён (два одновременных создания или кластер, где вебхук не установлен) — откажет и контроллер, выставив `BucketReady=False` и указав, кому бакет принадлежит. Такому ресурсу нужно задать другой `spec.bucketName`.
+Задавайте имя явно только тогда, когда конкретное имя нужно чему-то за пределами кластера. Два `SystemBucket` не могут указывать на один бакет. Второй ресурс создаётся, но контроллер его не обслуживает: он показывает `BucketReady=False`, reason `Pending`, с сообщением, в котором указано, какому `SystemBucket` бакет уже принадлежит (`bucket "…" already belongs to SystemBucket <namespace>/<name>: refusing to issue credentials for it …`). Такому ресурсу нужно задать другой `spec.bucketName`. Решение принимает контроллер, и только он, поэтому оно соблюдается и при двух одновременных созданиях.
 
 Отказ здесь не перестраховка: `SystemBucket` владеет своими данными безраздельно, политики reclaim нет, поэтому два владельца одного бакета — это две нагрузки, пишущие в одно хранилище, и удаление любой из них уносит объекты другой.
 
 Каким бы способом имя ни получилось, оно должно быть таким, какое принимает S3: от 3 до 63 символов, строчные латинские буквы, цифры и дефисы, начинается и заканчивается буквой или цифрой. Проблема возникает именно с выведенным именем, потому что его не набирают, а составляют: namespace и имя ресурса длиной до 63 символов каждое дают в сумме до 127. Если пара слишком длинная, задайте `spec.bucketName`:
 
 ```console
-$ kubectl -n d8-observability-long-term-metrics apply -f systembucket.yaml
-Error from server: admission webhook denied the request: the bucket name this
-SystemBucket maps to,
-"d8-observability-long-term-metrics-prometheus-remote-write-backend", cannot be
-used: it is 66 characters long, and S3 bucket names stop at 63. With
-spec.bucketName unset the name is derived as <namespace>-<name> …
+$ kubectl -n d8-observability-long-term-metrics get systembucket prometheus-remote-write-backend \
+    -o jsonpath='{.status.conditions[?(@.type=="BucketReady")].message}'
+the bucket name "d8-observability-long-term-metrics-prometheus-remote-write-backend"
+cannot be used: it is 66 characters long, and S3 bucket names stop at 63. With
+spec.bucketName unset it is derived as <namespace>-<name>; set spec.bucketName to
+something S3 accepts
 ```
 
-Контроллер отказывает по той же причине, поэтому ресурс, созданный при выключенном вебхуке, показывает `BucketReady=False` с указанием, что задать, а не оставляет ответ бэкенду.
+Такой ресурс создаётся, но контроллер его не обслуживает: до обращения к бэкенду он выставляет `BucketReady=False`, reason `ReconcileFailed`, с сообщением выше. Ничего не изменится, пока не задан `spec.bucketName`; поле неизменяемо, поэтому ресурс нужно удалить и создать заново уже с именем.
 
 ## Удаление бакета
 
@@ -263,7 +263,7 @@ kubectl -n d8-monitoring delete systembucket loki
 | `ConnectionReady` | Не удалось записать `ConfigMap` с параметрами подключения. |
 | `Ready` | Агрегат перечисленного выше. |
 
-`SystemBucket` в namespace без лейбла `heritage: deckhouse` отклоняется вебхуком. Если admission был обойдён и ресурс всё же появился, контроллер откажется его обслуживать: `BucketReady=False`, reason `ReconcileFailed`, с сообщением о метке namespace. При недоступном webhook `failurePolicy: Fail` также отклоняет запрос.
+`SystemBucket` в namespace без лейбла `heritage: deckhouse` создаётся, но контроллер его не обслуживает: ничего не выделяется, а ресурс показывает `BucketReady=False`, reason `ReconcileFailed`, с сообщением `namespace "<namespace>" is not a Deckhouse platform namespace (label heritage=deckhouse); the system object storage is not available to it`.
 
 Общие состояния Garage публикуются только в `Module/system-s3.status.conditions`, в том числе до создания первого бакета. Условия Deckhouse (`IsReady`, причины включения и другие) контроллер system-s3 не изменяет; фаза `Module.status.phase` также остаётся под управлением платформы.
 
@@ -363,7 +363,7 @@ kubectl patch moduleconfig system-s3 --type merge -p '{"spec":{"enabled":false}}
 
 - ресурсы `SystemBucket` остаются — замороженными в последнем статусе, — и их CRD тоже: выключение модуля не удаляет ни то, ни другое. Свои финализаторы модуль при выгрузке снимает, поэтому такие ресурсы можно удалить руками;
 - `PersistentVolumeClaim` дата-плейна уходят вместе с пространством имён, а судьбу томов за ними решает политика `StorageClass`: `Delete` удалит их вместе со всем, что в них лежало, `Retain` оставит. Модуль в это не вмешивается намеренно: своего слоя томов у него больше нет, и переопределять чужую политику на выходе он не вправе;
-- конфигурации вебхуков удаляются: admission-вебхук, у которого не осталось бэкенда, блокировал бы работу с ресурсами, которые он стережёт.
+- конфигурация admission-вебхука для `SystemBucket`, оставшаяся от прежней версии модуля, удаляется: вебхук, у которого не осталось бэкенда, блокировал бы работу с ресурсами, которые он стерёг.
 
 {{< alert level="warning" >}}
 **Перед сносом кластера модуль нужно выключить.** `dhctl destroy` удаляет все `PersistentVolumeClaim` и ждёт их исчезновения, а `StatefulSet` data plane пересоздаёт свои claim'ы, пока существует, — шаг падает по таймауту, и кластер остаётся снесённым наполовину. Выключение модуля убирает `StatefulSet`, и снос проходит до конца.

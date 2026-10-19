@@ -123,6 +123,10 @@ func handlerRemoveFinalizersOnModuleDelete(ctx context.Context, input *pkg.HookI
 		}
 	}
 
+	// Clean-up after older versions, which rendered a SystemBucket admission
+	// webhook (see consts.WebhookConfigurationsToDelete). It runs before the
+	// finalizers below are stripped: a configuration left behind with no backend
+	// would refuse those updates.
 	for _, name := range consts.WebhookConfigurationsToDelete {
 		vwc := &admissionregistrationv1.ValidatingWebhookConfiguration{}
 		if err := cl.Get(ctx, client.ObjectKey{Name: name}, vwc); err == nil {

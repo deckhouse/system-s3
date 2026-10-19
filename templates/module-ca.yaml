@@ -1,6 +1,6 @@
 {{- /*
-  The module's common CA, key included: the CA that signs the webhook and
-  credentials-endpoint certificate and the data plane's (hooks/go/020-webhook-certs,
+  The module's common CA, key included: the CA that signs the credentials
+  endpoint's certificate and the data plane's (hooks/go/020-webhook-certs,
   hooks/go/021-garage-certs).
 
   It is rendered from the values the certificate hooks keep it in, and read back

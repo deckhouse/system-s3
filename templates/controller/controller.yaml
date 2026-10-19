@@ -1,4 +1,9 @@
-{{- /* Webhook TLS Certs Secret */ -}}
+{{- /*
+  The module's serving certificate. The name and the values path are the
+  lib-helm webhook defaults, kept from when the controller pod also ran an
+  admission webhook: the credentials endpoint serves this certificate now, and
+  renaming the Secret or the values would only churn them on every cluster.
+*/ -}}
 {{- $secretConfig := dict
   "valuesKey" "systemS3"
   "webhookCertPath" "internal.customWebhookCert"
@@ -63,11 +68,13 @@
 
   The credentials endpoint (STS_*) is served by the controller container itself,
   because it needs what the controller already has: the Garage driver, the
-  Kubernetes clients, and the store description. It reuses the module's webhook
-  certificate — mounted here into the controller container as well — since that
-  certificate is issued for names in this namespace and the hook adds the
-  endpoint's Service name to its SANs. A second PKI for a second listener in the
-  same Pod would be two things to rotate instead of one.
+  Kubernetes clients, and the store description. It serves the module's
+  certificate from the webhooks-https-certs Secret, issued by
+  hooks/go/020-webhook-certs for names in this namespace with the endpoint's
+  Service name among its SANs. The volume is declared here: lib-helm adds it only
+  together with its webhook container, which this module no longer runs. Nothing
+  rolls the pod when the certificate is renewed, so the endpoint re-reads the
+  files on its own (internal/servingcert).
 
   VPA_ENABLED says whether the cluster serves the VerticalPodAutoscaler API. The
   controller creates one for every Garage StatefulSet it builds; without the API
@@ -78,7 +85,7 @@
   controllerMetricsPort is the loopback port the manager serves /metrics on; the
   port that is actually published belongs to the kube-rbac-proxy sidecar
   (controllerMetricsProxyPort) and reaches the ServiceMonitor through
-  helm_lib_module_webhook_service, which is the only Service this chart has.
+  the "webhooks" Service rendered by helm_lib_module_webhook_service below.
 */ -}}
 {{- $dataPlaneNodeSelector := (include "helm_lib_node_selector" (tuple . "system") | fromYaml).nodeSelector | default dict -}}
 {{- $dataPlaneTolerations := (include "helm_lib_tolerations" (tuple . "system") | fromYaml).tolerations | default list -}}
@@ -93,8 +100,7 @@
   "valuesKey" "systemS3"
   "onMasterNode" true
   "podSecurityContext" "deckhouse"
-  "webhookEnabled" true
-  "webhookCertPath" "internal.customWebhookCert"
+  "webhookEnabled" false
   "controllerMetricsPort" (int .Values.systemS3.internal.controllerMetricsPort)
   "controllerMetricsProxyPort" (int .Values.systemS3.internal.controllerMetricsProxyPort)
   "additionalControllerEnvs" (list
@@ -120,15 +126,19 @@
     (dict "name" "garage-tls-ca" "mountPath" "/etc/garage-tls" "readOnly" true)
   )
   "additionalVolumes" (list
+    (dict "name" "webhook-certs" "secret" (dict "secretName" "webhooks-https-certs"))
     (dict "name" "garage-tls-ca" "secret" (dict "secretName" "garage-tls" "items" (list (dict "key" "ca.crt" "path" "ca.crt"))))
   )
 }}
 {{ include "helm_lib_module_controller_manifests" (list $controllerContext $config) }}
 
 {{- /*
-  Webhook Service. It carries the metrics port too: the controller and the
-  webhook share a pod, so one Service can front both, and a ServiceMonitor needs
-  a Service to select.
+  The "webhooks" Service, kept for the metrics port: a ServiceMonitor needs a
+  Service to select, and it selects this one by its app: controller label
+  (servicemonitor.yaml). The name and the 443 port are what lib-helm renders for
+  an admission webhook the controller pod no longer runs; that port targets a
+  container port nothing declares any more, so it gets no endpoints. The
+  credentials endpoint has a Service of its own (sts-service.yaml).
 */ -}}
 {{- $serviceConfig := dict
   "additionalPorts" (list (dict
@@ -138,35 +148,3 @@
   ))
 }}
 {{ include "helm_lib_module_webhook_service" (list . $serviceConfig) }}
-
-{{- /*
-  ValidatingWebhookConfiguration for SystemBucket (namespaced).
-
-  The scope must match the CRD: a rule scoped to Cluster never matches a
-  namespaced resource, so the API server would silently stop calling the webhook
-  and every SystemBucket — one in a tenant namespace included — would be
-  admitted.
-
-  failurePolicy is Fail on purpose. This webhook is the gate that keeps the
-  platform's system storage out of tenant namespaces, and admitting writes while
-  it is down would hand out system credentials on nobody's check. The controller
-  re-checks the same label before issuing credentials, so the two together fail
-  closed.
-*/ -}}
-{{- $systemBucketWebhookConfig := dict
-  "name" "systembucket-validation"
-  "webhookName" "systembucket-validation"
-  "valuesKey" "systemS3"
-  "path" "/systembucket-validate"
-  "failurePolicy" "Fail"
-  "rules" (list
-    (dict
-      "apiGroups" (list "storage.deckhouse.io")
-      "apiVersions" (list "v1alpha1")
-      "operations" (list "CREATE" "UPDATE")
-      "resources" (list "systembuckets")
-      "scope" "Namespaced"
-    )
-  )
-}}
-{{ include "helm_lib_module_validating_webhook_configuration" (list . $systemBucketWebhookConfig) }}
