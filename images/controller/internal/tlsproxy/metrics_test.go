@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -150,5 +151,46 @@ func TestMetricsRefuseEveryoneWithoutAToken(t *testing.T) {
 		if rec.Code != http.StatusForbidden {
 			t.Errorf("Authorization %q: %d, want 403", header, rec.Code)
 		}
+	}
+}
+
+// The size of the metadata is the files of Garage's metadata_dir, of its LMDB
+// environment and of its snapshots — and nothing under the data directory next
+// to it, which on a full replica holds millions of files. A directory that
+// cannot be read publishes no series rather than a zero.
+func TestMetadataSizeCountsTheMetadataAndNothingElse(t *testing.T) {
+	root := t.TempDir()
+	meta := filepath.Join(root, "meta")
+	write := func(path string, size int) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, make([]byte, size), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(meta, "node_key"), 64)
+	write(filepath.Join(meta, "db.lmdb", "data.mdb"), 4096)
+	write(filepath.Join(meta, "db.lmdb", "lock.mdb"), 1024)
+	write(filepath.Join(meta, "snapshots", "2026-10-20T00:00:00Z", "data.mdb"), 2048)
+	write(filepath.Join(meta, "deeper", "ignored"), 100000)
+	write(filepath.Join(root, "data", "ab", "cd", "block"), 1<<20)
+
+	m := NewMetrics()
+	m.WatchMetadata(meta)
+	want := `
+# HELP system_s3_replica_metadata_bytes Size of Garage's metadata database on this replica (the LMDB files and any metadata snapshots), in bytes.
+# TYPE system_s3_replica_metadata_bytes gauge
+system_s3_replica_metadata_bytes 7232
+`
+	if err := testutil.GatherAndCompare(m.registry, strings.NewReader(want), "system_s3_replica_metadata_bytes"); err != nil {
+		t.Error(err)
+	}
+
+	gone := NewMetrics()
+	gone.WatchMetadata(filepath.Join(root, "absent"))
+	if n, err := testutil.GatherAndCount(gone.registry, "system_s3_replica_metadata_bytes"); err != nil || n != 0 {
+		t.Errorf("%d series (%v) for a directory that does not exist, want none", n, err)
 	}
 }

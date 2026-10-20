@@ -4,3 +4,6 @@ dirs:
   # (internal/sts) serves it, and it is issued for the endpoint's Service names.
   - /etc/sts-certs
   - /etc/garage-tls
+  # The Garage replica's volume, read-only in the TLS terminator sidecar: it
+  # publishes the size of Garage's metadata from it.
+  - /var/lib/garage

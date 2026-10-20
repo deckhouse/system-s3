@@ -246,7 +246,8 @@ func main() {
 	// The data plane converges from the background loop as well as from every
 	// SystemBucket reconcile, so a cluster with no consumer yet still gets its
 	// storage built. Leader election keeps the loop to one replica.
-	storeManager := controller.NewStoreManager(driver, store, baseLog, cfgParams.RequeueInterval, mgr.GetClient(), mgr.GetAPIReader())
+	storeManager := controller.NewStoreManager(driver, store, baseLog, cfgParams.RequeueInterval, mgr.GetClient(), mgr.GetAPIReader()).
+		WithCertificates(mgr.GetAPIReader(), cfgParams.ControllerNamespace, cfgParams.GarageTLSSecret, cfgParams.STSCertSecret)
 	if err := mgr.Add(storeManager); err != nil {
 		log.Error("unable to register the store manager", logger.Err(err))
 		os.Exit(1)
@@ -311,6 +312,10 @@ func runTerminator(ctx context.Context, log logger.Logger) {
 		log.Error("the TLS terminator cannot start", logger.Err(err))
 		os.Exit(1)
 	}
+	metrics := tlsproxy.NewMetrics()
+	if dir := os.Getenv(tlsproxy.EnvGarageMetaDir); dir != "" {
+		metrics.WatchMetadata(dir)
+	}
 	// Without the directory every bucket is counted as "_other"; that is a gap in
 	// the metrics, not a reason to keep S3 down.
 	var buckets *tlsproxy.Buckets
@@ -329,7 +334,7 @@ func runTerminator(ctx context.Context, log logger.Logger) {
 		S3Listen:      tlsproxy.S3ListenFromEnv(os.Getenv),
 		S3RootDomain:  os.Getenv(tlsproxy.EnvS3RootDomain),
 		Buckets:       buckets,
-		Metrics:       tlsproxy.NewMetrics(),
+		Metrics:       metrics,
 		MetricsListen: os.Getenv(tlsproxy.EnvMetricsListen),
 		MetricsToken:  os.Getenv(tlsproxy.EnvMetricsToken),
 	}

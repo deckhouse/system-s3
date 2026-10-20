@@ -52,3 +52,12 @@ func AsUnavailable(err error) (*UnavailableError, bool) {
 	}
 	return nil, false
 }
+
+// ErrLimitExceeded is a refusal the caller brought on itself: it holds as many
+// unexpired temporary credentials for a bucket as the store issues, and asking
+// again will not help until some of them expire.
+//
+// The credentials endpoint answers it with 400 and the code LimitExceeded, not
+// a 500 — nothing is wrong with the store — and not a 503 or a 429, which an SDK
+// would retry on its own into the same refusal.
+var ErrLimitExceeded = errors.New("too many unexpired temporary credentials")

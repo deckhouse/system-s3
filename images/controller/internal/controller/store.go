@@ -130,6 +130,15 @@ type StoreManager struct {
 	// only from Start's goroutine.
 	lastKeys time.Time
 
+	// certReader, certNamespace and certSecrets are where the certificates
+	// whose expiry is published are read from, and lastCerts when that was last
+	// done (see publishCertificates). lastCerts is touched only from Start's
+	// goroutine.
+	certReader    client.Reader
+	certNamespace string
+	certSecrets   []string
+	lastCerts     time.Time
+
 	// now is time.Now, replaced in tests.
 	now func() time.Time
 }
@@ -194,6 +203,11 @@ func (m *StoreManager) ensureOnce(ctx context.Context) (backend.StoreState, erro
 	// are ready or not, and which ones is what an operator looking into the
 	// failure wants to see.
 	m.publishDataPlanes(ctx)
+	// Exported before the Module is patched and whether or not that works: the
+	// patch is a write to the API server that can fail on its own, and an alert
+	// on the conditions should not go quiet because the status could not be
+	// written.
+	publishConditions(state)
 	if m.moduleStatus != nil {
 		if publishErr := m.moduleStatus.Publish(ctx, state); publishErr != nil {
 			// A reporting failure must not turn functioning S3 into a dependency
@@ -238,6 +252,17 @@ func (m *StoreManager) publish(state backend.StoreState) {
 		capacity = &v
 	}
 	monitoring.StoreCapacityBytes(m.store.Name, capacity)
+}
+
+// publishConditions mirrors the conditions written on Module/system-s3 onto the
+// condition metric.
+func publishConditions(state backend.StoreState) {
+	conds := moduleConditions(state)
+	series := make([]monitoring.Condition, 0, len(conds))
+	for _, c := range conds {
+		series = append(series, monitoring.Condition{Type: c.Type, Status: string(c.Status), Reason: c.Reason})
+	}
+	monitoring.ModuleConditions(series)
 }
 
 // publishDataPlanes refreshes replica_ready, store_info and plane_info. A failed
@@ -383,6 +408,7 @@ func (m *StoreManager) Start(ctx context.Context) error {
 		}
 		m.sweep(ctx)
 		m.publishTemporaryKeys(ctx)
+		m.publishCertificates(ctx)
 		select {
 		case <-ctx.Done():
 			return nil

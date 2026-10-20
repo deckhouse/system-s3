@@ -110,3 +110,87 @@
 
           Whatever component owns this bucket is losing whatever it was trying to store.
           Raise `spec.size` on the `SystemBucket`, or free space in the bucket.
+
+    - alert: D8SystemS3ReplicaNotReady
+      # The store serves, so D8SystemS3StoreNotReady is silent, and a replica of
+      # it is not ready: the store has less redundancy than it is built with,
+      # and the next replica lost — a drain, a node reboot — may stop it.
+      #
+      # Only the serving plane: the plane a migration is filling has replicas that
+      # are not ready by design for a while, and its progress is the migration's
+      # alerts' business. Fifteen minutes, because a replica restarting, or
+      # rescheduled with its volume, is back well within that.
+      #
+      # The controller's series carry no namespace (the scrape drops it), and the
+      # platform passes on alerts of tier: cluster only for its own namespaces, so
+      # the module's namespace is put on the result.
+      expr: |
+        label_replace(
+          system_s3_replica_ready{serving="true"} == 0
+          and on ()
+          max(system_s3_store_ready) == 1,
+          "namespace", "d8-system-s3", "", ""
+        )
+      for: 15m
+      labels:
+        severity_level: "5"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "replica,node"
+        summary: A replica of the system object storage is not ready while the store serves.
+        description: |
+          `{{ $labels.replica }}` (node `{{ $labels.node }}`, empty while it is not scheduled) has
+          not been `Ready` for fifteen minutes. The store still serves, with one replica less
+          than it is built with: another one away can cost it the quorum.
+
+          The module's `StorageReady` condition names the replica, and its pod says why:
+
+          ```
+          d8 k get module system-s3 -o jsonpath='{.status.conditions[?(@.type=="StorageReady")].message}{"\n"}'
+          d8 k -n d8-system-s3 describe pod {{ $labels.replica }}
+          d8 k -n d8-system-s3 logs {{ $labels.replica }} -c garage --tail=100
+          ```
+
+          A pod that is `Pending` has no eligible node or a volume that cannot attach where it
+          is pinned (see `PlacementReady`); one that is running and not ready is not in the
+          Garage layout or cannot reach its peers on port 3901. Do not drain another node of
+          the data plane until this is resolved.
+
+    - alert: D8SystemS3PlacementBlocked
+      # PlacementReady=False with reason PlacementBlocked: the controller wants to
+      # move or place a replica and cannot — no eligible node left, or a node
+      # identity it cannot reuse. It says so on Module/system-s3 and nowhere else,
+      # and the store may well serve in the meantime, so nothing else notices.
+      #
+      # Thirty minutes: a node coming back from a reboot or a drain unblocks it on
+      # its own well before that.
+      expr: |
+        label_replace(
+          system_s3_condition{type="PlacementReady", status="False", reason="PlacementBlocked"} == 1,
+          "namespace", "d8-system-s3", "", ""
+        )
+      for: 30m
+      labels:
+        severity_level: "5"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        summary: The system object storage cannot place its replicas.
+        description: |
+          `Module/system-s3` has reported `PlacementReady=False`, reason `PlacementBlocked`, for
+          half an hour: a replica of the data plane has no node it is allowed to run on, so the
+          store runs with fewer replicas than it is built with, or a replica waits to move.
+
+          The condition's message names the replica and the nodes it considered:
+
+          ```
+          d8 k get module system-s3 -o jsonpath='{.status.conditions[?(@.type=="PlacementReady")].message}{"\n"}'
+          ```
+
+          The usual causes are fewer eligible nodes than replicas (the module's node placement
+          settings, the `system-s3` node role, taints), and a node-pinned volume whose node is
+          gone. Add or label nodes, or relax the placement settings; do not delete the volume
+          claims of the replicas, they hold the data.

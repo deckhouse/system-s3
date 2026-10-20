@@ -132,3 +132,31 @@ func TestDataPlanesReplacesWhatWasPublished(t *testing.T) {
 		t.Errorf("%d series for a store with no data plane, want none", n)
 	}
 }
+
+// A condition that changed keeps only its current status and reason: an alert
+// on PlacementBlocked that kept matching a series left at zero, or at one, after
+// the placement went through would never resolve.
+func TestModuleConditionsKeepOnlyTheCurrentValue(t *testing.T) {
+	ModuleConditions([]Condition{{Type: "PlacementReady", Status: "False", Reason: "PlacementBlocked"}})
+	ModuleConditions([]Condition{{Type: "PlacementReady", Status: "True", Reason: "Placed"}})
+	if n := testutil.CollectAndCount(moduleCondition); n != 1 {
+		t.Fatalf("%d condition series, want only the current one", n)
+	}
+	if got := testutil.ToFloat64(moduleCondition.WithLabelValues("PlacementReady", "True", "Placed")); got != 1 {
+		t.Errorf("condition{PlacementReady,True,Placed}=%v, want 1", got)
+	}
+}
+
+// A bucket that is deleted takes its credential requests with it, or the
+// counters of every bucket that ever existed would stay for good.
+func TestForgetBucketDropsItsCredentialRequests(t *testing.T) {
+	STSRequest("ns", "gone", "Granted")
+	STSRequest("", "", "InvalidRequest")
+	ForgetBucket("ns", "gone", "ns-gone")
+	if got := testutil.ToFloat64(stsRequestsTotal.WithLabelValues("", "", "InvalidRequest")); got < 1 {
+		t.Errorf("the requests of no bucket were dropped with a bucket")
+	}
+	if n := testutil.CollectAndCount(stsRequestsTotal); n != 1 {
+		t.Errorf("%d sts_requests_total series after the bucket was forgotten, want 1", n)
+	}
+}

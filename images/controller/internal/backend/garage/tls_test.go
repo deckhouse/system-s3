@@ -99,6 +99,27 @@ func TestTerminatorIsInThePod(t *testing.T) {
 		t.Errorf("the routes the driver writes do not parse: %v", err)
 	}
 
+	// The metadata it measures is Garage's metadata_dir, on the replica's volume,
+	// which the terminator must not be able to write.
+	if env[tlsproxy.EnvGarageMetaDir] != dataMountPath+"/meta" {
+		t.Errorf("%s=%q, want Garage's metadata_dir %s/meta", tlsproxy.EnvGarageMetaDir, env[tlsproxy.EnvGarageMetaDir], dataMountPath)
+	}
+	if !strings.Contains(renderConfig(3), `metadata_dir = "`+env[tlsproxy.EnvGarageMetaDir]+`"`) {
+		t.Errorf("the terminator measures %s, which is not Garage's metadata_dir", env[tlsproxy.EnvGarageMetaDir])
+	}
+	dataMounted := false
+	for _, vm := range term.VolumeMounts {
+		if vm.Name == "data" {
+			dataMounted = true
+			if !vm.ReadOnly || vm.MountPath != dataMountPath {
+				t.Errorf("the data volume is mounted into the terminator as %+v, want read-only at %s", vm, dataMountPath)
+			}
+		}
+	}
+	if !dataMounted {
+		t.Error("the terminator does not mount the replica's volume")
+	}
+
 	ports := map[int32]string{}
 	for _, c := range spec.Containers {
 		for _, p := range c.Ports {

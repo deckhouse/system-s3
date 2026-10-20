@@ -393,6 +393,268 @@
       }
     },
     {
+      "type": "table",
+      "title": "Module conditions",
+      "description": "The five conditions the controller writes on Module/system-s3, as system_s3_condition: the status and reason each has now. False is not always a failure — an operation in progress reports False too; the message, with the details, is on the Module itself. PlacementReady=False/PlacementBlocked for half an hour is D8SystemS3PlacementBlocked.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "system_s3_condition == 1",
+          "legendFormat": "",
+          "refId": "A",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "status"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "True": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "False": {
+                        "color": "red",
+                        "index": 1
+                      },
+                      "Unknown": {
+                        "color": "orange",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "type",
+            "desc": false
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "job": true,
+              "instance": true,
+              "tier": true,
+              "prometheus": true,
+              "prometheus_replica": true
+            },
+            "indexByName": {
+              "type": 0,
+              "status": 1,
+              "reason": 2
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Certificates expire in",
+      "description": "Time left on the leaf certificate of each of the module's TLS Secrets: garage-tls is what consumers verify the S3 endpoint by, webhooks-https-certs the credentials endpoint's. The hooks renew them six months before expiry; under thirty days for an hour is D8SystemS3CertificateExpiring.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "min by (secret) (system_s3_certificate_expiration_seconds - time())",
+          "legendFormat": "{{secret}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 2592000
+              },
+              {
+                "color": "green",
+                "value": 15552000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Temporary keys alive",
+      "description": "Unexpired temporary credentials, each a key record in Garage until it expires. A handful of platform components renewing near expiry hold a few dozen; more than 500 for fifteen minutes is D8SystemS3TooManyTemporaryKeys, a client asking for a key per request.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "count(system_s3_temporary_key_expiration_seconds) or vector(0)",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 500
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Serving replicas not ready",
+      "description": "Replicas of the serving Garage cluster that are not Ready (system_s3_replica_ready). Non-zero while the store serves means it runs with less redundancy than it is built with; for fifteen minutes it is D8SystemS3ReplicaNotReady.",
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "count(system_s3_replica_ready{serving=\"true\"} == 0) or vector(0)",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
       "type": "row",
       "title": "Consumers' buckets",
       "collapsed": false,
@@ -400,7 +662,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 13
+        "y": 21
       },
       "panels": []
     },
@@ -412,7 +674,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 14
+        "y": 22
       },
       "datasource": {
         "type": "prometheus",
@@ -458,7 +720,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 14
+        "y": 22
       },
       "datasource": {
         "type": "prometheus",
@@ -525,7 +787,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 22
+        "y": 30
       },
       "panels": []
     },
@@ -535,9 +797,9 @@
       "description": "What the token-exchange endpoint answered. Granted is a key issued; AccessDenied is a subject without a grant on that bucket, which is RBAC working rather than a fault; LimitExceeded is a bucket at its ceiling of 50 unexpired keys, i.e. a client asking for credentials on every request instead of holding one.",
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
-        "y": 23
+        "y": 31
       },
       "datasource": {
         "type": "prometheus",
@@ -576,6 +838,52 @@
       }
     },
     {
+      "type": "timeseries",
+      "title": "Temporary credentials by bucket and outcome",
+      "description": "system_s3_sts_requests_total by the SystemBucket asked for. A request is counted against a bucket only once the caller's token was accepted and the bucket exists; everything else is under an empty namespace and name.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 31
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (namespace, name, result) (rate(system_s3_sts_requests_total[5m]))",
+          "legendFormat": "{{namespace}}/{{name}} {{result}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
       "type": "row",
       "title": "Migration between Garage clusters",
       "collapsed": false,
@@ -583,7 +891,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 31
+        "y": 39
       },
       "panels": []
     },
@@ -595,7 +903,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 32
+        "y": 40
       },
       "datasource": {
         "type": "prometheus",
@@ -644,7 +952,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 32
+        "y": 40
       },
       "datasource": {
         "type": "prometheus",
@@ -697,7 +1005,7 @@
         "h": 4,
         "w": 6,
         "x": 12,
-        "y": 32
+        "y": 40
       },
       "datasource": {
         "type": "prometheus",
@@ -750,7 +1058,7 @@
         "h": 4,
         "w": 6,
         "x": 18,
-        "y": 32
+        "y": 40
       },
       "datasource": {
         "type": "prometheus",
@@ -803,7 +1111,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 36
+        "y": 44
       },
       "datasource": {
         "type": "prometheus",

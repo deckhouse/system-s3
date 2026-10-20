@@ -146,6 +146,7 @@ func terminatorSidecar(image string) corev1.Container {
 					Key:                  metricsTokenKey,
 				},
 			}},
+			{Name: tlsproxy.EnvGarageMetaDir, Value: dataMountPath + "/meta"},
 		},
 		// The ports every client dials. They are declared here, on the container
 		// that listens on them, and the Services reach them by number.
@@ -154,11 +155,17 @@ func terminatorSidecar(image string) corev1.Container {
 			{Name: "admin", ContainerPort: adminPort},
 			{Name: proxyMetricsPortName, ContainerPort: proxyMetricsPort},
 		},
+		// The replica's volume, read-only, so that the terminator can publish the
+		// size of Garage's metadata on it (see tlsproxy.Metrics.WatchMetadata).
+		// The whole volume rather than a subPath of meta/: a subPath has to exist
+		// before the container starts, and on a fresh volume it is Garage's
+		// init container that creates it.
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: tlsVolume, MountPath: tlsMountPath, ReadOnly: true},
 			// The whole volume and not a subPath: a subPath mount is never updated,
 			// and the list changes with every SystemBucket created or deleted.
 			{Name: bucketsVolume, MountPath: bucketsMountPath, ReadOnly: true},
+			{Name: "data", MountPath: dataMountPath, ReadOnly: true},
 		},
 		// Proxying costs little memory, bodies being streamed; the CPU is the TLS
 		// itself, and it scales with the traffic rather than with anything this

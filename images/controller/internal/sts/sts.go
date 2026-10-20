@@ -139,37 +139,39 @@ func (s *Server) Handler() http.Handler {
 // already knows. RoleArn is still accepted, in the one spelling this module
 // documents, for clients that insist on sending one.
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
+	// Counted against no bucket until the caller is known and the bucket exists.
+	var target counted
 	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only POST is accepted")
+		writeError(w, target, http.StatusMethodNotAllowed, "MethodNotAllowed", "only POST is accepted")
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		writeError(w, http.StatusBadRequest, "InvalidRequest", "unparseable request body")
+		writeError(w, target, http.StatusBadRequest, "InvalidRequest", "unparseable request body")
 		return
 	}
 
 	if action := r.Form.Get("Action"); action != "" && action != "AssumeRoleWithWebIdentity" {
-		writeError(w, http.StatusBadRequest, "InvalidAction",
+		writeError(w, target, http.StatusBadRequest, "InvalidAction",
 			fmt.Sprintf("this endpoint implements AssumeRoleWithWebIdentity, not %q", action))
 		return
 	}
 
 	namespace, name, err := bucketFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "InvalidRequest", err.Error())
+		writeError(w, target, http.StatusBadRequest, "InvalidRequest", err.Error())
 		return
 	}
 
 	token := webIdentityToken(r)
 	if token == "" {
-		writeError(w, http.StatusBadRequest, "InvalidRequest",
+		writeError(w, target, http.StatusBadRequest, "InvalidRequest",
 			"no WebIdentityToken: send the ServiceAccount token as WebIdentityToken or in the Authorization header")
 		return
 	}
 
 	duration, err := requestedDuration(r.Form.Get("DurationSeconds"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "ValidationError", err.Error())
+		writeError(w, target, http.StatusBadRequest, "ValidationError", err.Error())
 		return
 	}
 
@@ -178,21 +180,30 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	user, ok, err := s.Authorizer.Authenticate(ctx, token)
 	if err != nil {
 		s.Log.Error("unable to review the presented token", logger.Err(err))
-		writeError(w, http.StatusInternalServerError, "InternalFailure", "unable to review the presented token")
+		writeError(w, target, http.StatusInternalServerError, "InternalFailure", "unable to review the presented token")
 		return
 	}
 	if !ok {
 		// Deliberately not saying why. The caller learns whether their token is
 		// good; they do not learn anything about the bucket they asked for.
-		writeError(w, http.StatusForbidden, "InvalidIdentityToken",
+		writeError(w, target, http.StatusForbidden, "InvalidIdentityToken",
 			"the presented token was not accepted (it must be a ServiceAccount token with audience "+TokenAudience+")")
 		return
+	}
+
+	// Read before the permissions are checked, though it is only used after: a
+	// refusal is worth counting against the bucket it was for, and only a
+	// bucket that exists may become a label. The answer does not change what
+	// the caller is told — that still waits for the SubjectAccessReview.
+	bucket, getErr := s.systemBucket(ctx, namespace, name)
+	if getErr == nil {
+		target = counted{namespace: namespace, name: name}
 	}
 
 	write, err := s.Authorizer.Authorize(ctx, user, namespace, name, subresourceWrite)
 	if err != nil {
 		s.Log.Error("unable to check the caller's permissions", logger.Err(err))
-		writeError(w, http.StatusInternalServerError, "InternalFailure", "unable to check permissions")
+		writeError(w, target, http.StatusInternalServerError, "InternalFailure", "unable to check permissions")
 		return
 	}
 	read := write
@@ -200,22 +211,22 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		read, err = s.Authorizer.Authorize(ctx, user, namespace, name, subresourceRead)
 		if err != nil {
 			s.Log.Error("unable to check the caller's permissions", logger.Err(err))
-			writeError(w, http.StatusInternalServerError, "InternalFailure", "unable to check permissions")
+			writeError(w, target, http.StatusInternalServerError, "InternalFailure", "unable to check permissions")
 			return
 		}
 	}
 	if !read {
-		writeError(w, http.StatusForbidden, "AccessDenied", fmt.Sprintf(
+		writeError(w, target, http.StatusForbidden, "AccessDenied", fmt.Sprintf(
 			"%s is not allowed to use the system bucket %s/%s: grant get on systembuckets/%s (or /%s) for it",
 			user.Username, namespace, name, subresourceRead, subresourceWrite))
 		return
 	}
 
-	bucketName, err := s.backendBucket(ctx, namespace, name)
+	bucketName, err := backendBucket(bucket, getErr, namespace, name)
 	if err != nil {
 		// The caller is allowed to know this: they were authorised for the resource,
 		// so its state is not a secret from them.
-		writeError(w, http.StatusBadRequest, "InvalidRequest", err.Error())
+		writeError(w, target, http.StatusBadRequest, "InvalidRequest", err.Error())
 		return
 	}
 
@@ -229,13 +240,19 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			"systemBucket", namespace+"/"+name, "subject", user.Username,
 			"retryAfter", unavailable.RetryAfter.String())
 		w.Header().Set("Retry-After", strconv.Itoa(int(unavailable.RetryAfter.Seconds())))
-		writeError(w, http.StatusServiceUnavailable, "ServiceUnavailable", err.Error())
+		writeError(w, target, http.StatusServiceUnavailable, "ServiceUnavailable", err.Error())
+		return
+	}
+	if errors.Is(err, backend.ErrLimitExceeded) {
+		s.Log.Warn("temporary credentials refused: the bucket's limit is reached", "error", err.Error(),
+			"systemBucket", namespace+"/"+name, "subject", user.Username)
+		writeError(w, target, http.StatusBadRequest, "LimitExceeded", err.Error())
 		return
 	}
 	if err != nil {
 		s.Log.Error("unable to issue temporary credentials", logger.Err(err),
 			"systemBucket", namespace+"/"+name, "subject", user.Username)
-		writeError(w, http.StatusInternalServerError, "InternalFailure", "unable to issue credentials")
+		writeError(w, target, http.StatusInternalServerError, "InternalFailure", "unable to issue credentials")
 		return
 	}
 
@@ -243,14 +260,29 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		"systemBucket", namespace+"/"+name, "bucket", bucketName, "subject", user.Username,
 		"write", write, "expiresAt", expiresAt.UTC().Format(time.RFC3339), "accessKeyID", creds.AccessKeyID)
 
-	writeCredentials(w, user, creds)
+	writeCredentials(w, target, user, creds)
+}
+
+// counted is the SystemBucket a request is counted against in
+// sts_requests_total; empty for a request that named none this endpoint could
+// vouch for (see monitoring.STSRequest).
+type counted struct {
+	namespace, name string
+}
+
+// systemBucket reads the SystemBucket a request names.
+func (s *Server) systemBucket(ctx context.Context, namespace, name string) (*v1alpha1.SystemBucket, error) {
+	bucket := &v1alpha1.SystemBucket{}
+	if err := s.Reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, bucket); err != nil {
+		return nil, err
+	}
+	return bucket, nil
 }
 
 // backendBucket resolves the SystemBucket to the bucket name in the backend, and
-// refuses one that is not usable yet.
-func (s *Server) backendBucket(ctx context.Context, namespace, name string) (string, error) {
-	bucket := &v1alpha1.SystemBucket{}
-	if err := s.Reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, bucket); err != nil {
+// refuses one that is not usable yet. getErr is what reading it returned.
+func backendBucket(bucket *v1alpha1.SystemBucket, getErr error, namespace, name string) (string, error) {
+	if getErr != nil {
 		return "", fmt.Errorf("there is no SystemBucket %s/%s", namespace, name)
 	}
 	if bucket.Status == nil || bucket.Status.BucketName == "" {
@@ -360,8 +392,8 @@ type errorBody struct {
 	Message string `xml:"Message"`
 }
 
-func writeCredentials(w http.ResponseWriter, user authnv1.UserInfo, creds garage.TemporaryCredentials) {
-	monitoring.STSRequest("Granted")
+func writeCredentials(w http.ResponseWriter, target counted, user authnv1.UserInfo, creds garage.TemporaryCredentials) {
+	monitoring.STSRequest(target.namespace, target.name, "Granted")
 	resp := assumeRoleResponse{
 		Result: assumeRoleResult{
 			Credentials: credentials{
@@ -381,8 +413,8 @@ func writeCredentials(w http.ResponseWriter, user authnv1.UserInfo, creds garage
 // counter lives here: a consumer that starts being refused — a RoleBinding taken
 // away, a client asking for a key on every request until it hits the per-bucket
 // cap — leaves no other trace on this side.
-func writeError(w http.ResponseWriter, status int, code, message string) {
-	monitoring.STSRequest(code)
+func writeError(w http.ResponseWriter, target counted, status int, code, message string) {
+	monitoring.STSRequest(target.namespace, target.name, code)
 
 	w.Header().Set("Content-Type", "text/xml")
 	w.WriteHeader(status)

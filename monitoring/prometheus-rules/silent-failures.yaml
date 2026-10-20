@@ -136,3 +136,76 @@
           ```
 
           A well-behaved client holds one key and renews it near the end of its lifetime.
+
+    - alert: D8SystemS3TooManyTemporaryKeys
+      # Every temporary credential is a key record in Garage, kept until it
+      # expires and the controller sweeps it. A consumer that asks for a key per
+      # request instead of reusing one for its lifetime grows Garage's key table
+      # by thousands an hour, and every key listing — the sweep, the metric
+      # itself — grows with it. Nothing refuses it before one bucket reaches its
+      # own ceiling of 50, and a client spread over several buckets never does.
+      #
+      # 500 is ten buckets at that ceiling at once, far beyond what a handful of
+      # platform components that renew near expiry ever hold.
+      expr: |
+        label_replace(
+          count(system_s3_temporary_key_expiration_seconds) > 500,
+          "namespace", "d8-system-s3", "", ""
+        )
+      for: 15m
+      labels:
+        severity_level: "6"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        summary: Too many temporary S3 credentials are alive at once.
+        description: |
+          More than 500 temporary credentials ({{ $value }}) have been unexpired at the same time
+          for fifteen minutes. Each is a key in Garage until it expires: some consumer is asking
+          for credentials far more often than it needs to, and Garage's key table grows with it.
+
+          Which bucket and which ServiceAccount, in Prometheus:
+
+          ```
+          topk(5, count by (bucket, subject) (system_s3_temporary_key_expiration_seconds))
+          ```
+
+          A well-behaved client holds one key and asks for the next one near the end of its
+          lifetime (15 to 30 minutes). Fix the client named by `subject`; the keys it already
+          holds expire on their own.
+
+    - alert: D8SystemS3CertificateExpiring
+      # The hooks issue these certificates for ten years and renew them six months
+      # before they expire. Thirty days left means the renewal has not happened
+      # for five months, and in thirty more every client refuses the handshake:
+      # consumers with Garage, the SDKs with the credentials endpoint.
+      expr: |
+        label_replace(
+          system_s3_certificate_expiration_seconds - time() < 30 * 24 * 3600,
+          "namespace", "d8-system-s3", "", ""
+        )
+      for: 1h
+      labels:
+        severity_level: "4"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "secret"
+        summary: A certificate of the system object storage expires within thirty days.
+        description: |
+          The certificate in the Secret `d8-system-s3/{{ $labels.secret }}` expires in
+          {{ $value | humanizeDuration }}. `garage-tls` is what every consumer verifies the S3
+          endpoint by; `webhooks-https-certs` is the credentials endpoint's. When it expires,
+          every client refuses the connection.
+
+          Deckhouse's hooks renew both six months before expiry, so the renewal has failed.
+          The reason is in the Deckhouse log:
+
+          ```
+          d8 k -n d8-system logs deploy/deckhouse | grep -i system-s3 | grep -i cert
+          ```
+
+          Once the hook succeeds, the new certificate reaches the pods that serve it without
+          restarting them.

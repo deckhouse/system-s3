@@ -1,0 +1,143 @@
+- name: d8.system-s3.nodes
+  rules:
+    # The data plane as its nodes see it. The rules in the other files say what
+    # is wrong with the store; these say what the store does to the rest of the
+    # cluster — a drain that cannot finish, a node starved of CPU or memory, a
+    # disk kept busy — which is the side an operator who never heard of this
+    # module runs into first, without a reason to look here.
+    #
+    # The series come from kube-state-metrics, the kubelet and node-exporter. The
+    # first two carry the namespace of the pod; node-exporter's do not, and the
+    # platform passes on alerts of tier: cluster only for its own namespaces, so
+    # the module's namespace is put on the result where the expression loses it.
+
+    - alert: D8SystemS3DrainBlocked
+      # The data plane's PodDisruptionBudget (highly available mode only) allows
+      # one replica away at a time. Zero disruptions allowed means one is away
+      # already, and every eviction of another — a drain, a node update, the
+      # autoscaler — waits for it to come back. Thirty minutes is longer than a
+      # replica takes to return from a restart, so whatever is waiting is waiting
+      # on something that is not coming back by itself.
+      expr: |
+        kube_poddisruptionbudget_status_pod_disruptions_allowed{job="kube-state-metrics", namespace="d8-system-s3", poddisruptionbudget=~"system-garage.*"} == 0
+      for: 30m
+      labels:
+        severity_level: "6"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "poddisruptionbudget"
+        summary: Node drains wait on the system object storage.
+        description: |
+          The `PodDisruptionBudget` `{{ $labels.namespace }}/{{ $labels.poddisruptionbudget }}` has
+          allowed no disruption for half an hour: one replica of that Garage cluster is already
+          not ready, and evicting another would cost the store its quorum. A drain of a node
+          that runs a replica waits until the missing one is back.
+
+          Find the replica that is away and why:
+
+          ```
+          d8 k -n {{ $labels.namespace }} get pods -l app.kubernetes.io/name=garage -o wide
+          d8 k get module system-s3 -o jsonpath='{.status.conditions[?(@.type=="StorageReady")].message}{"\n"}'
+          ```
+
+          Bring that replica back (D8SystemS3ReplicaNotReady says more), and the drain proceeds on
+          its own. Do not delete the budget to push a drain through: two replicas away stop the
+          store for every platform component that uses it.
+
+    - alert: D8SystemS3ReplicaHogsNode
+      # Garage has no limits on purpose — its CPU and memory follow the traffic and
+      # the size of the metadata, and the VerticalPodAutoscaler raises its
+      # requests to what it uses. That leaves nothing that stops a replica from
+      # taking most of a small node. Half of what the node can allocate is the
+      # point at which whatever else is scheduled there is the one that suffers,
+      # and the one an operator would be looking at.
+      #
+      # CPU is a 5-minute rate, memory the working set — the figure the kubelet
+      # evicts by. The node is joined on the node label both sides carry.
+      expr: |
+        label_replace(
+          sum by (namespace, pod, node) (
+            rate(container_cpu_usage_seconds_total{job="kubelet", namespace="d8-system-s3", container="garage", cpu="total"}[5m])
+          )
+          > on (node) group_left()
+          0.5 * max by (node) (kube_node_status_allocatable{job="kube-state-metrics", resource="cpu"}),
+          "resource", "cpu", "", ""
+        )
+        or
+        label_replace(
+          max by (namespace, pod, node) (
+            container_memory_working_set_bytes{job="kubelet", namespace="d8-system-s3", container="garage"}
+          )
+          > on (node) group_left()
+          0.5 * max by (node) (kube_node_status_allocatable{job="kube-state-metrics", resource="memory"}),
+          "resource", "memory", "", ""
+        )
+      for: 15m
+      labels:
+        severity_level: "6"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "pod,node,resource"
+        summary: A replica of the system object storage uses more than half of its node.
+        description: |
+          `{{ $labels.pod }}` has been using more than half of the allocatable {{ $labels.resource }}
+          of node `{{ $labels.node }}` for fifteen minutes. Other workloads on that node get what is
+          left.
+
+          The traffic behind it is on the **System S3 Garage** dashboard (requests by operation,
+          block throughput). A replica's memory grows with the metadata it holds
+          (`system_s3_replica_metadata_bytes`, on the same dashboard).
+
+          If the load is legitimate, give the data plane bigger nodes (the module's node
+          placement settings or the `system-s3` node role) rather than limits: a limited Garage
+          replica is throttled or killed, and the store loses a replica instead of a node
+          losing headroom. If one consumer is the cause, it is the one to fix.
+
+    - alert: D8SystemS3NodeDiskSaturated
+      # A disk busy more than 90% of the time on a node where Garage is moving
+      # blocks at more than 10 MiB/s. Either half alone is not this module's
+      # business: a busy disk under an idle replica is somebody else's load, and
+      # a replica moving blocks on an idle disk is a store at work. Together they
+      # say the store is likely what keeps that disk busy, and everything else on
+      # the disk — and the store's own latency — waits for it.
+      #
+      # The busiest device of the node, because the replica's volume may sit on
+      # any of them and a device-mapper stack shows the same load twice; and the
+      # sum of the node's replicas' block reads and writes, which counts resync
+      # and replication as well as what clients ask for.
+      expr: |
+        label_replace(
+          max by (node) (rate(node_disk_io_time_seconds_total{job="node-exporter"}[5m])) > 0.9
+          and on (node)
+          sum by (node) (rate({__name__=~"block_bytes_written|block_bytes_read", job="system-s3-garage"}[5m])) > 10 * 1024 * 1024,
+          "namespace", "d8-system-s3", "", ""
+        )
+      for: 15m
+      labels:
+        severity_level: "6"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "node"
+        summary: A disk is saturated on a node where the system object storage moves a lot of data.
+        description: |
+          A disk of node `{{ $labels.node }}` has been busy more than 90% of the time for fifteen
+          minutes ({{ $value | humanizePercentage }}), while the system object storage replica on
+          that node read and wrote more than 10 MiB/s of data blocks.
+
+          Which it is, on the **System S3 Garage** dashboard: block read and write throughput per
+          replica, and the resync queue. A resync after a replica came back, or a migration's
+          copy, is heavy for its duration and ends; steady client traffic does not.
+
+          If the store shares the disk with other workloads, a `StorageClass` on dedicated disks
+          for the data plane moves the load off it (the module's `storageClass` setting migrates
+          the data). The disk statistics of the node, in Prometheus:
+
+          ```
+          rate(node_disk_io_time_seconds_total{node="{{ $labels.node }}"}[5m])
+          ```

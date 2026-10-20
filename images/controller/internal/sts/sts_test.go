@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -31,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/deckhouse/sds-common-lib/logger"
 	v1alpha1 "github.com/deckhouse/system-s3/api/v1alpha1"
@@ -378,5 +380,102 @@ func TestATemporaryRefusalIsServiceUnavailableWithRetryAfter(t *testing.T) {
 				t.Errorf("Retry-After=%q, want %q", got, tc.wantRetryAfter)
 			}
 		})
+	}
+}
+
+// A bucket at its limit of live temporary keys is the caller's doing: the
+// answer is 400 LimitExceeded, which an SDK does not retry, and it is counted
+// as such — not as InternalFailure, which reads as a fault of the store.
+func TestTheKeyLimitIsLimitExceeded(t *testing.T) {
+	auth := &fakeAuthorizer{
+		user:    authnv1.UserInfo{Username: "system:serviceaccount:d8-monitoring:loki"},
+		ok:      true,
+		allowed: map[string]bool{subresourceWrite: true},
+	}
+	err := fmt.Errorf("%w: bucket \"d8-monitoring-loki\" already has 50", backend.ErrLimitExceeded)
+	srv := testServer(t, auth, &fakeIssuer{err: err}, readyBucket("d8-monitoring-loki"))
+	before := stsCount(t, "d8-monitoring", "loki", "LimitExceeded")
+
+	rec := post(t, srv, "/d8-monitoring/loki", url.Values{"WebIdentityToken": {"a-token"}})
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "<Code>LimitExceeded</Code>") {
+		t.Fatalf("status=%d body=%s, want 400 LimitExceeded", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") != "" {
+		t.Errorf("Retry-After=%q: the limit does not pass by waiting a fixed time", rec.Header().Get("Retry-After"))
+	}
+	if got := stsCount(t, "d8-monitoring", "loki", "LimitExceeded") - before; got != 1 {
+		t.Errorf("LimitExceeded counted %v times, want 1", got)
+	}
+}
+
+// stsCount reads one series of system_s3_sts_requests_total, 0 when it does not
+// exist.
+func stsCount(t *testing.T, namespace, name, result string) float64 {
+	t.Helper()
+	families, err := metrics.Registry.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, f := range families {
+		if f.GetName() != "system_s3_sts_requests_total" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels["namespace"] == namespace && labels["name"] == name && labels["result"] == result {
+				return m.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+// A request is counted against its SystemBucket only once the caller's token
+// was accepted and the bucket exists. A path is whatever the caller typed, and
+// counting by it would let anybody who reaches the endpoint add series; a
+// refusal of an authenticated caller for a bucket that exists is exactly the
+// one an operator wants to find by name.
+func TestRequestsAreCountedAgainstABucketOnlyWhenItExists(t *testing.T) {
+	auth := &fakeAuthorizer{
+		user:    authnv1.UserInfo{Username: "system:serviceaccount:d8-monitoring:loki"},
+		ok:      true,
+		allowed: map[string]bool{subresourceWrite: true},
+	}
+	srv := testServer(t, auth, &fakeIssuer{}, readyBucket("d8-monitoring-loki"))
+
+	granted := stsCount(t, testBucketNamespace, testBucketName, "Granted")
+	if rec := post(t, srv, "/d8-monitoring/loki", url.Values{"WebIdentityToken": {"t"}}); rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", rec.Code)
+	}
+	if got := stsCount(t, testBucketNamespace, testBucketName, "Granted"); got != granted+1 {
+		t.Errorf("Granted for the bucket = %v, want %v", got, granted+1)
+	}
+
+	denied := stsCount(t, testBucketNamespace, testBucketName, "AccessDenied")
+	auth.allowed = map[string]bool{}
+	post(t, srv, "/d8-monitoring/loki", url.Values{"WebIdentityToken": {"t"}})
+	if got := stsCount(t, testBucketNamespace, testBucketName, "AccessDenied"); got != denied+1 {
+		t.Errorf("AccessDenied for the bucket = %v, want %v", got, denied+1)
+	}
+
+	auth.allowed = map[string]bool{subresourceWrite: true}
+	unknown := stsCount(t, "", "", "InvalidRequest")
+	post(t, srv, "/d8-monitoring/absent", url.Values{"WebIdentityToken": {"t"}})
+	if got := stsCount(t, "", "", "InvalidRequest"); got != unknown+1 {
+		t.Errorf("InvalidRequest for a bucket that does not exist = %v, want %v under empty labels", got, unknown+1)
+	}
+	if got := stsCount(t, "d8-monitoring", "absent", "InvalidRequest"); got != 0 {
+		t.Errorf("a bucket that does not exist became a label: %v", got)
+	}
+
+	auth.ok = false
+	rejected := stsCount(t, "", "", "InvalidIdentityToken")
+	post(t, srv, "/d8-monitoring/loki", url.Values{"WebIdentityToken": {"stale"}})
+	if got := stsCount(t, "", "", "InvalidIdentityToken"); got != rejected+1 {
+		t.Errorf("a refused token = %v, want %v under empty labels", got, rejected+1)
 	}
 }

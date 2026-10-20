@@ -356,7 +356,7 @@ func TestS3ProxyLabelsAreBounded(t *testing.T) {
 	for _, l := range [][]string{
 		{"bkt", "team", "app", "GET", "2xx"},
 		{"bkt", "team", "app", "HEAD", "3xx"},
-		{"bkt", "team", "app", "GET", "4xx"},
+		{"bkt", "team", "app", "GET", "403"},
 		{"bkt", "team", "app", "DELETE", "5xx"},
 		{"bkt", "team", "app", "other", "2xx"},
 		{OtherBucket, "", "", "GET", "4xx"},

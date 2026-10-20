@@ -265,10 +265,18 @@ func methodLabel(method string) string {
 	return "other"
 }
 
-// statusClass is the code label: "2xx", "4xx" and so on.
+// statusClass is the code label: "2xx", "4xx" and so on, with 403 on its own.
+//
+// A 403 is a key refused: one that expired, was revoked by a migration's write
+// freeze, or was issued for another bucket. Mixed into 4xx it would drown among
+// the 404s every HEAD of a missing object answers, and it is the one an
+// operator looks for when a consumer stops writing.
 func statusClass(code int) string {
 	if code < 100 || code > 599 {
 		return "other"
+	}
+	if code == http.StatusForbidden {
+		return "403"
 	}
 	return strconv.Itoa(code/100) + "xx"
 }

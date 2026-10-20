@@ -1026,6 +1026,103 @@
       }
     },
     {
+      "type": "timeseries",
+      "title": "Table queues, by pod and table",
+      "description": "Garage's per-table background work: Merkle tree updates after writes (anti-entropy works from these trees) and entries to collect after deletions (GC, which Garage holds back 24 hours). Busy is normal; a queue that never empties and never shrinks is D8SystemS3GarageQueuesStalled.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 55
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod, table_name) (table_merkle_updater_todo_queue_length{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"})",
+          "legendFormat": "{{pod}} merkle {{table_name}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (pod, table_name) (table_gc_todo_queue_length{job=\"system-s3-garage\", store=~\"$store\", incarnation=~\"$incarnation\"})",
+          "legendFormat": "{{pod}} gc {{table_name}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Metadata size, by pod",
+      "description": "Size of Garage's metadata database (LMDB) on each replica, measured by the TLS terminator in the pod. The file grows and does not shrink: a replica whose metadata pulls away from its peers' is holding pages a long read kept from being reused, and it shares the volume with the data.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 55
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "max by (pod) (system_s3_replica_metadata_bytes{job=\"system-s3-tls-terminator\", store=~\"$store\", incarnation=~\"$incarnation\"})",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
       "type": "row",
       "title": "Disk",
       "collapsed": false,

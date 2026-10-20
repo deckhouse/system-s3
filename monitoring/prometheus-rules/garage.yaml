@@ -238,3 +238,89 @@
           Secret is deleted and the controller writes a new one. A Garage pod reads the token
           when it starts: delete the pods one at a time, each after the previous one is
           `Ready` again, and they come back with the current one.
+
+    - alert: D8SystemS3GarageQueuesStalled
+      # Garage's background work runs off three queues per node: blocks to fetch
+      # or delete (resync), Merkle trees to update after writes (anti-entropy
+      # depends on them), and table entries to collect after deletions (GC). A
+      # worker that stops leaves its queue growing quietly; the store serves, the
+      # volume fills with what should have been collected, and replicas drift
+      # apart without being repaired.
+      #
+      # A busy queue is not a stalled one, and its length says nothing by itself:
+      # under steady writes and deletes all three are never empty. What a working
+      # worker cannot do is go a whole window without taking anything off its
+      # queue, so the rule asks for exactly that — never empty, and not one
+      # decrease between two scrapes (resets() counts any decrease of a gauge).
+      # It does not care how fast the queue grows or whether a burst arrived.
+      #
+      # GC is held back on purpose: Garage collects a table entry only 24 hours
+      # after it was deleted, so a mass deletion leaves that queue flat and full
+      # for a day on a healthy node. Its window is 25 hours, which a queue that
+      # is still never empty and never shrinking cannot be explained by.
+      #
+      # The last arm of each — the queue already non-empty a whole window ago —
+      # is what makes the window real: a series younger than the window (a pod
+      # that restarted, and is scraped at a new address) would otherwise be judged
+      # on the few minutes it has, and a replica catching up after a restart
+      # fills its queues before it starts draining them.
+      expr: |
+        label_replace(
+          min_over_time(block_resync_queue_length{job="system-s3-garage"}[2h]) > 0
+          and
+          resets(block_resync_queue_length{job="system-s3-garage"}[2h]) == 0
+          and
+          block_resync_queue_length{job="system-s3-garage"} offset 2h > 0,
+          "queue", "resync", "", ""
+        )
+        or
+        label_replace(
+          min_over_time(table_merkle_updater_todo_queue_length{job="system-s3-garage"}[2h]) > 0
+          and
+          resets(table_merkle_updater_todo_queue_length{job="system-s3-garage"}[2h]) == 0
+          and
+          table_merkle_updater_todo_queue_length{job="system-s3-garage"} offset 2h > 0,
+          "queue", "merkle", "", ""
+        )
+        or
+        label_replace(
+          min_over_time(table_gc_todo_queue_length{job="system-s3-garage"}[25h]) > 0
+          and
+          resets(table_gc_todo_queue_length{job="system-s3-garage"}[25h]) == 0
+          and
+          table_gc_todo_queue_length{job="system-s3-garage"} offset 25h > 0,
+          "queue", "gc", "", ""
+        )
+      for: 15m
+      labels:
+        severity_level: "5"
+        tier: cluster
+      annotations:
+        plk_markup_format: markdown
+        plk_protocol_version: "1"
+        plk_labels_as_annotations: "store,incarnation,pod,queue,table_name"
+        summary: A background queue of the system object storage is not being worked off.
+        description: |
+          The `{{ $labels.queue }}` queue of `{{ $labels.pod }}`{{ if $labels.table_name }} (table
+          `{{ $labels.table_name }}`){{ end }} has not been empty and has not shrunk once for two
+          hours (25 hours for `gc`, which Garage holds back for a day by design). Its worker is
+          not making progress.
+
+          - `resync` — blocks the node should fetch from its peers or delete. While a peer is
+            away (D8SystemS3GarageNodeDisconnected) this is expected; with every node connected,
+            look at D8SystemS3GarageResyncErrors and at `/garage block list-errors`.
+          - `merkle` — Merkle tree updates after writes; anti-entropy between the replicas works
+            from these trees.
+          - `gc` — table entries left by deletions. Until they are collected, deleted objects
+            still occupy the metadata.
+
+          The workers and their state, and the log:
+
+          ```
+          d8 k -n {{ $labels.namespace }} exec {{ $labels.pod }} -c garage -- /garage worker list
+          d8 k -n {{ $labels.namespace }} logs {{ $labels.pod }} -c garage --since=2h | grep -iE 'error|worker'
+          ```
+
+          The queue lengths over time are on the **System S3 Garage** dashboard. If nothing in the
+          log explains it, restarting the pod restarts its workers: save the log first, then delete
+          the pod — one at a time, each after the previous one is `Ready` again.

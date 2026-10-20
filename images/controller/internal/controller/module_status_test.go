@@ -357,3 +357,54 @@ func TestReportingFailureDoesNotBlockServingStorage(t *testing.T) {
 		t.Fatalf("publication failure blocked S3: %+v %v", state, err)
 	}
 }
+
+// The condition metric says what the Module says, including Unknown/NotEvaluated
+// for a condition the pass did not reach, and it says it when the Module cannot
+// be written: an alert on the conditions must not depend on the status patch.
+func TestStoreManagerExportsTheModuleConditions(t *testing.T) {
+	d := &reportingStoreDriver{state: backend.StoreState{Ready: true}}
+	d.state.SetCondition(backend.StorageReady, metav1.ConditionTrue, "Serving", "healthy")
+	d.state.SetCondition(backend.PlacementReady, metav1.ConditionFalse, "PlacementBlocked", "no eligible node")
+	c := fake.NewClientBuilder().WithScheme(reconcilerScheme(t)).Build()
+	m := &StoreManager{driver: d, store: &backend.Store{Name: "system"}, log: logger.NewNop(),
+		moduleStatus: &moduleStatusPublisher{client: c, reader: c}}
+	if _, err := m.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]string{}
+	families, err := metrics.Registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range families {
+		if f.GetName() != "system_s3_condition" {
+			continue
+		}
+		for _, s := range f.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range s.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if _, dup := got[labels["type"]]; dup {
+				t.Errorf("%s has more than one series", labels["type"])
+			}
+			got[labels["type"]] = labels["status"] + "/" + labels["reason"]
+		}
+	}
+	want := map[string]string{
+		backend.StorageReady:     "True/Serving",
+		backend.PlacementReady:   "False/PlacementBlocked",
+		backend.CapacityReady:    "Unknown/NotEvaluated",
+		backend.ReplicationReady: "Unknown/NotEvaluated",
+		backend.MigrationReady:   "Unknown/NotEvaluated",
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("condition %s = %q, want %q", k, got[k], v)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("%d conditions exported, want %d: %v", len(got), len(want), got)
+	}
+}

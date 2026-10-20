@@ -150,9 +150,9 @@ func (d *Driver) IssueTemporaryAccess(
 		d.log.Error("too many live temporary credentials for one bucket; refusing to issue more",
 			"bucket", bucketName, "subject", subject, "live", live, "limit", maxLiveTemporaryKeysPerBucket)
 		return TemporaryCredentials{}, fmt.Errorf(
-			"bucket %q already has %d unexpired temporary credentials, which is the limit: "+
+			"%w: bucket %q already has %d, which is the limit: "+
 				"reuse the credentials you were given until they expire instead of asking for new ones",
-			bucketName, live)
+			backend.ErrLimitExceeded, bucketName, live)
 	}
 
 	key, err := svc.createExpiringKey(ctx, temporaryKeyName(bucketName, subject), expiresAt)

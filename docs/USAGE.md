@@ -213,6 +213,12 @@ Who holds access to a bucket right now is in the metric
 `bucket`, `access_key_id`, `subject` (the ServiceAccount the key was issued to) and `write`, valued
 with the Unix time it expires. The list is refreshed every minute; the secret half of a key is not in it.
 
+How often each bucket is asked is in `system_s3_sts_requests_total`, labelled `namespace` and `name`
+of the `SystemBucket` and `result` (`Granted` or the error code the client was told). A request is
+counted against a bucket only when the caller's token was accepted and the `SystemBucket` exists;
+every other request is counted with both labels empty, so a caller cannot add series by naming
+buckets that do not exist.
+
 **Reuse the key you are given until it expires.** Every request mints a new key,
 and that key stays alive for the rest of its lifetime (30 minutes by default)
 whether the client still wants it or not, in metadata Garage replicates to every
@@ -298,6 +304,8 @@ The data plane itself is described by the controller's metrics, refreshed on eve
 | `system_s3_replica_ready` | `plane`, `replica`, `node`, `serving` | `1` if the Garage pod is `Ready`, `0` otherwise. One series per existing pod; `node` is empty while the pod is not scheduled. |
 | `system_s3_store_info` | `storage_class`, `high_availability`, `replicas` | `1`. The shape the serving cluster actually runs in: the StorageClass its volumes are bound to, the mode of its pinned replication factor and the replica count. Differs from the module settings while a change is pending. |
 | `system_s3_plane_info` | `plane`, `storage_class`, `high_availability`, `replicas`, `serving` | `1` for each existing Garage cluster. |
+| `system_s3_condition` | `type`, `status`, `reason` | `1` for the current status and reason of each of the five conditions on `Module/system-s3`, including `Unknown`/`NotEvaluated`. A condition that changes loses its previous series. |
+| `system_s3_certificate_expiration_seconds` | `secret` | Unix time the leaf certificate in `garage-tls` (the S3 endpoint) or `webhooks-https-certs` (the credentials endpoint) expires. Read every 5 minutes; a Secret that cannot be read or parsed has no series. |
 
 `plane` is the number of the Garage cluster; during a migration there are two, and `serving="true"` marks the one the endpoint points at. Pods and clusters that no longer exist lose their series. Only the controller replica holding the leader lease publishes them.
 
@@ -308,6 +316,7 @@ The traffic is counted by the TLS terminator in each Garage pod, which every cli
 | `system_s3_proxy_received_bytes_total` | `port` | Bytes clients sent: `3900` is S3, `3903` the admin API. |
 | `system_s3_proxy_sent_bytes_total` | `port` | Bytes clients received. |
 | `system_s3_proxy_connections_total` | `port` | Client connections that completed the TLS handshake. |
+| `system_s3_replica_metadata_bytes` | — | Size of Garage's metadata database on the replica's volume (the files of `meta/`, `meta/db.lmdb/` and `meta/snapshots/*/`), measured on every scrape. The terminator mounts the volume read-only for this. |
 
 The bytes are plaintext HTTP, headers included, and grow while a transfer runs rather than when it ends. Replication between replicas is not in them.
 
@@ -315,7 +324,7 @@ S3 requests are also counted per bucket. These series carry `bucket`, `namespace
 
 | Metric | Labels | Value |
 |--------|--------|-------|
-| `system_s3_proxy_bucket_requests_total` | `method`, `code` | Requests. `method` is `GET`, `HEAD`, `PUT`, `POST`, `DELETE`, `OPTIONS` or `other`; `code` is the status class: `2xx`, `3xx`, `4xx` or `5xx`. A request Garage did not answer is `5xx` (the client gets 502); one whose client went away first is `4xx`. |
+| `system_s3_proxy_bucket_requests_total` | `method`, `code` | Requests. `method` is `GET`, `HEAD`, `PUT`, `POST`, `DELETE`, `OPTIONS` or `other`; `code` is the status class: `2xx`, `3xx`, `4xx` or `5xx`, with `403` on its own: a refused key would otherwise drown among the 404s of missing objects. A request Garage did not answer is `5xx` (the client gets 502); one whose client went away first is `4xx`. |
 | `system_s3_proxy_bucket_received_bytes_total` | | Request body bytes clients sent: object data uploaded. |
 | `system_s3_proxy_bucket_sent_bytes_total` | | Response body bytes clients received: object data downloaded. |
 | `system_s3_proxy_bucket_request_duration_seconds` | | Histogram of the time from a request's headers to the end of its response, body transfer included. |
@@ -345,8 +354,23 @@ The **System S3 Garage** dashboard shows S3 requests, errors and p95/p99 latency
 | `D8SystemS3GarageResyncErrors` | A replica has data blocks it failed to resync for 15 minutes. |
 | `D8SystemS3GarageDiskAlmostFull` | A replica's volume has less than 10% free for 10 minutes. |
 | `D8SystemS3GarageMetricsUnavailable` | A Garage pod could not be scraped for 15 minutes; the alerts above do not see it. |
+| `D8SystemS3GarageQueuesStalled` | A node's resync, Merkle or GC queue has not been empty and has not shrunk once for 2 hours (25 hours for GC, which Garage holds back for a day). |
 
 Each alert's description says what to check and what to do.
+
+### Store, credential and node alerts
+
+| Alert | Fires when |
+|-------|------------|
+| `D8SystemS3ReplicaNotReady` | A replica of the serving Garage cluster has not been `Ready` for 15 minutes while the store serves. |
+| `D8SystemS3PlacementBlocked` | `PlacementReady` has been `False` with reason `PlacementBlocked` for 30 minutes: a replica has no node it may run on. |
+| `D8SystemS3TooManyTemporaryKeys` | More than 500 temporary keys have been alive at once for 15 minutes: a client is asking for a key per request. |
+| `D8SystemS3CertificateExpiring` | The certificate in `garage-tls` or `webhooks-https-certs` expires within 30 days (they are renewed six months ahead, so the renewal has failed). |
+| `D8SystemS3DrainBlocked` | A Garage `PodDisruptionBudget` has allowed no disruption for 30 minutes: node drains wait for a missing replica. |
+| `D8SystemS3ReplicaHogsNode` | A Garage container has used more than half of its node's allocatable CPU or memory for 15 minutes. |
+| `D8SystemS3NodeDiskSaturated` | A disk of a node is busy more than 90% of the time while Garage on that node reads and writes more than 10 MiB/s of blocks, for 15 minutes. |
+
+The controller's series carry no `namespace` label, and node-exporter's are per node; these rules put `namespace="d8-system-s3"` on their alerts, so that they pass the platform's filter for cluster-level alerts. The **System S3** dashboard shows the module conditions, the certificates' remaining time, the number of live temporary keys and the credential requests per bucket; **System S3 Garage** shows the table queues and the metadata size per replica.
 
 ### Service level
 

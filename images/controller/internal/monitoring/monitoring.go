@@ -163,12 +163,6 @@ var (
 		Help:      "Smallest size any replica's volume actually has, in bytes.",
 	}, []string{"store"})
 
-	// stsRequestsTotal counts what the temporary-credentials endpoint answered.
-	//
-	// "Granted" and the refusal codes in one series: a consumer that starts being
-	// refused — a RoleBinding removed, a client asking for a key on every request
-	// and hitting the per-bucket cap — is invisible from the outside otherwise.
-	// The error code is the label because it is what the client is told.
 	// temporaryKeyExpiration is the list of temporary keys Garage still honours,
 	// one series per key, valued with the Unix time it stops being honoured.
 	//
@@ -216,11 +210,51 @@ var (
 		Help:      "1 for each existing data plane, with its applied shape and whether it serves.",
 	}, []string{"plane", "storage_class", "high_availability", "replicas", "serving"})
 
+	// stsRequestsTotal counts what the temporary-credentials endpoint answered.
+	//
+	// "Granted" and the refusal codes in one series: a consumer that starts being
+	// refused — a RoleBinding removed, a client asking for a key on every request
+	// and hitting the per-bucket cap — is invisible from the outside otherwise.
+	// The error code is the label because it is what the client is told.
+	//
+	// namespace and name are the SystemBucket the request was for, so that the
+	// consumer asking too often or being refused can be named. They are filled in
+	// only for a caller whose token was accepted and a SystemBucket that exists;
+	// every other request counts with both empty. The path of a request is
+	// whatever the caller typed, and a label taken from it unchecked would let
+	// anybody who can reach the endpoint mint series.
 	stsRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "sts_requests_total",
-		Help:      "Temporary-credentials requests by outcome (Granted, AccessDenied, LimitExceeded, ...).",
-	}, []string{"result"})
+		Help:      "Temporary-credentials requests by the SystemBucket asked for (empty when unknown) and outcome (Granted, AccessDenied, ...).",
+	}, []string{"namespace", "name", "result"})
+
+	// moduleCondition is Module/system-s3's five conditions as a metric: 1 for
+	// the status and reason each one has now.
+	//
+	// The conditions are where the controller says what the store is doing, in
+	// full sentences, and nothing watches them. store_ready is only the first of
+	// them; a placement that cannot proceed or a capacity that ran out can sit
+	// behind a store that serves for as long as nobody runs kubectl. The message
+	// is not a label: it carries pod and node names and changes with them.
+	moduleCondition = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "condition",
+		Help:      "1 for the current status and reason of each condition the controller writes on Module/system-s3.",
+	}, []string{"type", "status", "reason"})
+
+	// certificateExpiration is when the module's serving certificates stop being
+	// valid.
+	//
+	// Both are issued by hooks and renewed by them, and a renewal that does not
+	// happen is silent until the day every client refuses the handshake: the
+	// data plane's certificate is what every consumer verifies Garage by, and the
+	// credentials endpoint's what every SDK verifies STS by.
+	certificateExpiration = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "certificate_expiration_seconds",
+		Help:      "Unix time the leaf certificate in one of the module's TLS Secrets expires, by Secret.",
+	}, []string{"secret"})
 )
 
 // BucketReady records whether a bucket is fully provisioned.
@@ -254,9 +288,39 @@ func StoreVolumes(store string, desired, requested, capacity int64) {
 	storeVolumeCapacityBytes.WithLabelValues(store).Set(float64(capacity))
 }
 
-// STSRequest counts one answer of the temporary-credentials endpoint.
-func STSRequest(result string) {
-	stsRequestsTotal.WithLabelValues(result).Inc()
+// STSRequest counts one answer of the temporary-credentials endpoint, for the
+// SystemBucket namespace/name or, with both empty, for a request that did not
+// name one this endpoint could vouch for.
+func STSRequest(namespace, name, result string) {
+	stsRequestsTotal.WithLabelValues(namespace, name, result).Inc()
+}
+
+// Condition is one series of condition.
+type Condition struct {
+	Type, Status, Reason string
+}
+
+// ModuleConditions replaces the published conditions. The previous status and
+// reason of a condition are dropped rather than set to zero, for the same
+// reason as in Migration: an alert on PlacementBlocked must stop matching once
+// the placement is no longer blocked.
+func ModuleConditions(conditions []Condition) {
+	moduleCondition.Reset()
+	for _, c := range conditions {
+		moduleCondition.WithLabelValues(c.Type, c.Status, c.Reason).Set(1)
+	}
+}
+
+// CertificateExpiration records when the certificate in a Secret expires.
+func CertificateExpiration(secret string, notAfter time.Time) {
+	certificateExpiration.WithLabelValues(secret).Set(float64(notAfter.Unix()))
+}
+
+// ForgetCertificate drops a Secret's series when its certificate cannot be read.
+// Its last expiry would otherwise stay published, and a certificate that is gone
+// or unparseable would read as one that is fine until that date.
+func ForgetCertificate(secret string) {
+	certificateExpiration.DeleteLabelValues(secret)
 }
 
 // Migration records the phase a store's migration is in, or that there is none.
@@ -295,6 +359,7 @@ func ForgetBucket(namespace, name, bucket string) {
 	bucketQuotaObjects.DeleteLabelValues(namespace, name, bucket)
 	bucketReady.DeleteLabelValues(namespace, name)
 	bucketSizeUpToDate.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
+	stsRequestsTotal.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
 }
 
 func init() {
@@ -316,6 +381,8 @@ func init() {
 	metrics.Registry.MustRegister(replicaReady)
 	metrics.Registry.MustRegister(storeInfo)
 	metrics.Registry.MustRegister(planeInfo)
+	metrics.Registry.MustRegister(moduleCondition)
+	metrics.Registry.MustRegister(certificateExpiration)
 }
 
 // TemporaryKey is one series of temporary_key_expiration_seconds.

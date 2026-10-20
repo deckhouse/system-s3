@@ -59,14 +59,8 @@ func (p *moduleStatusPublisher) Publish(ctx context.Context, state backend.Store
 		}
 		stamp := now.UTC().Format(time.RFC3339)
 		changed := false
-		for _, kind := range backend.StoreConditionTypes {
-			observed := metav1.Condition{Type: kind, Status: metav1.ConditionUnknown, Reason: "NotEvaluated", Message: "not evaluated in this reconciliation"}
-			for _, c := range state.Conditions {
-				if c.Type == kind {
-					observed = c
-					break
-				}
-			}
+		for _, observed := range moduleConditions(state) {
+			kind := observed.Type
 			idx := -1
 			var old map[string]interface{}
 			for i, item := range current {
@@ -104,6 +98,26 @@ func (p *moduleStatusPublisher) Publish(ctx context.Context, state backend.Store
 		patch := client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})
 		return p.client.Status().Patch(ctx, module, patch)
 	})
+}
+
+// moduleConditions is what Module/system-s3 says for each of its conditions
+// after a pass: what the pass observed, or Unknown/NotEvaluated for a condition
+// it did not reach. Publish writes it and the condition metric exports it, from
+// this one place, so that the two cannot disagree about a condition the pass
+// left out.
+func moduleConditions(state backend.StoreState) []metav1.Condition {
+	out := make([]metav1.Condition, 0, len(backend.StoreConditionTypes))
+	for _, kind := range backend.StoreConditionTypes {
+		observed := metav1.Condition{Type: kind, Status: metav1.ConditionUnknown, Reason: "NotEvaluated", Message: "not evaluated in this reconciliation"}
+		for _, c := range state.Conditions {
+			if c.Type == kind {
+				observed = c
+				break
+			}
+		}
+		out = append(out, observed)
+	}
+	return out
 }
 
 // clearStoreConditions removes legacy data-plane conditions on an upgraded
