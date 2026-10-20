@@ -27,7 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/deckhouse/sds-common-lib/logger"
-
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 )
 

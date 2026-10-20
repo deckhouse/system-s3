@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	goruntime "runtime"
 	"strings"
@@ -322,7 +323,7 @@ func runTerminator(ctx context.Context, log logger.Logger) {
 	if dir := os.Getenv(tlsproxy.EnvBucketsDir); dir != "" {
 		buckets = tlsproxy.NewBuckets(dir)
 		if err := buckets.Load(); err != nil {
-			log.Warn("unable to read the bucket allowlist", logger.Err(err), "dir", dir)
+			log.Warn("unable to read the bucket allowlist", logger.Err(err), slog.String("dir", dir))
 		}
 		go buckets.Run(ctx, log)
 	}

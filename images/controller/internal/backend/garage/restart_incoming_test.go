@@ -41,7 +41,7 @@ func TestTheIncomingClusterStoppedByADisableIsStartedAgain(t *testing.T) {
 	}{
 		{name: "stopped, one replica", ha: false, have: ptr.To(int32(0)), want: replicasNonHA},
 		{name: "stopped, highly available", ha: true, have: ptr.To(int32(0)), want: replicasHA},
-		{name: "running is left alone", ha: true, have: ptr.To(int32(replicasHA)), want: replicasHA},
+		{name: "running is left alone", ha: true, have: ptr.To(replicasHA), want: replicasHA},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			incoming := planeOf(systemStore(), 2, tc.ha, "target")

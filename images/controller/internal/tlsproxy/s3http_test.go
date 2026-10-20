@@ -194,7 +194,7 @@ func TestS3ProxyPassesAwsChunkedUntouched(t *testing.T) {
 		contentSHA, expects string
 	}
 	got := make(chan seen, 1)
-	backend := serveBackend(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := serveBackend(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		got <- seen{b, r.ContentLength, r.Header.Get("Content-Encoding"), r.Header.Get("X-Amz-Decoded-Content-Length"),
 			r.Header.Get("X-Amz-Content-Sha256"), r.Header.Get("Expect")}

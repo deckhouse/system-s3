@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -195,7 +196,7 @@ func (p *Proxy) s3Error(w http.ResponseWriter, r *http.Request, err error) {
 		w.WriteHeader(statusClientClosedRequest)
 		return
 	}
-	p.Log.Warn("Garage behind the terminator did not answer", logger.Err(err), "method", r.Method)
+	p.Log.Warn("Garage behind the terminator did not answer", logger.Err(err), slog.String("method", r.Method))
 	w.WriteHeader(http.StatusBadGateway)
 }
 

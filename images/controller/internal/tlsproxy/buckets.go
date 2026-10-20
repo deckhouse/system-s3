@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,7 +113,7 @@ func (b *Buckets) Run(ctx context.Context, log logger.Logger) {
 			return
 		case <-t.C:
 			if err := b.Load(); err != nil {
-				log.Warn("unable to read the bucket allowlist; keeping the previous one", logger.Err(err), "dir", b.dir)
+				log.Warn("unable to read the bucket allowlist; keeping the previous one", logger.Err(err), slog.String("dir", b.dir))
 			}
 		}
 	}
