@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -154,7 +155,9 @@ func (f failingStateReader) Get(context.Context, client.ObjectKey, client.Object
 }
 
 func TestDriverFailureIsAttachedToTheConcernBeingReconciled(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(rfScheme(t)).Build()
+	// A built data plane, so the pass gets as far as the migration state.
+	claim := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data-system-garage-0", Namespace: "d8-system-s3", Labels: commonLabels(systemStore())}}
+	c := fake.NewClientBuilder().WithScheme(modeScheme(t)).WithObjects(claim).Build()
 	d := testDriver(t, c, "d8-system-s3")
 	d.apiReader = failingStateReader{Reader: c}
 	state, err := d.EnsureStore(context.Background(), systemStore())

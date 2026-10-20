@@ -190,6 +190,21 @@ func (d *Driver) EnsureStore(ctx context.Context, store *backend.Store) (state b
 		return state, nil
 	}
 
+	// Nothing is built for nobody (see first_bucket.go). Before the StorageClass:
+	// a cluster with neither a class nor a consumer has nothing wrong with it yet,
+	// and the missing class is said as a note rather than as a store that fails.
+	//
+	// Before the migration state too, so that a setting changed while there is no
+	// data plane starts nothing: it only changes what the first SystemBucket gets.
+	awaiting, err := d.awaitingFirstBucket(ctx, store)
+	if err != nil {
+		return state, fmt.Errorf("find out whether the data plane is to be built: %w", err)
+	}
+	if awaiting {
+		noDataPlaneConditions(&state, store)
+		return state, nil
+	}
+
 	// No StorageClass, no data plane. The module orders its volumes like any other
 	// workload and has nothing of its own to fall back to: the previous
 	// implementation provisioned hostPath volumes on the control-plane nodes,

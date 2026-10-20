@@ -36,7 +36,9 @@ const namespace = "system_s3"
 
 var (
 	// storeReady is the readiness of the single system data plane, 1 or 0. Same
-	// value as Module/system-s3's StorageReady condition.
+	// value as Module/system-s3's StorageReady condition, except while the store
+	// waits for its first SystemBucket: then there is no series at all (see
+	// ForgetStore).
 	storeReady = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "store_ready",
@@ -409,6 +411,15 @@ func StoreReady(store string, ready bool) {
 		v = 1
 	}
 	storeReady.WithLabelValues(store).Set(v)
+}
+
+// ForgetStore removes the readiness and the capacity of a store that has no data
+// plane. Before the first SystemBucket there is nothing to be ready or to have
+// a capacity, and no series is the honest way to say it: a 0 would read as a
+// store that is down.
+func ForgetStore(store string) {
+	storeReady.DeleteLabelValues(store)
+	storeCapacityBytes.DeleteLabelValues(store)
 }
 
 // StoreCapacityBytes records the store's assigned capacity. Capacity is optional

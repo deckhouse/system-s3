@@ -32,6 +32,8 @@ No user-facing RBAC is granted for the resource: only cluster and storage admini
 
 ## The data plane
 
+The data plane is built when the first `SystemBucket` is created, not when the module is enabled: until a platform component asks for a bucket the module runs only its controller and the credentials endpoint, and `Module/system-s3` reports `StorageReady=False` with the reason `WaitingForFirstBucket`. Once built, the data plane stays — deleting the last `SystemBucket` deletes that bucket, not the store; only deleting the namespace of the disabled module removes it (see [Removing the module](#removing-the-module)). The settings can be changed freely before the first bucket: they decide what is built, and no migration is started.
+
 One Garage cluster, deployed by the controller:
 
 - three replicas with a replication factor of 3 in the platform's high-availability mode. Required pod anti-affinity keeps them on distinct eligible hosts; fewer than three hosts leave replicas Pending rather than co-locating them;
@@ -132,7 +134,10 @@ them so that they can be deleted without it, and they stay with their
 connection ConfigMaps.
 
 Deleting the data is a separate, explicit step: with the module disabled, delete
-the namespace (`kubectl delete namespace d8-system-s3`). What happens to the
+the namespace (`kubectl delete namespace d8-system-s3`). Disabling the module
+removes the `heritage: deckhouse` label from the namespace and the objects in it,
+so a cluster administrator can do this without Deckhouse's own rights; enabling
+the module gives the label back. What happens to the
 volumes behind the claims is then the StorageClass's reclaim policy: `Delete`
 removes them with the objects in them, `Retain` keeps them, but a module enabled
 afterwards does not reattach retained volumes — it starts with an empty store.

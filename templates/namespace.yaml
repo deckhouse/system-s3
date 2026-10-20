@@ -26,7 +26,10 @@ metadata:
     module removes what the chart rendered and stops Garage (the
     050-stop-data-plane-on-module-delete hook); enabling it again finds the store
     as it was. Deleting the data is a separate, explicit step: deleting this
-    namespace once the module is disabled.
+    namespace once the module is disabled. The heritage label the line above
+    puts here would refuse that to anybody but Deckhouse, so the
+    051-release-heritage hook takes it off on the way out and puts it back when
+    the module is enabled again.
   */}}
   annotations:
     helm.sh/resource-policy: keep

@@ -33,6 +33,20 @@ func TestStoreReady(t *testing.T) {
 	}
 }
 
+// A store with no data plane has no series: store_ready == 0 is what pages, and
+// a store nobody asked for yet is not down.
+func TestForgetStore(t *testing.T) {
+	StoreReady("system", false)
+	StoreCapacityBytes("system", nil)
+	ForgetStore("system")
+	if n := testutil.CollectAndCount(storeReady); n != 0 {
+		t.Errorf("store_ready has %d series after ForgetStore", n)
+	}
+	if n := testutil.CollectAndCount(storeCapacityBytes); n != 0 {
+		t.Errorf("store_capacity_bytes has %d series after ForgetStore", n)
+	}
+}
+
 // A capacity that is not reported must publish 0, not the previous reading.
 //
 // Carrying the last known value forward would keep an alert quiet about a store

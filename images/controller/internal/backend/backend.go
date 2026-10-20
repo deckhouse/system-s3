@@ -115,6 +115,16 @@ type StoreState struct {
 	// Ready is true once the data plane is up and serving S3.
 	Ready bool
 
+	// AwaitingFirstBucket is true while the store has no data plane because no
+	// SystemBucket has asked for one yet (see garage/first_bucket.go).
+	//
+	// It is told apart from a store that is not Ready because nothing is wrong in
+	// it. So it publishes no store_ready series — the alert on a store that does
+	// not serve must not page anybody about a store that was never asked to — and
+	// the background loop does not ask a Garage that does not exist for its keys
+	// and its unfinished uploads.
+	AwaitingFirstBucket bool
+
 	// Message is a human-readable explanation of the current state, used as the
 	// condition message (especially while not Ready).
 	Message string

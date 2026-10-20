@@ -143,7 +143,7 @@ func TestModeChangeDoesNotTouchTheRunningCluster(t *testing.T) {
 	// A store already pinned at 3, now asked for one replica.
 	pinnedAtThree := func() *corev1.ConfigMap {
 		return &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{Name: configName(rfStore()), Namespace: ns},
+			ObjectMeta: metav1.ObjectMeta{Name: configName(rfStore()), Namespace: ns, Labels: commonLabels(rfStore())},
 			Data: map[string]string{
 				configFileName: "replication_factor = 3\n",
 				incarnationKey: "1",
@@ -218,7 +218,7 @@ func TestARefusedModeChangeDoesNotResizeTheWorkload(t *testing.T) {
 
 	// Pinned at one replica, asked for the highly available mode.
 	cfg := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: configName(rfStore()), Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: configName(rfStore()), Namespace: ns, Labels: commonLabels(rfStore())},
 		Data: map[string]string{
 			configFileName: "replication_factor = 1\n",
 			incarnationKey: "1",
@@ -259,7 +259,10 @@ func TestARefusedModeChangeDoesNotResizeTheWorkload(t *testing.T) {
 // refusal is only useful if it names what to set.
 func TestNoStorageClassBringsUpNoDataPlane(t *testing.T) {
 	ns := "d8-system-s3"
-	c := fake.NewClientBuilder().WithScheme(modeScheme(t)).Build()
+	// A bucket asks for storage: without one nothing is built anyway, and the
+	// missing class is only a note (see TestNoBucketsAndNoClassSaysBoth).
+	bucket := &v1alpha1.SystemBucket{ObjectMeta: metav1.ObjectMeta{Name: "loki", Namespace: "d8-monitoring"}}
+	c := fake.NewClientBuilder().WithScheme(modeScheme(t)).WithObjects(bucket).Build()
 	d := testDriver(t, c, ns)
 
 	store := &backend.Store{Name: "system", HighAvailability: true} // no StorageClass
@@ -298,7 +301,7 @@ func TestStorageClassChangeDoesNotTouchTheRunningVolumes(t *testing.T) {
 	bound := "sds-local-volume-lvm"
 
 	claim := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "data-" + resourceName(store) + "-0", Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: "data-" + resourceName(store) + "-0", Namespace: ns, Labels: commonLabels(store)},
 		Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: &bound},
 	}
 	cfg := &corev1.ConfigMap{

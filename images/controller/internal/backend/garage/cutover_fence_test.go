@@ -37,7 +37,7 @@ import (
 func TestCutoverFenceWaitsForPodsAndRetainsClaimsAcrossControllerRestart(t *testing.T) {
 	ctx := context.Background()
 	store := planeOf(systemStore(), 1, true, localSC)
-	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: resourceName(store), Namespace: "d8-system-s3"}, Spec: appsv1.StatefulSetSpec{Replicas: ptr.To(int32(3))}}
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: resourceName(store), Namespace: "d8-system-s3", Labels: commonLabels(store)}, Spec: appsv1.StatefulSetSpec{Replicas: ptr.To(int32(3))}}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: resourceName(store) + "-0", Namespace: sts.Namespace, Labels: planeLabels(store)}}
 	claim := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data-" + pod.Name, Namespace: sts.Namespace, UID: "original-data"}}
 	c := fake.NewClientBuilder().WithScheme(coreScheme(t)).WithObjects(sts, pod, claim).Build()

@@ -65,11 +65,12 @@ type storeDriver interface {
 // SystemBucket exists. Bucket reconciles use the cached readiness as a dependency.
 //
 // It converges the data plane from two directions. Every SystemBucket reconcile
-// calls Ensure first, so a consumer arriving before the store is up drives it;
-// and Start ticks in the background, so the store is built and kept converged
-// even when the cluster holds no SystemBucket at all — which is the normal state
-// of a fresh installation, and the one where waiting for a consumer to show up
-// would mean the first consumer waits for a whole Garage bootstrap.
+// calls Ensure first, so the first consumer builds the data plane without
+// waiting for the background tick; and Start ticks in the background, so the
+// store is kept converged when no SystemBucket happens to be reconciling — and
+// kept at all once the last one is deleted. Nothing is built before the first
+// SystemBucket exists (see garage/first_bucket.go); the tick then only says so
+// on Module/system-s3.
 //
 // Ensure is serialized: the ticker and the reconciler both call it, and the
 // driver's reconcile is not safe to run twice concurrently (it pins the
@@ -105,11 +106,10 @@ type StoreManager struct {
 
 	// lastNotReadyMsg and lastNotReadyAt throttle the "still not ready" log.
 	//
-	// The store has no custom resource of its own, so on a cluster with no
-	// SystemBucket yet — the normal state of a fresh installation, and the reason
-	// the background ticker exists — the log is the only place its message can
-	// appear. Logging only readiness transitions meant a store that never came up
-	// said so at most once and then went quiet every thirty seconds forever.
+	// The store has no custom resource of its own, so once the last SystemBucket
+	// is deleted the log is the only place besides Module/system-s3 its message
+	// can appear. Logging only readiness transitions meant a store that never came
+	// up said so at most once and then went quiet every thirty seconds forever.
 	//
 	// Repeating it every pass would be its own problem, so it repeats when the
 	// message changes, and otherwise at most once per notReadyLogInterval.
@@ -224,8 +224,10 @@ func (m *StoreManager) ensureOnce(ctx context.Context) (backend.StoreState, erro
 	case state.Ready != m.state.Ready:
 		m.log.Info("the system object storage changed readiness", "ready", state.Ready, "message", state.Message)
 		m.lastNotReadyMsg, m.lastNotReadyAt = "", time.Time{}
-	case !state.Ready:
-		// Keep a throttled reminder alongside Module conditions and metrics.
+	case !state.Ready && !state.AwaitingFirstBucket:
+		// Keep a throttled reminder alongside Module conditions and metrics. Not
+		// for a store nobody has asked for yet: that is how most clusters stay, and
+		// a warning every five minutes for it would be noise on all of them.
 		if m.shouldRepeatNotReady(state.Message) {
 			m.log.Warn("the system object storage is still not ready", "message", state.Message)
 			m.lastNotReadyMsg, m.lastNotReadyAt = state.Message, m.clock()
@@ -243,8 +245,15 @@ func (m *StoreManager) ensureOnce(ctx context.Context) (backend.StoreState, erro
 // The capacity is also the only consumer of what the driver computes from the
 // assigned layout; before this it was calculated on every pass and dropped.
 func (m *StoreManager) publish(state backend.StoreState) {
-	monitoring.StoreReady(m.store.Name, state.Ready)
 	monitoring.Migration(m.store.Name, state.MigrationPhase, state.MigrationStartedAt)
+	// A store with no data plane has no readiness and no capacity to report, and
+	// a 0 in store_ready would page about it (D8SystemS3StoreNotReady). The series
+	// appear with the data plane.
+	if state.AwaitingFirstBucket {
+		monitoring.ForgetStore(m.store.Name)
+		return
+	}
+	monitoring.StoreReady(m.store.Name, state.Ready)
 
 	var capacity *int64
 	if state.TotalCapacity != nil {
@@ -400,14 +409,20 @@ func (m *StoreManager) Start(ctx context.Context) error {
 	defer ticker.Stop()
 
 	for {
-		if _, err := m.Ensure(ctx); err != nil {
+		state, err := m.Ensure(ctx)
+		if err != nil {
 			// Log and keep ticking: the data plane is reconciled again on the next
 			// tick, and returning an error here would take the whole manager down
 			// over a transient backend failure.
 			m.log.Error("unable to reconcile the system object storage", logger.Err(err))
 		}
-		m.sweep(ctx)
-		m.publishTemporaryKeys(ctx)
+		// The sweeps and the key list are questions to Garage's admin API, and
+		// before the first SystemBucket there is no Garage to ask: every tick
+		// would log a failed call to a Service that does not exist.
+		if !state.AwaitingFirstBucket {
+			m.sweep(ctx)
+			m.publishTemporaryKeys(ctx)
+		}
 		m.publishCertificates(ctx)
 		select {
 		case <-ctx.Done():

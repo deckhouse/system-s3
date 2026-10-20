@@ -1,8 +1,10 @@
 - name: d8.system-s3.store-health
   rules:
-    # The module publishes one series per store and only for a store that exists,
-    # so a cluster without the module has nothing here and these rules stay
-    # silent. None of them carries an absent() arm for that reason.
+    # The module publishes one series per store and only for a store whose data
+    # plane exists, so a cluster without the module, or with the module and no
+    # SystemBucket yet (the data plane is built for the first one), has nothing
+    # here and these rules stay silent. None of them carries an absent() arm for
+    # that reason.
 
     - alert: D8SystemS3StoreNotReady
       # Ten minutes, because the honest causes of a short gap are ordinary: a

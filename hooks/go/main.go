@@ -24,6 +24,7 @@ import (
 	_ "github.com/deckhouse/system-s3/hooks/go/030-remove-finalizers-on-module-delete"
 	_ "github.com/deckhouse/system-s3/hooks/go/040-storage-class"
 	_ "github.com/deckhouse/system-s3/hooks/go/050-stop-data-plane-on-module-delete"
+	_ "github.com/deckhouse/system-s3/hooks/go/051-release-heritage"
 )
 
 func main() {

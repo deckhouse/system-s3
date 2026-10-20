@@ -282,6 +282,8 @@ Shared Garage state is published only in `Module/system-s3.status.conditions`, i
 | `ReplicationReady` | HA mode convergence: `ResizeFreeze`, `ResizeStop`, `ResizePurge`, `ResizeSync`. |
 | `MigrationReady` | StorageClass migration: `Provisioning`, `Copying`, `Verifying`, `Cutover`, `Draining`, `Decommission`. |
 
+Before the first `SystemBucket` there is no data plane: it is built for the first bucket and kept afterwards, also when every bucket is deleted again. In that state `StorageReady` is `False` with the reason `WaitingForFirstBucket` (the message also says if no StorageClass is configured), the other four conditions are `True` with the reason `NoDataPlane`, and the controller publishes no `system_s3_store_ready` or `system_s3_store_capacity_bytes` series, so `D8SystemS3StoreNotReady` does not fire. The first bucket reports `BucketReady=False`, reason `WaitingForDependency`, until the data plane it started is serving. A change of `storageClass` or of the high-availability mode made before the first bucket starts no migration: it only changes what is built.
+
 `False` can mean a normal operation in progress, not only a failure; inspect `reason` and `message`. `Unknown/NotEvaluated` means this reconciliation did not reach the check. Completed operations return to `True`. Conditions show current state, not an event history. On upgrade the controller removes legacy Garage conditions from buckets; replace waits for `SystemBucket.StorageReady` with `Module.StorageReady`.
 
 When nothing is in progress the messages say what the store runs as, so the state can be read from the module alone:
@@ -400,9 +402,10 @@ What is left behind afterwards, and what is not:
 - the `d8-system-s3` namespace stays (`helm.sh/resource-policy: keep`), and with it the data: the Garage StatefulSets, scaled to zero, their `PersistentVolumeClaim`s and the Secrets with the cluster's RPC secret, admin token and node identities, and the module CA (`system-s3-ca`), so the CA in consumers' connection ConfigMaps stays valid. Copier Jobs of a migration that was under way are deleted; the migration resumes from its saved state when the module is enabled again;
 - what the chart rendered goes: the controller, its Services, the credentials endpoint;
 - the `SystemBucket` resources stay, frozen at their last status, and so do their CRDs — disabling a module does not delete either. The module's own finalizers are released on the way out, so they can be deleted by hand;
-- a `SystemBucket` admission webhook configuration left over from an earlier version of the module is removed, because a webhook whose backend is gone would block work with the resources it guarded.
+- a `SystemBucket` admission webhook configuration left over from an earlier version of the module is removed, because a webhook whose backend is gone would block work with the resources it guarded;
+- what stays stops being Deckhouse's: the `heritage: deckhouse` label is removed from the namespace and from every object in it that has it (the module CA among them), and each of them is labelled `system-s3.deckhouse.io/released-heritage: deckhouse` instead. Deckhouse's admission policy `label-objects.deckhouse.io` lets nobody but Deckhouse change or delete an object with `heritage: deckhouse`; without the label, a cluster administrator can delete the namespace with ordinary rights. Every other label of the namespace stays.
 
-Enabling the module again finds the store as it was: the controller scales the StatefulSets back, the cluster comes up on the same volumes, and the buckets and their data are there.
+Enabling the module again finds the store as it was: `heritage: deckhouse` is put back on exactly the objects labelled `released-heritage` (objects created in the namespace meanwhile are left alone), the controller scales the StatefulSets back, the cluster comes up on the same volumes, and the buckets and their data are there.
 
 To delete the data, delete the namespace once the module is disabled:
 
