@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/sds-common-lib/conditions"
 	"github.com/deckhouse/sds-common-lib/logger"
 	v1alpha1 "github.com/deckhouse/system-s3/api/v1alpha1"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
@@ -160,23 +161,56 @@ func TestBucketStatusReportsUsageAndEmptyBucket(t *testing.T) {
 }
 
 func TestANonPlatformNamespaceGetsNothing(t *testing.T) {
-	const ns, name = "tenant-a", "sneaky"
-	drv := &fakeDriver{}
-	tenantNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}
-	r, c := newReconciler(t, drv, tenantNS, bucketFor(ns, name))
-	ctx := context.Background()
+	heritage := map[string]string{"heritage": "deckhouse"}
+	for _, tc := range []struct {
+		name   string
+		ns     string
+		labels map[string]string
+	}{
+		{name: "neither the label nor the name", ns: "tenant-a"},
+		{name: "the label without a platform name", ns: "tenant-a", labels: heritage},
+		{name: "a platform name without the label", ns: "d8-tenant-a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const name = "sneaky"
+			drv := &fakeDriver{}
+			tenantNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: tc.ns, Labels: tc.labels}}
+			r, c := newReconciler(t, drv, tenantNS, bucketFor(tc.ns, name))
+			ctx := context.Background()
 
-	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKey{Namespace: ns, Name: name}}); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	for _, call := range drv.calls {
-		t.Fatalf("the backend was touched for a non-platform namespace: %v", call)
-	}
+			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKey{Namespace: tc.ns, Name: name}}); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			for _, call := range drv.calls {
+				t.Fatalf("the backend was touched for a non-platform namespace: %v", call)
+			}
 
-	cm := &corev1.ConfigMap{}
-	err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: connectionConfigMapName(bucketFor(ns, name))}, cm)
-	if !apierrors.IsNotFound(err) {
-		t.Fatalf("a connection ConfigMap exists in a tenant namespace (err=%v)", err)
+			cm := &corev1.ConfigMap{}
+			err := c.Get(ctx, client.ObjectKey{Namespace: tc.ns, Name: connectionConfigMapName(bucketFor(tc.ns, name))}, cm)
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("a connection ConfigMap exists in a tenant namespace (err=%v)", err)
+			}
+			checkRefusal(t, c, tc.ns, name)
+		})
+	}
+}
+
+// checkRefusal asserts the terminal refusal names both halves of the gate, so
+// an operator knows what a namespace is missing.
+func checkRefusal(t *testing.T, c client.Client, ns, name string) {
+	t.Helper()
+	live := &v1alpha1.SystemBucket{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: name}, live); err != nil {
+		t.Fatal(err)
+	}
+	cond := findCondition(live.Status.Conditions, v1alpha1.SystemBucketConditionBucketReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != conditions.ReasonReconcileFailed {
+		t.Fatalf("BucketReady = %+v, want False/%s", cond, conditions.ReasonReconcileFailed)
+	}
+	for _, want := range []string{"d8-*", "kube-*", "heritage=deckhouse"} {
+		if !strings.Contains(cond.Message, want) {
+			t.Errorf("the refusal does not mention %q: %s", want, cond.Message)
+		}
 	}
 }
 

@@ -26,7 +26,7 @@ That is the whole API, and each omission is deliberate:
 
 ## Who may use it
 
-`SystemBucket` is admitted only in namespaces labelled `heritage: deckhouse` — the label Deckhouse puts on the namespace of every module. The check is on the label rather than on a `d8-*` name, because a name is a convention any tenant could imitate.
+`SystemBucket` is admitted only in a namespace that both carries the label `heritage: deckhouse` — the label Deckhouse puts on the namespace of every module — and has a `d8-*` or `kube-*` name, which only Deckhouse may give a namespace (the `system-ns.deckhouse.io` admission policy). Either alone admitted too much: the label can be put on any namespace by whoever may label namespaces, and the alert rules of the module see only namespaces with such names.
 
 No user-facing RBAC is granted for the resource: only cluster and storage administrators (the `d8:system-capability:system-s3:*` capabilities on DKP 1.78 and later, the `d8:manage:permission:module:system-s3:*` roles below 1.78) can see or edit it.
 

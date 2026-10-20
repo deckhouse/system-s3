@@ -5,7 +5,7 @@ weight: 40
 
 ## Contract for module developers
 
-1. Declare a `SystemBucket` in your module's namespace labelled `heritage: deckhouse`. `spec.size` is a bucket quota, not a dedicated PVC. Deleting the CR destroys its objects: handle this intentionally in your module's lifecycle.
+1. Declare a `SystemBucket` in your module's namespace: a `d8-*` or `kube-*` namespace labelled `heritage: deckhouse`, which is what Deckhouse gives every module. `spec.size` is a bucket quota, not a dedicated PVC. Deleting the CR destroys its objects: handle this intentionally in your module's lifecycle.
 2. Wait for `Ready=True` with `observedGeneration` matching `metadata.generation`, then read the ConfigMap in `status.connectionRef`. Do not hard-code endpoints or assume the ConfigMap exists immediately.
 3. Grant your consumer ServiceAccount `systembuckets/read` and, for writers, `systembuckets/write`, restricted by `resourceNames`. Owning a bucket CR does not grant the consumer access; STS checks TokenReview and SubjectAccessReview.
 4. Mount a projected token with audience `system-s3-sts`, both CAs, and WebIdentity settings from the ConfigMap. Re-read the token file on refresh because kubelet rotates it. Its one-hour example lifetime is independent of the S3 key's maximum thirty minutes.
@@ -264,7 +264,7 @@ The resource keeps a finalizer until the bucket is gone from the backend, so a f
 | `ConnectionReady` | The `ConfigMap` with the connection parameters could not be written. |
 | `Ready` | Aggregate of the above. |
 
-A `SystemBucket` in a namespace without the `heritage: deckhouse` label is created, but the controller does not serve it: nothing is provisioned, and the resource reports `BucketReady=False`, reason `ReconcileFailed`, with the message `namespace "<namespace>" is not a Deckhouse platform namespace (label heritage=deckhouse); the system object storage is not available to it`.
+A `SystemBucket` in a namespace without the `heritage: deckhouse` label, or with a name other than `d8-*` or `kube-*`, is created, but the controller does not serve it: nothing is provisioned, and the resource reports `BucketReady=False`, reason `ReconcileFailed`, with the message `namespace "<namespace>" is not a Deckhouse platform namespace (a d8-* or kube-* name and the label heritage=deckhouse); the system object storage is not available to it`.
 
 Shared Garage state is published only in `Module/system-s3.status.conditions`, including before the first bucket exists. The system-s3 controller does not change Deckhouse conditions (`IsReady`, enablement conditions, etc.) or `Module.status.phase`.
 

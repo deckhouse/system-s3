@@ -5,7 +5,7 @@ weight: 40
 
 ## Контракт для разработчиков модулей
 
-1. Объявите `SystemBucket` в namespace своего модуля с меткой `heritage: deckhouse`. `spec.size` задаёт квоту бакета, не размер выделенного только ему PVC. Удаление CR уничтожает все объекты: жизненный цикл бакета должен быть осознанной частью удаления модуля.
+1. Объявите `SystemBucket` в namespace своего модуля: `d8-*` или `kube-*` с меткой `heritage: deckhouse` — такой Deckhouse создаёт для каждого модуля. `spec.size` задаёт квоту бакета, не размер выделенного только ему PVC. Удаление CR уничтожает все объекты: жизненный цикл бакета должен быть осознанной частью удаления модуля.
 2. Дождитесь `Ready=True` с `observedGeneration`, равной `metadata.generation`, и читайте ConfigMap из `status.connectionRef`. Не фиксируйте endpoint в коде и не рассчитывайте на ConfigMap сразу после создания CR.
 3. Выдайте ServiceAccount потребителя RBAC на `systembuckets/read` и, для записи, `systembuckets/write`, с `resourceNames` только нужных бакетов. STS проверяет TokenReview и SubjectAccessReview; сам факт владения CR не даёт прав потребителю.
 4. Подключите projected token с audience `system-s3-sts`, оба CA и параметры WebIdentity из ConfigMap. Читайте файл токена заново при обновлении ключа: kubelet заменяет его. Срок projected token (в примере час) независим от срока S3-ключа — не более 30 минут.
@@ -263,7 +263,7 @@ kubectl -n d8-monitoring delete systembucket loki
 | `ConnectionReady` | Не удалось записать `ConfigMap` с параметрами подключения. |
 | `Ready` | Агрегат перечисленного выше. |
 
-`SystemBucket` в namespace без лейбла `heritage: deckhouse` создаётся, но контроллер его не обслуживает: ничего не выделяется, а ресурс показывает `BucketReady=False`, reason `ReconcileFailed`, с сообщением `namespace "<namespace>" is not a Deckhouse platform namespace (label heritage=deckhouse); the system object storage is not available to it`.
+`SystemBucket` в namespace без лейбла `heritage: deckhouse` или с именем не вида `d8-*`/`kube-*` создаётся, но контроллер его не обслуживает: ничего не выделяется, а ресурс показывает `BucketReady=False`, reason `ReconcileFailed`, с сообщением `namespace "<namespace>" is not a Deckhouse platform namespace (a d8-* or kube-* name and the label heritage=deckhouse); the system object storage is not available to it`.
 
 Общие состояния Garage публикуются только в `Module/system-s3.status.conditions`, в том числе до создания первого бакета. Условия Deckhouse (`IsReady`, причины включения и другие) контроллер system-s3 не изменяет; фаза `Module.status.phase` также остаётся под управлением платформы.
 

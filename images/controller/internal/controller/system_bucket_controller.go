@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -241,8 +243,8 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 		// The text keeps saying what is actually wrong; only the reason is the one
 		// the phase derivation understands.
 		status.Set(v1alpha1.SystemBucketConditionBucketReady, metav1.ConditionFalse, conditions.ReasonReconcileFailed,
-			fmt.Sprintf("namespace %q is not a Deckhouse platform namespace (label %s=%s); the system object storage is not available to it",
-				bucket.Namespace, v1alpha1.LabelHeritage, v1alpha1.HeritageDeckhouse))
+			fmt.Sprintf("namespace %q is not a Deckhouse platform namespace (a %s* name and the label %s=%s); the system object storage is not available to it",
+				bucket.Namespace, strings.Join(platformNamespacePrefixes, "* or "), v1alpha1.LabelHeritage, v1alpha1.HeritageDeckhouse))
 		status.GateAfter(v1alpha1.SystemBucketConditionBucketReady)
 		return r.finish(ctx, bucket, status, observed, nil)
 	}
@@ -325,12 +327,25 @@ func (r *SystemBucketReconciler) reconcileNormal(ctx context.Context, bucket *v1
 	return r.finish(ctx, bucket, status, observed, nil)
 }
 
+// platformNamespacePrefixes are the names of the namespaces Deckhouse keeps for
+// itself: the system-ns.deckhouse.io admission policy refuses anybody but
+// Deckhouse creating one, and observability passes the alerts of tier: cluster
+// rules only for these (and upmeter-*, which nothing protects).
+var platformNamespacePrefixes = []string{"d8-", "kube-"}
+
 // platformNamespace reports whether the namespace is one a Deckhouse module
-// owns, which is what makes it eligible for the system object storage. The check
-// is the heritage: deckhouse label helm_lib stamps on every module namespace —
-// not a d8-* name pattern, which a tenant can imitate by naming its own
-// namespace that way.
+// owns, which is what makes it eligible for the system object storage. Both
+// must hold: the heritage: deckhouse label helm_lib stamps on every module
+// namespace, and a name only Deckhouse may give a namespace.
+//
+// Either alone admitted too much. The label can be put on any namespace by
+// whoever may label namespaces, and the name pattern alone is what a cluster
+// without the admission policy would let a tenant imitate. A bucket admitted on
+// the label alone also got no alerts: the alert rules see only these names.
 func (r *SystemBucketReconciler) platformNamespace(ctx context.Context, name string) (bool, error) {
+	if !slices.ContainsFunc(platformNamespacePrefixes, func(p string) bool { return strings.HasPrefix(name, p) }) {
+		return false, nil
+	}
 	ns := &corev1.Namespace{}
 	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, ns); err != nil {
 		if apierrors.IsNotFound(err) {
