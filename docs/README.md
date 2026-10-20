@@ -12,6 +12,26 @@ The `system-s3` module provides the **system** S3 object storage for Deckhouse c
 
 It is not a storage service for applications. Workloads get their object storage from the `sds-object` module, which offers the user-facing backends; this module exists so platform components have somewhere to put their data without waiting for that one, and it is deliberately the smaller of the two.
 
+## What it does and what it does not
+
+What the module does:
+
+- gives a platform component a bucket for a `SystemBucket`, with a quota on bytes and on objects, and the connection parameters in a `ConfigMap`;
+- hands out short-lived credentials through STS for a ServiceAccount token, under ordinary RBAC;
+- runs one replica, or three in the highly available mode, and switches between them on the same data;
+- moves the store to another StorageClass with every object checked, holding writes only for the switch-over;
+- grows the volumes with the buckets' sizes and when a replica fills up;
+- reports its state in the conditions of `Module/system-s3`, in metrics, alerts and Grafana dashboards, and on the console page.
+
+What it does not do:
+
+- serve applications: their object storage comes from `sds-object`;
+- issue long-lived keys;
+- keep object versions or lock objects (Object Lock): Garage implements neither;
+- use an external S3 store: the data is always in the module's own Garage cluster;
+- shrink volumes, or keep a bucket's data once its `SystemBucket` is deleted;
+- cap the CPU, memory, disk or network the store uses on its nodes: give it nodes of its own with the `system-s3` role instead (see [The data plane](#the-data-plane)).
+
 ## Custom resource
 
 | Resource | Scope | Purpose |
