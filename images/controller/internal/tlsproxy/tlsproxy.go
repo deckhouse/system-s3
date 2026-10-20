@@ -20,16 +20,22 @@ limitations under the License.
 //
 // Garage has no TLS of its own — its listeners take an address and nothing else,
 // and its documentation says to put a reverse proxy in front for TLS. The proxy
-// is this code rather than an nginx or an envoy for two reasons: it is one
-// binary the module already builds, scans and ships, so the data plane gains no
-// component to keep patched; and it does not need to understand HTTP at all.
+// is this code rather than an nginx or an envoy because it is one binary the
+// module already builds, scans and ships, so the data plane gains no component
+// to keep patched.
 //
-// It works at the TCP level. A connection is accepted, the TLS handshake is
-// done, and the plaintext is copied to Garage on the loopback interface and
-// back. Nothing is parsed, so nothing about S3 can be broken by it: the Host
-// header a SigV4 signature covers, chunked uploads, presigned URLs, range reads
-// and long streams all pass through byte for byte. Garage itself listens on
-// 127.0.0.1 only, so this is the only way into it from outside the pod.
+// The admin API is carried at the TCP level. A connection is accepted, the TLS
+// handshake is done, and the plaintext is copied to Garage on the loopback
+// interface and back. Nothing is parsed, so nothing can be broken by it.
+//
+// S3 is carried as HTTP (s3http.go), because the one thing an operator asks of
+// the traffic that TCP cannot answer — which bucket it was for — is inside the
+// request, and Garage counts nothing per bucket. Reading the request is all the
+// proxy does with it: the Host header and the request target a SigV4 signature
+// covers go to Garage as the client sent them, and bodies are streamed, not
+// buffered. EnvS3HTTP puts S3 back on the TCP copy if that ever has to be ruled
+// out. Garage itself listens on 127.0.0.1 only, so the terminator is the only
+// way into it from outside the pod.
 package tlsproxy
 
 import (
@@ -62,7 +68,30 @@ const (
 	EnvRoutes   = "TLS_ROUTES"
 	EnvCertFile = "TLS_CERT_FILE"
 	EnvKeyFile  = "TLS_KEY_FILE"
+
+	// EnvS3Listen is the listen address, one of EnvRoutes, that carries S3 and
+	// is served as HTTP; empty means every route is a TCP copy.
+	EnvS3Listen = "TLS_S3_LISTEN"
+	// EnvS3HTTP set to "false" serves the S3 route as a TCP copy, the way it was
+	// served before the terminator read requests: no per-bucket metrics, and
+	// nothing between the client and Garage that could be suspected of changing
+	// a request. Anything else, including unset, is the HTTP proxy.
+	EnvS3HTTP = "TLS_S3_HTTP"
+	// EnvS3RootDomain is Garage's s3_api.root_domain: a Host under it names the
+	// bucket (virtual-host addressing), the way Garage reads it.
+	EnvS3RootDomain = "TLS_S3_ROOT_DOMAIN"
+	// EnvBucketsDir is the directory of the bucket allowlist (see buckets.go).
+	EnvBucketsDir = "TLS_BUCKETS_DIR"
 )
+
+// S3ListenFromEnv is the S3 route to serve as HTTP, as getenv configures it:
+// EnvS3Listen, unless EnvS3HTTP turns the HTTP proxy off.
+func S3ListenFromEnv(getenv func(string) string) string {
+	if getenv(EnvS3HTTP) == "false" {
+		return ""
+	}
+	return getenv(EnvS3Listen)
+}
 
 const (
 	// handshakeTimeout bounds how long a client may take to finish the TLS
@@ -105,13 +134,18 @@ func ParseRoutes(raw string) ([]Route, error) {
 
 // Proxy terminates TLS on every route.
 //
-// Metrics, when set, count the traffic of every route, and MetricsListen is where
-// they are served (see EnvMetricsListen).
+// S3Listen is the route served as HTTP (see EnvS3Listen); S3RootDomain and
+// Buckets are what it names buckets by. Metrics, when set, count the traffic of
+// every route, and MetricsListen is where they are served (see EnvMetricsListen).
 type Proxy struct {
 	Routes   []Route
 	CertFile string
 	KeyFile  string
 	Log      logger.Logger
+
+	S3Listen     string
+	S3RootDomain string
+	Buckets      *Buckets
 
 	Metrics       *Metrics
 	MetricsListen string
@@ -147,11 +181,17 @@ func (p *Proxy) Run(ctx context.Context) error {
 		}
 		p.Log.Info("terminating TLS", "listen", r.Listen, "backend", r.Backend)
 		lm := p.Metrics.listener(listenPort(r.Listen))
+		serve := func(client *tls.Conn) { p.pipeTo(client, r.Backend, lm) }
+		if p.S3Listen != "" && r.Listen == p.S3Listen {
+			s3 := p.startS3(r.Backend, ln.Addr(), lm)
+			defer s3.Close()
+			serve = s3.serve
+		}
 		wg.Add(1)
-		go func(r Route, ln net.Listener) {
+		go func(ln net.Listener) {
 			defer wg.Done()
-			errs <- p.serve(ctx, ln, r.Backend, cfg, lm)
-		}(r, ln)
+			errs <- p.serve(ctx, ln, cfg, lm, serve)
+		}(ln)
 		go func(ln net.Listener) {
 			<-ctx.Done()
 			_ = ln.Close()
@@ -175,7 +215,9 @@ func (p *Proxy) Run(ctx context.Context) error {
 	return first
 }
 
-func (p *Proxy) serve(ctx context.Context, ln net.Listener, backend string, cfg *tls.Config, lm *listenerMetrics) error {
+// serve accepts connections on ln and gives each one, once its handshake is
+// done, to handle.
+func (p *Proxy) serve(ctx context.Context, ln net.Listener, cfg *tls.Config, lm *listenerMetrics, handle func(*tls.Conn)) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -188,13 +230,17 @@ func (p *Proxy) serve(ctx context.Context, ln net.Listener, backend string, cfg 
 			}
 			return fmt.Errorf("accept on %s: %w", ln.Addr(), err)
 		}
-		go p.handle(conn, backend, cfg, lm)
+		go func() {
+			if client := p.handshake(conn, cfg, lm); client != nil {
+				handle(client)
+			}
+		}()
 	}
 }
 
-func (p *Proxy) handle(raw net.Conn, backend string, cfg *tls.Config, lm *listenerMetrics) {
-	defer raw.Close()
-
+// handshake does the TLS handshake on raw and returns the connection, or nil
+// after closing raw when the handshake fails.
+func (p *Proxy) handshake(raw net.Conn, cfg *tls.Config, lm *listenerMetrics) *tls.Conn {
 	client := tls.Server(raw, cfg)
 	_ = raw.SetDeadline(time.Now().Add(handshakeTimeout))
 	if err := client.Handshake(); err != nil {
@@ -202,12 +248,19 @@ func (p *Proxy) handle(raw net.Conn, backend string, cfg *tls.Config, lm *listen
 		// that does not trust the CA each produce one of these, and none of them
 		// is something an operator can act on from this side.
 		p.Log.Debug("TLS handshake failed", logger.Err(err), slog.String("remote", raw.RemoteAddr().String()))
-		return
+		_ = raw.Close()
+		return nil
 	}
 	_ = raw.SetDeadline(time.Time{})
 	if lm != nil {
 		lm.connections.Inc()
 	}
+	return client
+}
+
+// pipeTo copies the client's connection to backend and back, byte for byte.
+func (p *Proxy) pipeTo(client *tls.Conn, backend string, lm *listenerMetrics) {
+	defer client.NetConn().Close()
 
 	conn, err := net.DialTimeout("tcp", backend, dialTimeout)
 	if err != nil {

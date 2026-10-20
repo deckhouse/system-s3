@@ -309,7 +309,18 @@ The traffic is counted by the TLS terminator in each Garage pod, which every cli
 | `system_s3_proxy_sent_bytes_total` | `port` | Bytes clients received. |
 | `system_s3_proxy_connections_total` | `port` | Client connections that completed the TLS handshake. |
 
-The bytes are plaintext HTTP, headers included, and grow while a transfer runs rather than when it ends. Replication between replicas is not in them, and there is no breakdown by bucket: the terminator does not read the requests.
+The bytes are plaintext HTTP, headers included, and grow while a transfer runs rather than when it ends. Replication between replicas is not in them.
+
+S3 requests are also counted per bucket. These series carry `bucket`, `namespace` and `name` — the bucket and its `SystemBucket`, as in `system_s3_bucket_*` — in addition to `job`, `pod`, `node`, `store` and `incarnation`, and no `port`:
+
+| Metric | Labels | Value |
+|--------|--------|-------|
+| `system_s3_proxy_bucket_requests_total` | `method`, `code` | Requests. `method` is `GET`, `HEAD`, `PUT`, `POST`, `DELETE`, `OPTIONS` or `other`; `code` is the status class: `2xx`, `3xx`, `4xx` or `5xx`. A request Garage did not answer is `5xx` (the client gets 502); one whose client went away first is `4xx`. |
+| `system_s3_proxy_bucket_received_bytes_total` | | Request body bytes clients sent: object data uploaded. |
+| `system_s3_proxy_bucket_sent_bytes_total` | | Response body bytes clients received: object data downloaded. |
+| `system_s3_proxy_bucket_request_duration_seconds` | | Histogram of the time from a request's headers to the end of its response, body transfer included. |
+
+Only the buckets of existing `SystemBucket` resources are named. A request to any other bucket is counted as `bucket="_other"` with empty `namespace` and `name`, and a request that names no bucket, such as `ListBuckets`, as `bucket="_none"`, so a client cannot add series by inventing bucket names. A new `SystemBucket` is counted as `_other` for its first minute or two, until the list in the Garage pods is updated.
 
 To inspect the storage itself:
 

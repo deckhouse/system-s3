@@ -723,6 +723,103 @@
       }
     },
     {
+      "type": "timeseries",
+      "title": "S3 traffic, by bucket",
+      "description": "system_s3_proxy_bucket_received_bytes_total and system_s3_proxy_bucket_sent_bytes_total: object bytes clients uploaded to and downloaded from each SystemBucket, counted by the TLS terminator. Bodies only, without headers. A bucket the controller has not published yet, and any name it does not know, is _other; requests that name no bucket are _none.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 38
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (namespace, name, bucket) (rate(system_s3_proxy_bucket_received_bytes_total{job=\"system-s3-tls-terminator\", store=~\"$store\", incarnation=~\"$incarnation\"}[$__rate_interval]))",
+          "legendFormat": "from clients {{namespace}}/{{name}} ({{bucket}})",
+          "refId": "A"
+        },
+        {
+          "expr": "-sum by (namespace, name, bucket) (rate(system_s3_proxy_bucket_sent_bytes_total{job=\"system-s3-tls-terminator\", store=~\"$store\", incarnation=~\"$incarnation\"}[$__rate_interval]))",
+          "legendFormat": "to clients {{namespace}}/{{name}} ({{bucket}})",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "S3 requests per second, by bucket and status",
+      "description": "system_s3_proxy_bucket_requests_total: S3 requests to each SystemBucket, by status class, counted by the TLS terminator. A 4xx is a request Garage refused; a 5xx is Garage failing, or not answering at all (the terminator's 502).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$ds_prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (namespace, name, bucket, code) (rate(system_s3_proxy_bucket_requests_total{job=\"system-s3-tls-terminator\", store=~\"$store\", incarnation=~\"$incarnation\"}[$__rate_interval]))",
+          "legendFormat": "{{namespace}}/{{name}} ({{bucket}}) {{code}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
       "type": "row",
       "title": "Data blocks",
       "collapsed": false,
@@ -730,7 +827,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 46
       },
       "panels": []
     },
@@ -742,7 +839,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 39
+        "y": 47
       },
       "datasource": {
         "type": "prometheus",
@@ -793,7 +890,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 39
+        "y": 47
       },
       "datasource": {
         "type": "prometheus",
@@ -844,7 +941,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 47
+        "y": 55
       },
       "datasource": {
         "type": "prometheus",
@@ -890,7 +987,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 47
+        "y": 55
       },
       "datasource": {
         "type": "prometheus",
@@ -936,7 +1033,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 55
+        "y": 63
       },
       "panels": []
     },
@@ -948,7 +1045,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 56
+        "y": 64
       },
       "datasource": {
         "type": "prometheus",
@@ -994,7 +1091,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 56
+        "y": 64
       },
       "datasource": {
         "type": "prometheus",

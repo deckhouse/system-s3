@@ -57,7 +57,7 @@ func TestVPAFollowsItsPlane(t *testing.T) {
 		store := systemStore()
 		store.Incarnation = incarnation
 		sts := buildStatefulSet(store, "d8-system-s3", "garage:img", "hash", testVolumeSize)
-		withTLSTerminator(sts, "controller:img", "garage-tls")
+		withTLSTerminator(sts, "controller:img", "garage-tls", "system-garage-bucket-owners")
 		vpa := buildVPA(store, "d8-system-s3")
 
 		if vpa.GetName() != sts.Name {

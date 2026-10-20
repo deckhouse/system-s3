@@ -311,11 +311,24 @@ func runTerminator(ctx context.Context, log logger.Logger) {
 		log.Error("the TLS terminator cannot start", logger.Err(err))
 		os.Exit(1)
 	}
+	// Without the directory every bucket is counted as "_other"; that is a gap in
+	// the metrics, not a reason to keep S3 down.
+	var buckets *tlsproxy.Buckets
+	if dir := os.Getenv(tlsproxy.EnvBucketsDir); dir != "" {
+		buckets = tlsproxy.NewBuckets(dir)
+		if err := buckets.Load(); err != nil {
+			log.Warn("unable to read the bucket allowlist", logger.Err(err), "dir", dir)
+		}
+		go buckets.Run(ctx, log)
+	}
 	p := &tlsproxy.Proxy{
 		Routes:        routes,
 		CertFile:      os.Getenv(tlsproxy.EnvCertFile),
 		KeyFile:       os.Getenv(tlsproxy.EnvKeyFile),
 		Log:           log,
+		S3Listen:      tlsproxy.S3ListenFromEnv(os.Getenv),
+		S3RootDomain:  os.Getenv(tlsproxy.EnvS3RootDomain),
+		Buckets:       buckets,
 		Metrics:       tlsproxy.NewMetrics(),
 		MetricsListen: os.Getenv(tlsproxy.EnvMetricsListen),
 		MetricsToken:  os.Getenv(tlsproxy.EnvMetricsToken),

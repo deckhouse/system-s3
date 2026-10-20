@@ -31,13 +31,21 @@ import (
 // only byte counters are block reads and writes on the node's disk, which count
 // every replica's copy and the resync alongside what clients sent. Every
 // client connection passes through the terminator, so it counts the bytes clients
-// sent and received — per listener, which separates S3 from the admin API. Not per
-// bucket: the bucket is inside the HTTP request, and the terminator does not read
-// HTTP.
+// sent and received — per listener, which separates S3 from the admin API. These
+// are of plaintext HTTP, headers included.
 //
-// The counts are of plaintext HTTP, headers included, and grow as the bytes flow
-// rather than when a connection closes: a multi-gigabyte upload is a steady line
-// on a graph, not one step at the end.
+// On the S3 route it also counts per bucket: requests by method and status class,
+// the body bytes of requests and responses, and how long a request took from its
+// headers to the last byte of its response. The bucket labels come from the
+// allowlist (buckets.go), never from the request, and the method and status are
+// reduced to a handful of values, so a client cannot grow the series count.
+// The duration includes the body transfer, so a large object over a slow link is
+// a long request; it is a measure of what the client experienced, not of
+// Garage's latency alone.
+//
+// Every byte counter grows as the bytes flow rather than when a connection or a
+// request ends: a multi-gigabyte upload is a steady line on a graph, not one step
+// at the end.
 const (
 	// EnvMetricsListen is where the terminator serves its /metrics, over TLS
 	// with the data plane's certificate; empty means it does not serve them.
@@ -54,7 +62,16 @@ type Metrics struct {
 	received    *prometheus.CounterVec
 	sent        *prometheus.CounterVec
 	connections *prometheus.CounterVec
+
+	bucketRequests *prometheus.CounterVec
+	bucketReceived *prometheus.CounterVec
+	bucketSent     *prometheus.CounterVec
+	bucketDuration *prometheus.HistogramVec
 }
+
+// bucketLabels are the labels every per-bucket metric carries, the same as the
+// controller's system_s3_bucket_* metrics, so that the two join on them.
+var bucketLabels = []string{"bucket", "namespace", "name"}
 
 // NewMetrics registers the terminator's counters.
 func NewMetrics() *Metrics {
@@ -76,7 +93,29 @@ func NewMetrics() *Metrics {
 			Help:      "Client connections that completed the TLS handshake, by listener port.",
 		}, []string{"port"}),
 	}
-	m.registry.MustRegister(m.received, m.sent, m.connections)
+	m.bucketRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "system_s3",
+		Name:      "proxy_bucket_requests_total",
+		Help:      "S3 requests through the TLS terminator, by bucket, method and status class.",
+	}, append(append([]string{}, bucketLabels...), "method", "code"))
+	m.bucketReceived = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "system_s3",
+		Name:      "proxy_bucket_received_bytes_total",
+		Help:      "S3 request body bytes the TLS terminator passed from clients to Garage, by bucket.",
+	}, bucketLabels)
+	m.bucketSent = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "system_s3",
+		Name:      "proxy_bucket_sent_bytes_total",
+		Help:      "S3 response body bytes the TLS terminator passed from Garage to clients, by bucket.",
+	}, bucketLabels)
+	m.bucketDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "system_s3",
+		Name:      "proxy_bucket_request_duration_seconds",
+		Help:      "Time from an S3 request's headers to the end of its response, body transfer included, by bucket.",
+		Buckets:   []float64{.005, .025, .1, .25, 1, 5, 30},
+	}, bucketLabels)
+	m.registry.MustRegister(m.received, m.sent, m.connections,
+		m.bucketRequests, m.bucketReceived, m.bucketSent, m.bucketDuration)
 	return m
 }
 
@@ -108,6 +147,23 @@ func (m *Metrics) listener(port string) *listenerMetrics {
 
 type listenerMetrics struct {
 	received, sent, connections prometheus.Counter
+}
+
+// bucket returns the per-bucket metrics of one bucket; nil ones when m is nil.
+func (m *Metrics) bucket(bucket, namespace, name string) bucketMetrics {
+	if m == nil {
+		return bucketMetrics{}
+	}
+	return bucketMetrics{
+		received: m.bucketReceived.WithLabelValues(bucket, namespace, name),
+		sent:     m.bucketSent.WithLabelValues(bucket, namespace, name),
+		duration: m.bucketDuration.WithLabelValues(bucket, namespace, name),
+	}
+}
+
+type bucketMetrics struct {
+	received, sent prometheus.Counter
+	duration       prometheus.Observer
 }
 
 // counting adds every byte written through it to c.

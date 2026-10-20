@@ -367,11 +367,11 @@ rpc_bind_addr = "[::]:%d"
 [s3_api]
 s3_region = "garage"
 api_bind_addr = "127.0.0.1:%d"
-root_domain = ".s3.garage"
+root_domain = "%s"
 
 [admin]
 api_bind_addr = "127.0.0.1:%d"
-`, dataMountPath, dataMountPath, rf, rpcPort, garageS3Loopback, garageAdminLoopback)
+`, dataMountPath, dataMountPath, rf, rpcPort, garageS3Loopback, garageRootDomain, garageAdminLoopback)
 }
 
 // buildConfigMap returns the ConfigMap holding garage.toml with the given

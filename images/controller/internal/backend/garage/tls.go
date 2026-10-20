@@ -23,6 +23,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 	"github.com/deckhouse/system-s3/images/controller/internal/tlsclient"
@@ -53,7 +54,17 @@ const (
 	tlsMountPath = "/etc/garage-tls"
 
 	terminatorContainer = "tls-terminator"
+
+	// bucketsVolume is the bucket-owner record (bucket_owners.go), and
+	// bucketsMountPath where the terminator reads it as its allowlist of the
+	// buckets its metrics may name.
+	bucketsVolume    = "bucket-owners"
+	bucketsMountPath = "/etc/garage-buckets"
 )
+
+// garageRootDomain is Garage's s3_api.root_domain: a Host under it names the
+// bucket. The terminator is told it too, to read the bucket the way Garage does.
+const garageRootDomain = ".s3.garage"
 
 // garageServerName is the name the data plane's certificate is verified for.
 //
@@ -121,6 +132,11 @@ func terminatorSidecar(image string) corev1.Container {
 				s3Port, garageS3Loopback, adminPort, garageAdminLoopback)},
 			{Name: tlsproxy.EnvCertFile, Value: tlsMountPath + "/tls.crt"},
 			{Name: tlsproxy.EnvKeyFile, Value: tlsMountPath + "/tls.key"},
+			// S3 is served as HTTP, to count it per bucket; the admin API stays a
+			// TCP copy.
+			{Name: tlsproxy.EnvS3Listen, Value: fmt.Sprintf("[::]:%d", s3Port)},
+			{Name: tlsproxy.EnvS3RootDomain, Value: garageRootDomain},
+			{Name: tlsproxy.EnvBucketsDir, Value: bucketsMountPath},
 			{Name: tlsproxy.EnvMetricsListen, Value: fmt.Sprintf("[::]:%d", proxyMetricsPort)},
 			// The token that opens Garage's /metrics opens these too: the PodMonitor
 			// scrapes both with the one Secret it already has.
@@ -140,25 +156,47 @@ func terminatorSidecar(image string) corev1.Container {
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: tlsVolume, MountPath: tlsMountPath, ReadOnly: true},
+			// The whole volume and not a subPath: a subPath mount is never updated,
+			// and the list changes with every SystemBucket created or deleted.
+			{Name: bucketsVolume, MountPath: bucketsMountPath, ReadOnly: true},
 		},
-		// Copying bytes costs little memory; the CPU is the TLS itself, and it
-		// scales with the traffic rather than with anything this request could
-		// predict, so there is no limit to throttle it by.
+		// Proxying costs little memory, bodies being streamed; the CPU is the TLS
+		// itself, and it scales with the traffic rather than with anything this
+		// request could predict, so there is no limit to throttle it by.
 		Resources:       corev1.ResourceRequirements{Requests: terminatorRequests()},
 		SecurityContext: hardenedRoot(),
 	}
 }
 
 // withTLSTerminator puts the terminator into the data plane's pod template,
-// together with the certificate it serves.
+// together with the certificate it serves and the bucket-owner record
+// bucketsConfigMap it names buckets by.
 //
-// The certificate is not part of anything the pods roll on: a renewal replaces
-// the files in the mounted Secret and the terminator picks them up on the next
-// handshake, so renewing a certificate never restarts a replica.
-func withTLSTerminator(sts *appsv1.StatefulSet, image, secretName string) {
+// Neither is part of anything the pods roll on: a renewal replaces the files in
+// the mounted Secret and the terminator picks them up on the next handshake, and
+// a new bucket reaches it the same way, so neither renewing a certificate nor
+// creating a SystemBucket restarts a replica.
+func withTLSTerminator(sts *appsv1.StatefulSet, image, secretName, bucketsConfigMap string) {
 	spec := &sts.Spec.Template.Spec
 	spec.Containers = append(spec.Containers, terminatorSidecar(image))
-	spec.Volumes = append(spec.Volumes, tlsSecretVolume(secretName))
+	spec.Volumes = append(spec.Volumes, tlsSecretVolume(secretName), bucketsConfigMapVolume(bucketsConfigMap))
+}
+
+// bucketsConfigMapVolume is the bucket-owner record as a pod volume.
+//
+// Optional, because the record is created by the first claim and a data plane
+// comes up before any SystemBucket has one; the kubelet fills the volume in once
+// the ConfigMap exists.
+func bucketsConfigMapVolume(name string) corev1.Volume {
+	return corev1.Volume{
+		Name: bucketsVolume,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: name},
+				Optional:             ptr.To(true),
+			},
+		},
+	}
 }
 
 // tlsSecretVolume is the certificate Secret as a pod volume.

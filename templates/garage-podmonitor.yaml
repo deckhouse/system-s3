@@ -25,6 +25,10 @@
   received through it, per listener port, which Garage does not count (see
   internal/tlsproxy/metrics.go). Same TLS, same token; a job of its own, so that
   the rules about Garage's metrics going missing do not count the terminator.
+  Its per-bucket series carry the SystemBucket's own namespace label, the same
+  as the controller's system_s3_bucket_* series, so the target's namespace
+  label is dropped there: kept, it would push the SystemBucket's namespace
+  aside into exported_namespace and leave every series saying d8-system-s3.
 
   Unready pods are scraped too, on purpose. A Garage pod is ready when its node
   holds a role in the layout and reaches enough peers, so a cluster that lost
@@ -82,7 +86,7 @@ spec:
           key: ca.crt
       serverName: system-garage.d8-{{ .Chart.Name }}.svc
     relabelings:
-    - regex: endpoint|container
+    - regex: endpoint|container|namespace
       action: labeldrop
     - targetLabel: job
       replacement: system-s3-tls-terminator
