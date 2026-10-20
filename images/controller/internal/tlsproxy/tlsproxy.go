@@ -150,6 +150,9 @@ type Proxy struct {
 	Metrics       *Metrics
 	MetricsListen string
 	MetricsToken  string
+
+	// Ready, when set, is served at ReadyPath on MetricsListen.
+	Ready *Readiness
 }
 
 // Run serves every route until ctx is cancelled or a listener fails.
@@ -326,6 +329,9 @@ func (p *Proxy) serveMetrics(ctx context.Context, lc *net.ListenConfig, cfg *tls
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", p.Metrics.Handler(p.MetricsToken))
+	if p.Ready != nil {
+		mux.Handle(ReadyPath, p.Ready)
+	}
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: handshakeTimeout}
 	go func() {
 		<-ctx.Done()

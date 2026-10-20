@@ -18,6 +18,7 @@ package garage
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,7 +74,7 @@ func TestGarageListensOnTheLoopbackOnly(t *testing.T) {
 // loopback listeners, with the certificate mounted.
 func TestTerminatorIsInThePod(t *testing.T) {
 	sts := buildStatefulSet(systemStore(), "d8-system-s3", "garage:v1", "hash", testVolumeSize)
-	withTLSTerminator(sts, "controller:v1", "garage-tls", "system-garage-bucket-owners")
+	withTLSTerminator(sts, "controller:v1", "garage-tls", "system-garage", "system-garage-bucket-owners")
 	spec := sts.Spec.Template.Spec
 
 	var term *corev1.Container
@@ -226,7 +227,7 @@ func TestTerminatorAllowlistIsTheBucketOwners(t *testing.T) {
 	}
 
 	sts := buildStatefulSet(store, ns, "garage:v1", "hash", testVolumeSize)
-	withTLSTerminator(sts, "controller:v1", "garage-tls", bucketOwnersName(store))
+	withTLSTerminator(sts, "controller:v1", "garage-tls", secretName(store), bucketOwnersName(store))
 	var cmName string
 	for _, v := range sts.Spec.Template.Spec.Volumes {
 		if v.Name == bucketsVolume && v.ConfigMap != nil {
@@ -261,13 +262,25 @@ func TestTerminatorAllowlistIsTheBucketOwners(t *testing.T) {
 	}
 }
 
-// TestReadinessGoesThroughTheTerminator: the probe is HTTPS on the admin port,
-// which is the terminator's. A plaintext probe would never get an answer.
+// TestReadinessGoesThroughTheTerminator: the probe is HTTPS on the terminator's
+// own port, and the terminator is told where to ask Garage and with what token.
+// A plaintext probe would never get an answer.
 func TestReadinessGoesThroughTheTerminator(t *testing.T) {
 	c := garageContainer("garage:v1")
 	get := c.ReadinessProbe.HTTPGet
-	if get == nil || get.Scheme != corev1.URISchemeHTTPS || get.Port.IntValue() != adminPort {
-		t.Fatalf("readiness probe %+v, want HTTPS on %d", get, adminPort)
+	if get == nil || get.Scheme != corev1.URISchemeHTTPS || get.Port.IntValue() != proxyMetricsPort {
+		t.Fatalf("readiness probe %+v, want HTTPS on %d", get, proxyMetricsPort)
+	}
+	env := map[string]corev1.EnvVar{}
+	for _, e := range terminatorSidecar("controller:v1", "system-garage").Env {
+		env[e.Name] = e
+	}
+	if got := env[tlsproxy.EnvReadyBackend].Value; got != fmt.Sprintf("127.0.0.1:%d", garageAdminLoopback) {
+		t.Errorf("%s = %q, want Garage's admin API on the loopback", tlsproxy.EnvReadyBackend, got)
+	}
+	ref := env[tlsproxy.EnvAdminToken].ValueFrom
+	if ref == nil || ref.SecretKeyRef == nil || ref.SecretKeyRef.Name != "system-garage" || ref.SecretKeyRef.Key != secretKeyAdmin {
+		t.Errorf("%s = %+v, want the admin token of the pod's own cluster", tlsproxy.EnvAdminToken, ref)
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
+	"github.com/deckhouse/system-s3/images/controller/internal/tlsproxy"
 )
 
 // testVolumeSize is the volume size the fixtures build a StatefulSet with; the
@@ -348,13 +349,13 @@ func TestReadinessProbeReportsClusterMembership(t *testing.T) {
 		t.Fatal("the data plane has no readiness probe")
 	}
 	if probe.HTTPGet == nil {
-		t.Fatalf("readiness probe is %+v, want an HTTP check on /health", probe.ProbeHandler)
+		t.Fatalf("readiness probe is %+v, want an HTTP check on %s", probe.ProbeHandler, tlsproxy.ReadyPath)
 	}
-	if probe.HTTPGet.Path != "/health" {
-		t.Errorf("readiness probes %q, want /health", probe.HTTPGet.Path)
+	if probe.HTTPGet.Path != tlsproxy.ReadyPath {
+		t.Errorf("readiness probes %q, want %s: /health alone lets a node with empty tables take traffic", probe.HTTPGet.Path, tlsproxy.ReadyPath)
 	}
-	if got := probe.HTTPGet.Port.IntValue(); got != int(adminPort) {
-		t.Errorf("readiness probes port %d, want the admin port %d", got, adminPort)
+	if got := probe.HTTPGet.Port.IntValue(); got != int(proxyMetricsPort) {
+		t.Errorf("readiness probes port %d, want the terminator's port %d", got, proxyMetricsPort)
 	}
 	// Becoming ready waits on the controller's next pass rather than on this
 	// process, so the probe has to allow for it instead of restarting.

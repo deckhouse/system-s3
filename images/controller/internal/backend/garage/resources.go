@@ -34,6 +34,7 @@ import (
 
 	v1alpha1 "github.com/deckhouse/system-s3/api/v1alpha1"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
+	"github.com/deckhouse/system-s3/images/controller/internal/tlsproxy"
 )
 
 // Port numbers used by the Garage processes.
@@ -549,20 +550,30 @@ func garageContainer(image string) corev1.Container {
 			// assigned at a pod's own address (see ensureMeshAndLayout), so the
 			// deadlock is gone and the probe can say what it should.
 			//
-			// No token: /health is the one admin endpoint Garage serves
-			// unauthenticated, exactly so that a probe can use it.
+			// /health alone let a replica that came back on an empty volume take
+			// traffic within a minute, while its bucket and key tables were still
+			// empty: Garage resolves both from the local copy, and the requests the
+			// Service sent there failed with NoSuchBucket until the peers had pushed
+			// their entries to it. So the probe asks the TLS terminator's /ready,
+			// which asks /health and, until the node has caught up once, compares its
+			// table sizes with its peers' (tlsproxy.Readiness).
 			//
-			// Through the TLS terminator, which is the only way to the admin API from
-			// outside the pod. The kubelet does not verify the certificate of an HTTPS
-			// probe, and does not need to: it is asking its own pod. A terminator that
-			// is down fails the probe too, which is right — the node is not reachable.
+			// No token: /ready is served without one, so the kubelet can use it. It
+			// says only whether the node is ready, and why not.
+			//
+			// The kubelet does not verify the certificate of an HTTPS probe, and does
+			// not need to: it is asking its own pod. A terminator that is down fails
+			// the probe too, which is right — the node is not reachable.
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
-					Path:   "/health",
-					Port:   intstr.FromInt32(adminPort),
+					Path:   tlsproxy.ReadyPath,
+					Port:   intstr.FromInt32(proxyMetricsPort),
 					Scheme: corev1.URISchemeHTTPS,
 				},
 			},
+			// The comparison asks every node over Garage's RPC; one second, the
+			// default, is too short for that on a busy cluster.
+			TimeoutSeconds: 5,
 			// Generous, because becoming ready waits on the controller's next pass
 			// rather than on this process: the pod starts, answers 503 until the
 			// layout reaches it, and that is a normal first minute rather than a

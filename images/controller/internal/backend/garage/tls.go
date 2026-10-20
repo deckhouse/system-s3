@@ -121,8 +121,9 @@ func (d *Driver) tlsConfigured() error {
 	return nil
 }
 
-// terminatorSidecar is the TLS terminator in the Garage pod.
-func terminatorSidecar(image string) corev1.Container {
+// terminatorSidecar is the TLS terminator in the Garage pod. adminSecret is the
+// Secret of the cluster the pod belongs to, which holds Garage's admin token.
+func terminatorSidecar(image, adminSecret string) corev1.Container {
 	return corev1.Container{
 		Name:  terminatorContainer,
 		Image: image,
@@ -147,6 +148,16 @@ func terminatorSidecar(image string) corev1.Container {
 				},
 			}},
 			{Name: tlsproxy.EnvGarageMetaDir, Value: dataMountPath + "/meta"},
+			// /ready asks Garage's admin API on the loopback how complete this
+			// node's tables are (tlsproxy.Readiness), which takes the admin token.
+			// Garage in the same pod reads that token from the same Secret.
+			{Name: tlsproxy.EnvReadyBackend, Value: fmt.Sprintf("127.0.0.1:%d", garageAdminLoopback)},
+			{Name: tlsproxy.EnvAdminToken, ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: adminSecret},
+					Key:                  secretKeyAdmin,
+				},
+			}},
 		},
 		// The ports every client dials. They are declared here, on the container
 		// that listens on them, and the Services reach them by number.
@@ -183,9 +194,9 @@ func terminatorSidecar(image string) corev1.Container {
 // the mounted Secret and the terminator picks them up on the next handshake, and
 // a new bucket reaches it the same way, so neither renewing a certificate nor
 // creating a SystemBucket restarts a replica.
-func withTLSTerminator(sts *appsv1.StatefulSet, image, secretName, bucketsConfigMap string) {
+func withTLSTerminator(sts *appsv1.StatefulSet, image, secretName, adminSecret, bucketsConfigMap string) {
 	spec := &sts.Spec.Template.Spec
-	spec.Containers = append(spec.Containers, terminatorSidecar(image))
+	spec.Containers = append(spec.Containers, terminatorSidecar(image, adminSecret))
 	spec.Volumes = append(spec.Volumes, tlsSecretVolume(secretName), bucketsConfigMapVolume(bucketsConfigMap))
 }
 

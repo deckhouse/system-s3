@@ -736,7 +736,7 @@ func (d *Driver) ensureWorkload(ctx context.Context, store *backend.Store, cfgHa
 
 	sts := buildStatefulSet(store, d.namespace, d.image, cfgHash, volumeSize)
 	withPlacement(sts, d.placement)
-	withTLSTerminator(sts, d.copierImage, d.tlsSecret, bucketOwnersName(store))
+	withTLSTerminator(sts, d.copierImage, d.tlsSecret, secretName(store), bucketOwnersName(store))
 	if err := d.apply(ctx, sts); err != nil {
 		return false, "", fmt.Errorf("ensure statefulset: %w", err)
 	}
