@@ -1,0 +1,17 @@
+date: "2026-10-21"
+
+summary: "First release of system-s3, the platform's own S3 object storage: Deckhouse components get buckets with quotas and short-lived credentials without waiting for a storage system of their own."
+highlights:
+  - "A `SystemBucket` in a `d8-*` or `kube-*` namespace gets a bucket with a quota on bytes and on objects, and a `ConfigMap` with the connection parameters; a component exchanges its ServiceAccount token at the STS endpoint for keys that live 15 to 30 minutes, under ordinary RBAC."
+  - "The store is a Garage 2.4.1 cluster that is created with the first `SystemBucket`, runs one replica or three in the highly available mode, moves to another StorageClass with every object checked, and grows its volumes with the buckets."
+  - "The state of the store is reported in the conditions of `Module/system-s3`, in metrics, alerts and two Grafana dashboards."
+
+new_features:
+  - "`SystemBucket` (`storage.deckhouse.io/v1alpha1`): `spec.size` is the bucket's quota, and its object quota is derived from it; `spec.bucketName` is optional. Usage, quotas and readiness are in `status`. Deleting a `SystemBucket` deletes the bucket and its objects."
+  - "Access is granted on the virtual subresources `systembuckets/read` and `systembuckets/write`; no long-lived keys are written anywhere, and a bucket allows at most 50 unexpired keys at a time."
+  - "Module settings `storageClass` and `highAvailability`: when not set, they follow `global.modules.storageClass` (or the cluster's default StorageClass) and `global.highAvailability` (or whether the control plane is highly available). Switching between one and three replicas happens on the same data; changing the StorageClass moves the store to a new Garage cluster, holding writes only for the switch-over."
+  - "Replicas run on nodes with the `node-role.deckhouse.io/system-s3` role if the cluster has any, otherwise on system nodes, otherwise on masters."
+  - "Volumes are sized from the sum of all bucket quotas plus a reserve for metadata, and grow by 5 GiB when a replica's volume is nearly full."
+  - "Module conditions `StorageReady`, `PlacementReady`, `CapacityReady`, `ReplicationReady` and `MigrationReady` describe the store, its placement, its capacity and any operation in progress, with copy progress during a migration."
+  - "Metrics of the controller, the Garage replicas and the TLS terminator in front of them, including traffic, requests and errors per bucket; alerts on an unavailable or degraded store, full buckets and volumes, refused credentials, stalled background work and expiring certificates; Grafana dashboards System S3 and System S3 Garage."
+  - "Disabling the module stops the store and keeps its data and certificates; the namespace is released so that a user can delete it to remove the data. Enabling the module again brings the store back with its data."
