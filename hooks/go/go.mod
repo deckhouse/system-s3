@@ -6,7 +6,7 @@ require (
 	github.com/deckhouse/deckhouse/pkg/log v0.0.0-20250814094423-e9f108b41a1a
 	github.com/deckhouse/module-sdk v0.7.0
 	github.com/google/cel-go v0.29.0
-	github.com/itchyny/gojq v0.12.17
+	github.com/itchyny/gojq v0.12.19
 	github.com/tidwall/gjson v1.18.0
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.34.1
