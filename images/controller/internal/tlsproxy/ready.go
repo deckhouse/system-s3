@@ -179,7 +179,8 @@ func tablesCaughtUp(self, all nodeTables) error {
 	}
 	var id string
 	var local map[string]uint64
-	for id, local = range self {
+	for nodeID, tables := range self {
+		id, local = nodeID, tables
 	}
 	for peer, tables := range all {
 		if peer == id {

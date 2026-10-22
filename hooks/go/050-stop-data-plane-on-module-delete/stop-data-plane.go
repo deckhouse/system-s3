@@ -47,7 +47,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/sds-common-lib/kubeclient"
-
 	"github.com/deckhouse/system-s3/hooks/go/consts"
 )
 
