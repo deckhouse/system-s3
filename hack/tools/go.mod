@@ -28,7 +28,7 @@ tool (
 )
 
 require (
-	github.com/deckhouse/deckhouse/pkg/crd-enricher v0.0.3-0.20260825165152-c9d98f54c23d // indirect
+	github.com/deckhouse/deckhouse/pkg/crd-enricher v0.0.3-0.20261021060718-1b552a2a1642 // indirect
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.7.0 // indirect
 	github.com/go-logr/logr v1.4.2 // indirect
