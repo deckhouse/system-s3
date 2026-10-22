@@ -1,0 +1,5 @@
+date: "2026-10-22"
+
+summary: "system-s3 is published for the CE, SE and SE+ editions as well as for EE and FE."
+highlights:
+  - "Clusters on CE, SE and SE+ can enable the module and use `SystemBucket`; until now it was published for EE and FE only. Every edition gets the same module."
