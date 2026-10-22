@@ -1,6 +1,7 @@
 module github.com/deckhouse/system-s3/images/controller
 
 go 1.27.2
+
 require (
 	github.com/deckhouse/sds-common-lib v0.15.0
 	github.com/deckhouse/system-s3/api v0.0.0
@@ -10,7 +11,7 @@ require (
 	k8s.io/api v0.34.1
 	k8s.io/apimachinery v0.34.1
 	k8s.io/client-go v0.34.1
-	k8s.io/utils v0.0.0-20250604170112-4c0f3b243397
+	k8s.io/utils v0.0.0-20260707023825-cf1189d6abe3
 	sigs.k8s.io/controller-runtime v0.20.4
 	sigs.k8s.io/yaml v1.6.0
 )
