@@ -1,0 +1,24 @@
+{{- if .Values.global.enabledModules | has "admission-policy-engine-crd" }}
+---
+apiVersion: deckhouse.io/v1alpha1
+kind: SecurityPolicyException
+metadata:
+  name: garage
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "garage")) | nindent 2 }}
+spec:
+  securityContext:
+    runAsUser:
+      allowedValues:
+        - 0
+      metadata:
+        description: |
+          Allow running as root (UID 0) for the Garage data plane: the garage and restore-node-key containers of the Garage StatefulSet and the Job that removes the saved layout when the replica count changes.
+          Garage owns its metadata and data directories on the replica volume, and the files of existing installations belong to root. On a StorageClass whose volumes ignore fsGroup, such as a hostPath one, a non-root process could not write to them. No capabilities are kept.
+    runAsNonRoot:
+      allowedValue: false
+      metadata:
+        description: |
+          Allow running as root for the Garage data plane: the garage and restore-node-key containers of the Garage StatefulSet and the Job that removes the saved layout when the replica count changes.
+          Garage owns its metadata and data directories on the replica volume, and the files of existing installations belong to root.
+{{- end }}

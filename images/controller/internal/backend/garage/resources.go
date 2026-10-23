@@ -52,6 +52,11 @@ const (
 	proxyMetricsPortName = "proxy-metrics"
 )
 
+const (
+	securityPolicyExceptionLabel  = "security.deckhouse.io/security-policy-exception"
+	garageSecurityPolicyException = "garage"
+)
+
 // Fixed paths inside the Garage container.
 const (
 	dataMountPath  = "/var/lib/garage"
@@ -236,6 +241,12 @@ const incarnationLabel = "storage.deckhouse.io/incarnation"
 func planeLabels(store *backend.Store) map[string]string {
 	labels := commonLabels(store)
 	labels[incarnationLabel] = strconv.FormatInt(int64(planeIncarnation(store)), 10)
+	return labels
+}
+
+func podTemplateLabels(store *backend.Store) map[string]string {
+	labels := planeLabels(store)
+	labels[securityPolicyExceptionLabel] = garageSecurityPolicyException
 	return labels
 }
 
@@ -816,7 +827,7 @@ func buildStatefulSet(store *backend.Store, namespace, image, cfgHash string, vo
 			Selector: &metav1.LabelSelector{MatchLabels: commonLabels(store)},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels:      planeLabels(store),
+					Labels:      podTemplateLabels(store),
 					Annotations: map[string]string{annConfigHash: cfgHash},
 				},
 				Spec: spec,

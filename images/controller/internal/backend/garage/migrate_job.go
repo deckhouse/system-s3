@@ -479,7 +479,7 @@ func (d *Driver) buildCopyJob(
 						Image:           d.copierImage,
 						Args:            []string{migrator.Command},
 						Env:             env,
-						SecurityContext: copierSecurityContext(),
+						SecurityContext: nonRootSecurityContext(),
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: tlsVolume, MountPath: tlsMountPath, ReadOnly: true},
 						},
@@ -503,11 +503,11 @@ func migrationSecretRef(store *backend.Store, key string) *corev1.EnvVarSource {
 	}
 }
 
-// copierSecurityContext is the copier's. Unlike the Garage container next to it,
-// this one owns no files and needs no user of its own: it makes HTTP calls. So it
-// runs as a nobody, which is the strictest thing that still starts a static Go
-// binary.
-func copierSecurityContext() *corev1.SecurityContext {
+// nonRootSecurityContext is the copier's and the TLS terminator's. Unlike the
+// Garage container, neither owns files or needs a user of its own: they make and
+// serve HTTP calls. So they run as a nobody, which is the strictest thing that
+// still starts a static Go binary.
+func nonRootSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		RunAsUser:                ptr.To[int64](64535),
 		RunAsGroup:               ptr.To[int64](64535),

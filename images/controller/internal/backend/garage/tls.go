@@ -182,7 +182,7 @@ func terminatorSidecar(image, adminSecret string) corev1.Container {
 		// itself, and it scales with the traffic rather than with anything this
 		// request could predict, so there is no limit to throttle it by.
 		Resources:       corev1.ResourceRequirements{Requests: terminatorRequests()},
-		SecurityContext: hardenedRoot(),
+		SecurityContext: nonRootSecurityContext(),
 	}
 }
 

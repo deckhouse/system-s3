@@ -596,6 +596,7 @@ func (d *Driver) buildPurgeJob(store *backend.Store, name string) *batchv1.Job {
 	// it among them.
 	podLabels := commonLabels(store)
 	podLabels["app.kubernetes.io/name"] = "garage-purge-layout"
+	podLabels[securityPolicyExceptionLabel] = garageSecurityPolicyException
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: d.namespace, Labels: commonLabels(store)},
 		Spec: batchv1.JobSpec{
