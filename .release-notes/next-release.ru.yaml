@@ -4,6 +4,9 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
+fixes:
+  - "Алерт `D8SystemS3NodeDiskSaturated` работает с Prometheus 3. Чтение и запись блоков Garage складывались через один селектор по обеим метрикам, а Prometheus 3 отклоняет такой запрос с ошибкой `vector cannot contain metrics with the same labelset`, поэтому после перехода Deckhouse на Prometheus 3 алерт перестал бы срабатывать. Теперь чтение и запись выбираются по отдельности; алерт срабатывает на тех же узлах, с теми же порогами и задержкой, и на Prometheus 2, и на Prometheus 3."
+
 # Необязательные разделы — пустые не оставлять, а удалять.
 # new_features: []
 # improvements: []

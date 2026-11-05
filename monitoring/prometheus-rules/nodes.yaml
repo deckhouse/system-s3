@@ -113,7 +113,11 @@
         label_replace(
           max by (node) (rate(node_disk_io_time_seconds_total{job="node-exporter"}[5m])) > 0.9
           and on (node)
-          sum by (node) (rate({__name__=~"block_bytes_written|block_bytes_read", job="system-s3-garage"}[5m])) > 10 * 1024 * 1024,
+          sum by (node) (
+            label_replace(rate(block_bytes_written{job="system-s3-garage"}[5m]), "direction", "write", "", "")
+            or
+            label_replace(rate(block_bytes_read{job="system-s3-garage"}[5m]), "direction", "read", "", "")
+          ) > 10 * 1024 * 1024,
           "namespace", "d8-system-s3", "", ""
         )
       for: 15m
