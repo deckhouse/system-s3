@@ -4,8 +4,6 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
-fixes:
-  - "The `D8SystemS3NodeDiskSaturated` alert now works with Prometheus 3. It added up the block reads and writes of Garage through one selector over both metrics, and Prometheus 3 rejects that query with `vector cannot contain metrics with the same labelset`, so once Deckhouse moved to Prometheus 3 the alert would never have fired. The reads and writes are now selected separately; the alert fires on the same nodes, with the same thresholds and delay, on Prometheus 2 and 3."
 
 # Optional sections — delete rather than leave empty.
 # new_features: []

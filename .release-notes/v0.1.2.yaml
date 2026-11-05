@@ -1,0 +1,17 @@
+date: "2026-11-05"
+
+summary: "The Garage data plane keeps starting once DKP 1.79 enforces the Pod Security Standards, and the disk saturation alert works with Prometheus 3."
+
+highlights:
+  - "The module ships a `SecurityPolicyException` for the Garage data plane, so its Pods keep starting when DKP 1.79 switches the Pod Security Standards of system namespaces from warning to denial."
+  - "`D8SystemS3NodeDiskSaturated` works with Prometheus 3."
+
+fixes:
+  - "The `D8SystemS3NodeDiskSaturated` alert now works with Prometheus 3. It added up the block reads and writes of Garage through one selector over both metrics, and Prometheus 3 rejects that query with `vector cannot contain metrics with the same labelset`, so once Deckhouse moved to Prometheus 3 the alert would never have fired. The reads and writes are now selected separately; the alert fires on the same nodes, with the same thresholds and delay, on Prometheus 2 and 3."
+
+security:
+  - "The Garage StatefulSet and the Job that removes the saved layout keep running as root, which is now allowed by the `garage` SecurityPolicyException and nothing else: the data on existing replica volumes belongs to root, and `fsGroup` does not apply to the hostPath volumes of local-path StorageClasses. The TLS terminator now runs as UID 64535."
+  - "`golang.org/x/net` v0.62.0 (CVE-2026-78661, CVE-2026-97045) and `github.com/klauspost/compress` v1.18.7 (CVE-2026-63209); `github.com/docker/distribution` is no longer part of the hooks (CVE-2026-85747)."
+
+upgrade_notes:
+  - "Nothing has to be done by hand. The exception is created when the `admission-policy-engine-crd` module is enabled."

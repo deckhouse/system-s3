@@ -1,0 +1,17 @@
+date: "2026-11-05"
+
+summary: "Плоскость данных Garage продолжает запускаться, когда DKP 1.79 начинает требовать Pod Security Standards, а алерт о насыщении диска работает с Prometheus 3."
+
+highlights:
+  - "Модуль поставляет исключение `SecurityPolicyException` для плоскости данных Garage, поэтому её поды продолжают запускаться, когда DKP 1.79 переводит Pod Security Standards системных пространств имён из предупреждения в запрет."
+  - "`D8SystemS3NodeDiskSaturated` работает с Prometheus 3."
+
+fixes:
+  - "Алерт `D8SystemS3NodeDiskSaturated` работает с Prometheus 3. Чтение и запись блоков Garage складывались через один селектор по обеим метрикам, а Prometheus 3 отклоняет такой запрос с ошибкой `vector cannot contain metrics with the same labelset`, поэтому после перехода Deckhouse на Prometheus 3 алерт перестал бы срабатывать. Теперь чтение и запись выбираются по отдельности; алерт срабатывает на тех же узлах, с теми же порогами и задержкой, и на Prometheus 2, и на Prometheus 3."
+
+security:
+  - "StatefulSet Garage и Job, удаляющий сохранённую раскладку, по-прежнему работают от root, и теперь это разрешено исключением SecurityPolicyException `garage` и только им: данные на существующих томах реплик принадлежат root, а `fsGroup` не применяется к hostPath-томам StorageClass с local-path. TLS-терминатор теперь работает от UID 64535."
+  - "`golang.org/x/net` v0.62.0 (CVE-2026-78661, CVE-2026-97045) и `github.com/klauspost/compress` v1.18.7 (CVE-2026-63209); `github.com/docker/distribution` больше не входит в хуки (CVE-2026-85747)."
+
+upgrade_notes:
+  - "Вручную ничего делать не нужно. Исключение создаётся, если включён модуль `admission-policy-engine-crd`."
