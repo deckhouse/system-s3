@@ -1,32 +1,37 @@
 {{- if eq (include "system-s3.rbacv2_new_scheme" .) "true" }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  labels:
-    heritage: deckhouse
-    module: system-s3
-    rbac.deckhouse.io/aggregate-to-storage-as: manager
-    rbac.deckhouse.io/kind: capability
-    rbac.deckhouse.io/capability: "system-capability.system-s3.edit"
-    rbac.deckhouse.io/scope: system
-    rbac.deckhouse.io/namespace: d8-system-s3
   name: d8:system-capability:system-s3:edit
+  {{- include "helm_lib_module_labels" (list . (dict "rbac.deckhouse.io/aggregate-to-storage-as" "manager" "rbac.deckhouse.io/capability" "system-capability.system-s3.edit" "rbac.deckhouse.io/kind" "capability" "rbac.deckhouse.io/namespace" "d8-system-s3" "rbac.deckhouse.io/scope" "system")) | nindent 2 }}
   annotations:
-    en.meta.deckhouse.io/title: "Module system-s3: manage resources"
-    ru.meta.deckhouse.io/title: "Модуль system-s3: управление ресурсами"
-    en.meta.deckhouse.io/description: "Create, update and delete the SystemBucket resources of the system-s3 module in all namespaces."
-    ru.meta.deckhouse.io/description: "Создание, изменение и удаление ресурсов SystemBucket модуля system-s3 во всех пространствах имён."
+    en.meta.deckhouse.io/description: "Manage the system-s3 module configuration."
+    en.meta.deckhouse.io/title: "Module system-s3: edit configuration"
+    ru.meta.deckhouse.io/description: "Управление конфигурацией модуля system-s3."
+    ru.meta.deckhouse.io/title: "Модуль system-s3: управление конфигурацией"
 rules:
-  - apiGroups:
-      - storage.deckhouse.io
-    resources:
-      - systembuckets
-    verbs:
-      - create
-      - update
-      - patch
-      - delete
-      - deletecollection
+- apiGroups:
+  - deckhouse.io
+  resources:
+  - moduleconfigs
+  resourceNames:
+  - system-s3
+  verbs:
+  - create
+  - delete
+  - patch
+  - update
+- apiGroups:
+  - storage.deckhouse.io
+  resources:
+  - systembuckets
+  verbs:
+  - create
+  - delete
+  - deletecollection
+  - patch
+  - update
 {{- else }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
