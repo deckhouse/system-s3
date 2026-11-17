@@ -416,7 +416,7 @@ func (d *Driver) saveMigrationState(ctx context.Context, store *backend.Store, s
 }
 
 func (d *Driver) updateGrantState(ctx context.Context, store *backend.Store, change func(*corev1.ConfigMap) error) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	return backend.RetryOnConflict(retry.DefaultRetry, func() error {
 		cm := &corev1.ConfigMap{}
 		err := d.apiReader.Get(ctx, client.ObjectKey{Namespace: d.namespace, Name: migrationStateName(store)}, cm)
 		missing := apierrors.IsNotFound(err)

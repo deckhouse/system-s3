@@ -28,7 +28,7 @@
   asks it again whether they may use the bucket they named. Creating those two
   reviews is a delegation of authority, not authority of its own — the answer
   comes from the cluster's RBAC, and the endpoint cannot widen it. The same pair
-  is already granted to the kube-rbac-proxy sidecar through d8:rbac-proxy for the
+  is already granted to the controller through d8:rbac-proxy for the
   metrics port; it is stated here explicitly rather than inherited, because a
   binding that exists for a different reason is a thing that can be removed for
   that reason.
@@ -54,13 +54,11 @@
   commentary in this header block.
 */ -}}
 {{- /*
-  controllerMetricsProxyPort is not used as a port here. It is how
-  helm_lib_module_controller_rbac learns that the pod carries a kube-rbac-proxy in
-  front of the metrics, and therefore needs the ClusterRoleBinding to d8:rbac-proxy
-  that lets the sidecar create the TokenReview and SubjectAccessReview every scrape
-  is authorised with. Keep it in step with the value given to
-  helm_lib_module_controller_manifests: without it the proxy fails closed on every
-  scrape and the only symptom is up == 0 and a permanent TargetDown.
+  controllerMetricsProxyPort is not used as a port here. It makes
+  helm_lib_module_controller_rbac bind the controller to d8:rbac-proxy, which lets
+  the controller create the TokenReview and SubjectAccessReview every scrape is
+  authorised with. Without it every scrape fails and the only symptom is up == 0
+  and a permanent TargetDown.
 */ -}}
 {{- $rbacConfig := dict
   "controllerMetricsProxyPort" (int .Values.systemS3.internal.controllerMetricsProxyPort)

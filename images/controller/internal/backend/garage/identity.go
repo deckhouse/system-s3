@@ -197,7 +197,7 @@ func (d *Driver) ensureNodeIdentitySecret(ctx context.Context, store *backend.St
 // stable). Retries on write conflict.
 func (d *Driver) storeNodeIdentities(ctx context.Context, store *backend.Store, captured map[string][]byte) error {
 	key := client.ObjectKey{Namespace: d.namespace, Name: nodeIdentitySecretName(store)}
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	return backend.RetryOnConflict(retry.DefaultBackoff, func() error {
 		secret := &corev1.Secret{}
 		// apiReader, not the cache. RetryOnConflict re-reads on every attempt, and
 		// the whole point of re-reading is to get the version the conflict was

@@ -266,7 +266,7 @@ func (d *Driver) clearPlacementAttempts(ctx context.Context, store *backend.Stor
 // not an error: the config apply creates it later in the same pass, and the
 // bookkeeping is re-derived on the next one.
 func (d *Driver) mutatePlacementAttempt(ctx context.Context, store *backend.Store, mutate func(map[string]string) bool) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	return backend.RetryOnConflict(retry.DefaultRetry, func() error {
 		cm := &corev1.ConfigMap{}
 		key := client.ObjectKey{Namespace: d.namespace, Name: configName(store)}
 		if err := d.apiReader.Get(ctx, key, cm); err != nil {

@@ -60,7 +60,7 @@ func bucketOwnersName(store *backend.Store) string {
 // that owner.
 func (d *Driver) claimBucket(ctx context.Context, store *backend.Store, name, owner string) (string, error) {
 	var conflict string
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	err := backend.RetryOnConflict(retry.DefaultRetry, func() error {
 		conflict = ""
 
 		cm := &corev1.ConfigMap{}
@@ -122,7 +122,7 @@ func (d *Driver) bucketOwner(ctx context.Context, store *backend.Store, name str
 // SystemBucket that never owned the bucket must not release somebody else's
 // claim on its way out.
 func (d *Driver) releaseBucket(ctx context.Context, store *backend.Store, name, owner string) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	return backend.RetryOnConflict(retry.DefaultRetry, func() error {
 		cm := &corev1.ConfigMap{}
 		key := client.ObjectKey{Namespace: d.namespace, Name: bucketOwnersName(store)}
 		if err := d.apiReader.Get(ctx, key, cm); err != nil {

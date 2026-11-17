@@ -40,6 +40,7 @@ import (
 
 	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/sds-common-lib/monitoring"
+	"github.com/deckhouse/sds-common-lib/monitoring/metricsauth"
 	v1alpha1 "github.com/deckhouse/system-s3/api/v1alpha1"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend"
 	"github.com/deckhouse/system-s3/images/controller/internal/backend/garage"
@@ -144,7 +145,7 @@ func main() {
 	managerOpts := manager.Options{
 		Scheme:                  scheme,
 		HealthProbeBindAddress:  cfgParams.HealthProbeBindAddress,
-		Metrics:                 metricsserver.Options{BindAddress: cfgParams.MetricsBindAddress},
+		Metrics:                 metricsauth.ApplyFromEnv(metricsserver.Options{BindAddress: cfgParams.MetricsBindAddress}),
 		LeaderElection:          true,
 		LeaderElectionNamespace: cfgParams.ControllerNamespace,
 		LeaderElectionID:        config.DefaultControllerName,
@@ -178,6 +179,7 @@ func main() {
 		GracefulShutdownTimeout: ptr.To(10 * time.Second),
 		Logger:                  baseLog.GetLogger(),
 		Cache: cache.Options{
+			DefaultTransform: cache.TransformStripManagedFields(),
 			ByObject: map[client.Object]cache.ByObject{
 				// Only the Secrets this module writes itself.
 				//

@@ -245,7 +245,7 @@ func TestRenderedChartKeepsEveryRBACObject(t *testing.T) {
 		// The controller's own permissions, and the binding that grants them.
 		"ClusterRole/d8:system-s3:controller":        "",
 		"ClusterRoleBinding/d8:system-s3:controller": "d8:system-s3:controller",
-		// What lets kube-rbac-proxy authenticate a metrics scrape.
+		// What lets the controller authorize a metrics scrape.
 		"ClusterRoleBinding/d8:system-s3:controller:rbac-proxy": "d8:rbac-proxy",
 	}
 

@@ -82,9 +82,8 @@
   vertical-pod-autoscaler, which ships the CRD itself: the standalone -crd module
   lib-helm still tests for was removed in Deckhouse 1.65.
 
-  controllerMetricsPort is the loopback port the manager serves /metrics on; the
-  port that is actually published belongs to the kube-rbac-proxy sidecar
-  (controllerMetricsProxyPort) and reaches the ServiceMonitor through
+  controllerMetricsProxyPort is the port the controller serves /metrics on, over
+  HTTPS (controllerMetricsPort is not used); it reaches the ServiceMonitor through
   the "webhooks" Service rendered by helm_lib_module_webhook_service below.
 */ -}}
 {{- $dataPlaneNodeSelector := (include "helm_lib_node_selector" (tuple . "system") | fromYaml).nodeSelector | default dict -}}
@@ -103,6 +102,7 @@
   "webhookEnabled" false
   "controllerMetricsPort" (int .Values.systemS3.internal.controllerMetricsPort)
   "controllerMetricsProxyPort" (int .Values.systemS3.internal.controllerMetricsProxyPort)
+  "controllerMetricsInProcessAuthorization" true
   "additionalControllerEnvs" (list
     (dict "name" "GARAGE_IMAGE" "value" (include "helm_lib_module_image" (list . "garage")))
     (dict "name" "CONTROLLER_IMAGE" "value" (include "helm_lib_module_image" (list . "controller")))

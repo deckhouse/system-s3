@@ -42,7 +42,7 @@ type moduleStatusPublisher struct {
 }
 
 func (p *moduleStatusPublisher) Publish(ctx context.Context, state backend.StoreState) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	return backend.RetryOnConflict(retry.DefaultRetry, func() error {
 		module := &unstructured.Unstructured{}
 		module.SetGroupVersionKind(moduleGVK)
 		if err := p.reader.Get(ctx, client.ObjectKey{Name: systemS3ModuleName}, module); err != nil {

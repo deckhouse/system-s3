@@ -20,6 +20,7 @@ import (
 	"maps"
 	"slices"
 
+	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -91,7 +92,7 @@ func (p Placement) admits(node *corev1.Node) bool {
 		if taint.Effect == corev1.TaintEffectPreferNoSchedule {
 			continue
 		}
-		if !slices.ContainsFunc(p.Tolerations, func(t corev1.Toleration) bool { return t.ToleratesTaint(taint) }) {
+		if !slices.ContainsFunc(p.Tolerations, func(t corev1.Toleration) bool { return t.ToleratesTaint(logr.Discard(), taint, false) }) {
 			return false
 		}
 	}
