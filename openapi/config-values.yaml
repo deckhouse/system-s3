@@ -49,11 +49,15 @@ properties:
     type: string
     x-examples: ["ceph-csi-rbd", "localpath-system"]
     description: |
-      StorageClass the system object storage orders its volumes from — one
-      PersistentVolumeClaim per Garage replica.
+      StorageClass for the data of the system object storage itself: the
+      volumes of its Garage replicas, one PersistentVolumeClaim per replica.
+      It does not set the StorageClass of the platform's other system
+      components, which follow `defaultClusterStorageClass` of the `global`
+      ModuleConfig unless their own module's settings say otherwise.
 
       Left unset it follows `global.modules.storageClass`, and with that unset
-      too, the cluster's default StorageClass.
+      too, the cluster's default StorageClass (`defaultClusterStorageClass` of
+      the `global` ModuleConfig).
 
       A StorageClass is required: the module has no storage of its own to fall
       back to, so an installation where none of the three resolves brings up no

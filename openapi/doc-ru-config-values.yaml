@@ -43,11 +43,15 @@ properties:
       модуля (`Module/system-s3`).
   storageClass:
     description: |
-      StorageClass, из которого системное объектное хранилище заказывает тома —
-      по одному PersistentVolumeClaim на реплику Garage.
+      StorageClass для данных самого системного объектного хранилища: тома его
+      реплик Garage, по одному PersistentVolumeClaim на реплику. Параметр не
+      задаёт StorageClass других системных компонентов платформы: те берут
+      `defaultClusterStorageClass` из ModuleConfig `global`, если в настройках
+      их модуля не указано иное.
 
       Если параметр не задан, берётся `global.modules.storageClass`, а при его
-      отсутствии — StorageClass по умолчанию в кластере.
+      отсутствии — StorageClass по умолчанию в кластере
+      (`defaultClusterStorageClass` в ModuleConfig `global`).
 
       StorageClass обязателен: своего хранилища у модуля нет, поэтому на
       инсталляции, где не нашлось ни одного из трёх, data plane не
