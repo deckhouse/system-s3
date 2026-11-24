@@ -7,9 +7,6 @@
   by them when Deckhouse starts with empty values (see hooks/go/persistedca).
   Without it every start of Deckhouse issued a new CA, and every consumer that
   trusts the module's CA stopped trusting both endpoints.
-
-  The values hold the CA as module-sdk marshals it, the PEM already base64-encoded,
-  so it goes into data as it is.
 */ -}}
 ---
 apiVersion: v1
@@ -28,5 +25,5 @@ metadata:
     helm.sh/resource-policy: keep
 type: kubernetes.io/tls
 data:
-  tls.crt: {{ .Values.systemS3.internal.customWebhookCA.crt | quote }}
-  tls.key: {{ .Values.systemS3.internal.customWebhookCA.key | quote }}
+  tls.crt: {{ .Values.systemS3.internal.customWebhookCA.crt | b64enc | quote }}
+  tls.key: {{ .Values.systemS3.internal.customWebhookCA.key | b64enc | quote }}

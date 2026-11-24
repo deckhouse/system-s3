@@ -45,13 +45,13 @@ systemS3:
     controllerMetricsPort: 8080
     controllerMetricsProxyPort: 8080
     customWebhookCert:
-      ca: Zm9v
-      crt: Zm9v
-      key: Zm9v
+      ca: "-----BEGIN CERTIFICATE-----\nZm9v\n-----END CERTIFICATE-----\n"
+      crt: "-----BEGIN CERTIFICATE-----\nZm9v\n-----END CERTIFICATE-----\n"
+      key: "-----BEGIN EC PRIVATE KEY-----\nZm9v\n-----END EC PRIVATE KEY-----\n"
     customWebhookCA:
-      crt: Zm9v
-      key: Zm9v
+      crt: "-----BEGIN CERTIFICATE-----\nZm9v\n-----END CERTIFICATE-----\n"
+      key: "-----BEGIN EC PRIVATE KEY-----\nZm9v\n-----END EC PRIVATE KEY-----\n"
     garageCert:
-      ca: Zm9v
-      crt: Zm9v
-      key: Zm9v
+      ca: "-----BEGIN CERTIFICATE-----\nZm9v\n-----END CERTIFICATE-----\n"
+      crt: "-----BEGIN CERTIFICATE-----\nZm9v\n-----END CERTIFICATE-----\n"
+      key: "-----BEGIN EC PRIVATE KEY-----\nZm9v\n-----END EC PRIVATE KEY-----\n"

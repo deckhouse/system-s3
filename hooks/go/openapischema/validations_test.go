@@ -21,6 +21,9 @@ package openapischema
 
 import (
 	"bytes"
+	"encoding/base64"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -225,21 +228,7 @@ func usesOldSelf(expr string) bool {
 // addon-operator normally supplies, so the test skips when they are absent — a
 // skip says so, and CI has both.
 func TestRenderedChartKeepsEveryRBACObject(t *testing.T) {
-	helm, err := exec.LookPath("helm")
-	if err != nil {
-		t.Skip("helm is not installed; the rendered-chart guard needs it")
-	}
-
-	chart := filepath.Clean("../../..")
-	values := filepath.Join(chart, "hack", "helm-render-values.yaml")
-	if _, err := os.Stat(values); err != nil {
-		t.Skipf("no %s to render with: %v", values, err)
-	}
-
-	out, err := exec.Command(helm, "template", "system-s3", chart, "-f", values).Output()
-	if err != nil {
-		t.Fatalf("helm template: %v", err)
-	}
+	out := renderChart(t)
 
 	want := map[string]string{
 		// The controller's own permissions, and the binding that grants them.
@@ -283,4 +272,64 @@ func TestRenderedChartKeepsEveryRBACObject(t *testing.T) {
 			t.Errorf("%s points at %q, want %q", key, gotRef, wantRef)
 		}
 	}
+}
+
+// TestRenderedSecretsHoldBase64Data: the API server decodes every value under a
+// Secret's data as base64 and refuses the whole object otherwise, with "illegal
+// base64 data at input byte 0". The certificate hooks keep the PEM itself in the
+// values, and so does hack/helm-render-values.yaml.
+func TestRenderedSecretsHoldBase64Data(t *testing.T) {
+	out := renderChart(t)
+
+	secrets := 0
+	dec := yaml.NewDecoder(bytes.NewReader(out))
+	for {
+		var doc struct {
+			Kind     string                `yaml:"kind"`
+			Metadata struct{ Name string } `yaml:"metadata"`
+			Data     map[string]string     `yaml:"data"`
+		}
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("decode the rendered chart: %v", err)
+		}
+		if doc.Kind != "Secret" {
+			continue
+		}
+		secrets++
+		for key, value := range doc.Data {
+			if _, err := base64.StdEncoding.DecodeString(value); err != nil {
+				t.Errorf("Secret/%s: data.%s is not base64: %v", doc.Metadata.Name, key, err)
+			}
+		}
+	}
+	if secrets == 0 {
+		t.Fatal("no Secret in the rendered chart")
+	}
+}
+
+// renderChart renders the chart with plain helm and the values the
+// addon-operator normally supplies. It skips when either is absent — a skip
+// says so, and CI has both.
+func renderChart(t *testing.T) []byte {
+	t.Helper()
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm is not installed; the rendered-chart guard needs it")
+	}
+
+	chart := filepath.Clean("../../..")
+	values := filepath.Join(chart, "hack", "helm-render-values.yaml")
+	if _, err := os.Stat(values); err != nil {
+		t.Skipf("no %s to render with: %v", values, err)
+	}
+
+	out, err := exec.Command(helm, "template", "system-s3", chart, "-f", values).Output()
+	if err != nil {
+		t.Fatalf("helm template: %v", err)
+	}
+	return out
 }

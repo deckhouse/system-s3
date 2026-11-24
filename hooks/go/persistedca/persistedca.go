@@ -73,11 +73,15 @@ func Register(conf tlscertificate.GenSelfSignedTLSHookConf) bool {
 		NameSelector:      &pkg.NameSelector{MatchNames: []string{SecretName}},
 		JqFilter:          `{"crt": .data."tls.crt", "key": .data."tls.key"}`,
 	})
+	return registry.RegisterFunc(cfg, handler(conf))
+}
+
+func handler(conf tlscertificate.GenSelfSignedTLSHookConf) func(context.Context, *pkg.HookInput) error {
 	generate := tlscertificate.GenSelfSignedTLS(conf)
 	caPath := conf.CommonCAPath()
 
-	return registry.RegisterFunc(cfg, func(ctx context.Context, input *pkg.HookInput) error {
-		if hasCA(input.Values.Get(caPath)) {
+	return func(ctx context.Context, input *pkg.HookInput) error {
+		if hasCA(input.Values.Get(caPath), conf) {
 			return generate(ctx, input)
 		}
 		stored, err := objectpatch.UnmarshalToStruct[persisted](input.Snapshots, snapshotKey)
@@ -96,11 +100,12 @@ func Register(conf tlscertificate.GenSelfSignedTLSHookConf) bool {
 			// not happen quietly because a Secret was edited by hand.
 			return fmt.Errorf("the CA in Secret %s/%s is unusable: %w", conf.Namespace, SecretName, err)
 		}
-		raw, err := json.Marshal(auth)
+		ca := map[string]string{conf.CACertField(): string(auth.Cert), conf.CAKeyField(): string(auth.Key)}
+		raw, err := json.Marshal(ca)
 		if err != nil {
 			return fmt.Errorf("encode the persisted CA: %w", err)
 		}
-		input.Values.Set(caPath, auth)
+		input.Values.Set(caPath, ca)
 		input.Logger.Info("restored the module CA from its Secret", "secret", SecretName)
 
 		// module-sdk's Set records a patch and does not change what Get returns in
@@ -109,13 +114,14 @@ func Register(conf tlscertificate.GenSelfSignedTLSHookConf) bool {
 		restored := *input
 		restored.Values = overlay{PatchableValuesCollector: input.Values, path: caPath, raw: string(raw)}
 		return generate(ctx, &restored)
-	})
+	}
 }
 
 // hasCA reports whether the values hold a usable CA. The schema defaults the
 // path to an empty object, which is present and still no CA.
-func hasCA(v gjson.Result) bool {
-	return v.Get("crt").String() != "" && v.Get("key").String() != ""
+func hasCA(v gjson.Result, conf tlscertificate.GenSelfSignedTLSHookConf) bool {
+	return strings.Contains(v.Get(conf.CACertField()).String(), "BEGIN CERTIFICATE") &&
+		strings.Contains(v.Get(conf.CAKeyField()).String(), "PRIVATE KEY")
 }
 
 // authorityFrom turns the Secret's data back into the CA module-sdk works with,
