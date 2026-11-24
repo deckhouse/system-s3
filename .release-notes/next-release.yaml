@@ -4,14 +4,6 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
-improvements:
-  - "On DKP 1.78 and later, the `d8:system-capability:system-s3:view` and `d8:system-capability:system-s3:edit` roles also give read access to the `system-s3` ModuleConfig, and `edit` write access to it, and carry the standard titles and descriptions of the platform, as every capability of the DKP 1.78 role model does. The RBAC of the module is now declared in `rbac.yaml`, and the RBACv2 templates are written from it; clusters below DKP 1.78 keep the roles they had."
-
-fixes:
-  - "The module installs and updates again. Since v0.1.2 the `system-s3-ca` Secret carried the PEM of the module CA in `data` instead of its base64, the API server refused it with `illegal base64 data at input byte 0`, and the module release failed to install. The module also keeps its CA again: v0.1.2 could not read the CA back from the `system-s3-ca` Secret and issued a new one on every start of Deckhouse. Now the CA in that Secret is the one the module uses, so an update from v0.1.1 or v0.1.2 and a restart of Deckhouse leave it as it was, and clients that trust it keep trusting the module. The CA is still renewed when less than six months of its validity are left."
-
-docs:
-  - "The `storageClass` setting is described as the StorageClass for the data of the system object storage only, not for the platform's other system components; their default is `defaultClusterStorageClass` in the `global` ModuleConfig."
 
 # Optional sections — delete rather than leave empty.
 # new_features: []
