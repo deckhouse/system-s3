@@ -28,9 +28,10 @@ limitations under the License.
 //
 // The CA, key included, is therefore rendered into a Secret of its own
 // (templates/module-ca.yaml), and the certificate hooks are registered through
-// Register: before module-sdk's logic runs, a CA missing from the values is taken
-// from that Secret. The leaf certificates are then still signed by the CA they
-// carry, and nothing is re-issued.
+// Register: before module-sdk's logic runs, the CA in that Secret is put into the
+// values, over whatever CA they hold, unless module-sdk is due to renew it. The
+// leaf certificates are then still signed by the CA they carry, and nothing is
+// re-issued.
 package persistedca
 
 import (
@@ -39,6 +40,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	tlscertificate "github.com/deckhouse/module-sdk/common-hooks/tls-certificate"
 	"github.com/deckhouse/module-sdk/pkg"
@@ -52,6 +54,11 @@ import (
 const SecretName = "system-s3-ca"
 
 const snapshotKey = "persisted_ca"
+
+const (
+	defaultCAExpiry   = 24 * time.Hour * 365 * 10
+	defaultCAOutdated = 24 * time.Hour * 365 / 2
+)
 
 // persisted is the CA as the snapshot filter reads it out of the Secret: the
 // base64 of each PEM, as it is in the Secret's data.
@@ -81,9 +88,6 @@ func handler(conf tlscertificate.GenSelfSignedTLSHookConf) func(context.Context,
 	caPath := conf.CommonCAPath()
 
 	return func(ctx context.Context, input *pkg.HookInput) error {
-		if hasCA(input.Values.Get(caPath), conf) {
-			return generate(ctx, input)
-		}
 		stored, err := objectpatch.UnmarshalToStruct[persisted](input.Snapshots, snapshotKey)
 		if err != nil {
 			return fmt.Errorf("read the persisted CA: %w", err)
@@ -94,12 +98,23 @@ func handler(conf tlscertificate.GenSelfSignedTLSHookConf) func(context.Context,
 			return generate(ctx, input)
 		}
 		auth, err := authorityFrom(stored[0])
+		var due bool
+		if err == nil {
+			due, err = rotationDue(auth.Cert, conf)
+		}
 		if err != nil {
 			// A Secret that cannot be read back is reported, not replaced: a new
 			// CA is exactly what this package exists to prevent, and it should
 			// not happen quietly because a Secret was edited by hand.
 			return fmt.Errorf("the CA in Secret %s/%s is unusable: %w", conf.Namespace, SecretName, err)
 		}
+		if current := input.Values.Get(caPath); hasCA(current, conf) {
+			if due || holds(current, auth, conf) {
+				return generate(ctx, input)
+			}
+			input.Logger.Warn("replacing the module CA in the values with the one in its Secret", "secret", SecretName)
+		}
+
 		ca := map[string]string{conf.CACertField(): string(auth.Cert), conf.CAKeyField(): string(auth.Key)}
 		raw, err := json.Marshal(ca)
 		if err != nil {
@@ -115,6 +130,28 @@ func handler(conf tlscertificate.GenSelfSignedTLSHookConf) func(context.Context,
 		restored.Values = overlay{PatchableValuesCollector: input.Values, path: caPath, raw: string(raw)}
 		return generate(ctx, &restored)
 	}
+}
+
+func holds(v gjson.Result, auth *certificate.Authority, conf tlscertificate.GenSelfSignedTLSHookConf) bool {
+	return v.Get(conf.CACertField()).String() == string(auth.Cert) &&
+		v.Get(conf.CAKeyField()).String() == string(auth.Key)
+}
+
+// rotationDue applies the rule module-sdk renews the common CA by: a validity
+// other than CAExpiryDuration, or less than CAOutdatedDuration left.
+func rotationDue(crt []byte, conf tlscertificate.GenSelfSignedTLSHookConf) (bool, error) {
+	cert, err := certificate.ParseCertificate(crt)
+	if err != nil {
+		return false, fmt.Errorf("tls.crt: %w", err)
+	}
+	expiry, outdated := defaultCAExpiry, defaultCAOutdated
+	if conf.CAExpiryDuration != 0 {
+		expiry = conf.CAExpiryDuration
+	}
+	if conf.CAOutdatedDuration != 0 {
+		outdated = conf.CAOutdatedDuration
+	}
+	return cert.NotAfter.Sub(cert.NotBefore) != expiry || time.Until(cert.NotAfter) < outdated, nil
 }
 
 // hasCA reports whether the values hold a usable CA. The schema defaults the

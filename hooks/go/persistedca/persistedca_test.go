@@ -19,10 +19,18 @@ package persistedca
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"strings"
 	"testing"
+	"time"
 
 	tlscertificate "github.com/deckhouse/module-sdk/common-hooks/tls-certificate"
 	"github.com/deckhouse/module-sdk/pkg"
@@ -147,6 +155,15 @@ func testConf() tlscertificate.GenSelfSignedTLSHookConf {
 // underneath, and returns the values it leaves behind at path.
 func runHook(t *testing.T, ca map[string]any, secret *persisted, path string) gjson.Result {
 	t.Helper()
+	values, err := run(t, handler(testConf()), ca, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return valueAt(values, path)
+}
+
+func run(t *testing.T, hook func(context.Context, *pkg.HookInput) error, ca map[string]any, secret *persisted) (pkg.PatchableValuesCollector, error) {
+	t.Helper()
 	values := helpers.NewValues(map[string]any{
 		"global":   map[string]any{"discovery": map[string]any{"clusterDomain": "cluster.local"}},
 		"systemS3": map[string]any{"internal": map[string]any{"customWebhookCA": ca}},
@@ -156,12 +173,12 @@ func runHook(t *testing.T, ca map[string]any, secret *persisted, path string) gj
 		snaps.Add(snapshotKey, helpers.SnapshotFromObject(secret))
 	}
 	in := helpers.NewInputBuilder(t).WithSnapshots(snaps).WithValues(values).Build()
-	if err := handler(testConf())(context.Background(), in); err != nil {
-		t.Fatal(err)
-	}
+	return values, hook(context.Background(), in)
+}
 
+func valueAt(values pkg.PatchableValuesCollector, path string) gjson.Result {
 	pointer := "/" + strings.ReplaceAll(path, ".", "/")
-	var got gjson.Result
+	got := values.Get(path)
 	for _, op := range values.GetPatches() {
 		switch {
 		case op.Path == pointer:
@@ -215,5 +232,121 @@ func TestBase64ValuesTakeTheCAFromTheSecret(t *testing.T) {
 
 	if got := runHook(t, old, &stored, caPath+".crt").String(); got != string(auth.Cert) {
 		t.Errorf("the values hold a CA other than the Secret's: %q", got)
+	}
+}
+
+func values(auth *certificate.Authority) map[string]any {
+	return map[string]any{"crt": string(auth.Cert), "key": string(auth.Key)}
+}
+
+// caValidFor is a CA valid from notBefore for validity, written as module-sdk
+// writes one.
+func caValidFor(t *testing.T, notBefore time.Time, validity time.Duration) *certificate.Authority {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(time.Now().UnixNano()),
+		Subject:               pkix.Name{CommonName: "system-s3-webhooks"},
+		NotBefore:             notBefore,
+		NotAfter:              notBefore.Add(validity),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &certificate.Authority{
+		Cert: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		Key:  pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+	}
+}
+
+const tenYears = 24 * time.Hour * 365 * 10
+
+// TestTheSecretWinsOverAnotherCAInTheValues: v0.1.2 left a CA of its own in the
+// values while the Secret kept the one consumers trust. The Secret's CA is put
+// back, and the serving certificate is signed with it.
+func TestTheSecretWinsOverAnotherCAInTheValues(t *testing.T) {
+	a, b := newCA(t), newCA(t)
+	stored := secretData(a)
+
+	if got := runHook(t, values(b), &stored, caPath+".crt").String(); got != string(a.Cert) {
+		t.Errorf("the values hold a CA other than the Secret's: %q", got)
+	}
+	if got := runHook(t, values(b), &stored, "systemS3.internal.customWebhookCert.ca").String(); got != string(a.Cert) {
+		t.Errorf("the serving certificate is signed with a CA other than the Secret's: %q", got)
+	}
+}
+
+// TestARotationIsNotRolledBack: a CA in the Secret that module-sdk is due to
+// renew does not win; the renewed CA in the values stays, on this run and on
+// the next one, before the chart has written it into the Secret.
+func TestARotationIsNotRolledBack(t *testing.T) {
+	for name, due := range map[string]*certificate.Authority{
+		"less than half a year left": caValidFor(t, time.Now().Add(-tenYears+90*24*time.Hour), tenYears),
+		"another validity":           caValidFor(t, time.Now(), 365*24*time.Hour),
+	} {
+		stored := secretData(due)
+
+		values, err := run(t, handler(testConf()), map[string]any{}, &stored)
+		if err != nil {
+			t.Fatal(err)
+		}
+		crt, key := valueAt(values, caPath+".crt").String(), valueAt(values, caPath+".key").String()
+		if crt == string(due.Cert) || !strings.Contains(crt, "BEGIN CERTIFICATE") {
+			t.Errorf("%s: the CA due for renewal was not renewed: %q", name, crt)
+			continue
+		}
+		renewed := map[string]any{"crt": crt, "key": key}
+		if got := runHook(t, renewed, &stored, caPath+".crt").String(); got != crt {
+			t.Errorf("%s: the next run rolled the renewal back: %q", name, got)
+		}
+	}
+}
+
+// TestRotationDueIsModuleSDKsRule: rotationDue says "due" for exactly the CAs
+// module-sdk's own hook replaces.
+func TestRotationDueIsModuleSDKsRule(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		auth *certificate.Authority
+		due  bool
+	}{
+		{"fresh", newCA(t), false},
+		{"a validity of ten years", caValidFor(t, time.Now(), tenYears), false},
+		{"seven months left", caValidFor(t, time.Now().Add(-tenYears+210*24*time.Hour), tenYears), false},
+		{"five months left", caValidFor(t, time.Now().Add(-tenYears+150*24*time.Hour), tenYears), true},
+		{"a validity of one year", caValidFor(t, time.Now(), 365*24*time.Hour), true},
+	} {
+		due, err := rotationDue(c.auth.Cert, testConf())
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if due != c.due {
+			t.Errorf("%s: rotationDue=%v, want %v", c.name, due, c.due)
+		}
+		values, err := run(t, tlscertificate.GenSelfSignedTLS(testConf()), values(c.auth), nil)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if replaced := valueAt(values, caPath+".crt").String() != string(c.auth.Cert); replaced != due {
+			t.Errorf("%s: rotationDue=%v, module-sdk replaced it: %v", c.name, due, replaced)
+		}
+	}
+}
+
+func TestAnUnreadableSecretIsAnErrorWithACAInTheValues(t *testing.T) {
+	broken := persisted{Crt: base64.StdEncoding.EncodeToString([]byte("-----BEGIN CERTIFICATE-----\nZm9v\n-----END CERTIFICATE-----\n")), Key: secretData(newCA(t)).Key}
+	if _, err := run(t, handler(testConf()), values(newCA(t)), &broken); err == nil {
+		t.Error("a Secret whose certificate does not parse was accepted")
 	}
 }
