@@ -79,6 +79,7 @@ func main() {
 		fmt.Printf("unable to create NewLogger, err: %v\n", err)
 		os.Exit(1)
 	}
+	ctrl.SetLogger(baseLog.GetLogger())
 	log := baseLog.Named("main")
 
 	// The same binary, started by the migration Job to copy objects between two
